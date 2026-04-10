@@ -1,0 +1,29 @@
+# pre-commit hooks for DecisionLedger
+# Install: uv add --dev pre-commit && uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+#
+# Ruff only — no black, isort, flake8, or pylint. See STYLE.md.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      # Lint with autofix
+      - id: ruff
+        args: [--fix]
+      # Format (replaces black)
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        args: [--unsafe]   # Allow custom YAML tags in scenario configs
+      - id: check-toml
+      - id: end-of-file-fixer
+        exclude: "\\.(png|jpg|svg|ico)$"
+      - id: trailing-whitespace
+        exclude: "\\.(md)$"
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=5000]

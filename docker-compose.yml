@@ -1,0 +1,90 @@
+# Docker Compose V2 — no version key (deprecated; omit entirely for Compose V2)
+#
+# Brings up the full local development stack for the ATO Reasoner:
+#   Redis 7      — event queue (Streams) + sliding window feature store
+#   PostgreSQL 16 + pgvector — vector store (dense retrieval) + audit store
+#   Elasticsearch 8 — BM25 sparse retrieval
+#
+# M1 Max (ARM64) compatible: all images publish linux/arm64 manifests.
+#
+# Usage:
+#   docker compose up -d        Start all services in background
+#   docker compose down         Stop services (volumes preserved)
+#   docker compose down -v      Full reset — removes all volumes
+
+services:
+  # ---------------------------------------------------------------------------
+  # Redis — event queue (Streams) + dedup store + feature sliding windows
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --save 60 1
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 + pgvector — dense vector store + Decision Bundle audit store
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-account_takeover}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-account_takeover}
+      POSTGRES_DB: ${POSTGRES_DB:-account_takeover}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./infra/postgres/02_tables.sql:/docker-entrypoint-initdb.d/02_tables.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-account_takeover} -d ${POSTGRES_DB:-account_takeover}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Elasticsearch 8 — BM25 sparse retrieval for policy corpus
+  # Security disabled for local dev only. Never expose to public network.
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - cluster.routing.allocation.disk.threshold_enabled=false
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf http://localhost:9200/_cluster/health | grep -qE ''"status":"(green|yellow)"''',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
+  es_data:

@@ -1,0 +1,7 @@
+[tools]
+python = "3.11"
+# node = "22"          # Uncomment if needed
+# java = "temurin-21"  # Uncomment if needed
+
+[env]
+# PYTHONPATH = "src"   # Uncomment for src layout

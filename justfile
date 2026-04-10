@@ -1,0 +1,90 @@
+# project-name — justfile
+# Run `just` with no args to list all tasks.
+
+default:
+    @just --list
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+setup:
+    mise install
+    uv sync --all-extras
+    direnv allow
+
+sync:
+    uv sync
+
+lock:
+    uv lock
+
+add pkg:
+    uv add {{pkg}}
+
+# ─── Quality ─────────────────────────────────────────────────────────────────
+lint:
+    uv run ruff check src/ tests/
+
+format:
+    uv run ruff format src/ tests/
+
+format-check:
+    uv run ruff format --check src/ tests/
+
+typecheck:
+    uv run basedpyright src/
+
+test *args:
+    uv run pytest tests/ {{args}}
+
+check: lint format-check typecheck test
+
+# ─── ML Workflow ─────────────────────────────────────────────────────────────
+train *args:
+    uv run python -m PACKAGE_PLACEHOLDER.train {{args}}
+
+eval *args:
+    uv run python -m PACKAGE_PLACEHOLDER.evaluate {{args}}
+
+smoke:
+    @echo "Running smoke test..."
+    uv run python -m PACKAGE_PLACEHOLDER.train --max-steps 10 --smoke-test
+    uv run python -m PACKAGE_PLACEHOLDER.evaluate --smoke-test
+
+# ─── Infrastructure ──────────────────────────────────────────────────────────
+docker-build tag="latest":
+    docker build -t project-name:{{tag}} .
+
+docker-run tag="latest":
+    docker run --rm -it project-name:{{tag}}
+
+docker-shell tag="latest":
+    docker run --rm -it project-name:{{tag}} /bin/bash
+
+# ─── Utilities ───────────────────────────────────────────────────────────────
+clean:
+    find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    find . -name "*.pyc" -delete 2>/dev/null || true
+    rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage dist build
+
+# Render D2 architecture diagrams → SVG
+# Requires: brew install d2
+# Source:   docs/design/diagrams/*.d2
+# Output:   docs/assets/diagrams/*.svg  (commit these)
+# Layout:   components.d2 uses dagre (handles flat pipeline flow better);
+#           all other diagrams use elk (handles nested containers better).
+diagrams:
+    #!/usr/bin/env sh
+    set -e
+    for src in docs/design/diagrams/*.d2; do
+        name=$(basename "$src" .d2)
+        if [ "$name" = "components" ]; then
+            d2 --theme 0 "$src" "docs/assets/diagrams/${name}.svg"
+        else
+            d2 --theme 0 --layout elk "$src" "docs/assets/diagrams/${name}.svg"
+        fi
+    done
+
+git:
+    lazygit
+
+pr:
+    gh pr create --fill
