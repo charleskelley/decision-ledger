@@ -1,0 +1,175 @@
+###############################################################################
+# DecisionLedger — Reasoner ↔ Framework Handoff
+#
+# Shows the integration boundary between a domain reasoner (ATO reference
+# implementation) and the DecisionLedger framework. The handoff happens at
+# a single point: build_observation() produces an Observation that the
+# framework pipeline consumes.
+#
+# Render:  d2 --theme 0 reasoner-handoff.d2 ../../assets/diagrams/reasoner-handoff.svg
+# Ref:     docs/design/reasoner-handoff.md
+###############################################################################
+
+title: |md
+  # Reasoner ↔ Framework Handoff
+| {near: top-center}
+
+direction: right
+
+###############################################################################
+# Domain layer (left boundary)
+###############################################################################
+
+domain: Domain Layer (ATO Reasoner) {
+  style.fill: "#dae8fc"
+  style.stroke: "#6c8ebf"
+  style.stroke-width: 2
+
+  login_event: LoginEvent {
+    tooltip: "Raw authentication event. Schema owned entirely by the domain."
+    style.fill: "#dae8fc"
+    style.stroke: "#6c8ebf"
+  }
+
+  features: AtoFeatureVector {
+    tooltip: "Computed sliding-window behavioural features."
+    style.fill: "#dae8fc"
+    style.stroke: "#6c8ebf"
+  }
+
+  scorer_output: ScorerOutput {
+    tooltip: "XGBoost risk score, top SHAP signals, routing decision."
+    style.fill: "#dae8fc"
+    style.stroke: "#6c8ebf"
+  }
+
+  assembler: build_observation() {
+    shape: diamond
+    tooltip: "The only function that crosses the domain → framework boundary. Translates three domain artifacts into framework contracts."
+    style.fill: "#6c8ebf"
+    style.stroke: "#6c8ebf"
+    style.font-color: "#ffffff"
+  }
+
+  domain.login_event -> domain.assembler
+  domain.features -> domain.assembler
+  domain.scorer_output -> domain.assembler
+}
+
+###############################################################################
+# Observation (handoff payload)
+###############################################################################
+
+observation: Observation {
+  style.fill: "#f5f5f5"
+  style.stroke: "#333333"
+  style.stroke-width: 2
+
+  reasoner_context: ReasonerContext {
+    tooltip: "Generic ML evidence lattice: model identity, inference latency, label, feature_set, attribution."
+    style.fill: "#d5e8d4"
+    style.stroke: "#82b366"
+  }
+
+  gate_context: GateContext {
+    tooltip: "Policy gate context: prompt_template_id, jurisdictions, risk_tier, template_vars. Required on ALL observations."
+    style.fill: "#d5e8d4"
+    style.stroke: "#82b366"
+  }
+
+  fast_path_record: FastPathRecord {
+    tooltip: "Fast-path provenance: model_id, risk_score, threshold_rule, feature_hash. Present only on FAST_PATH_ALLOW / FAST_PATH_BLOCK."
+    style.fill: "#fff2cc"
+    style.stroke: "#d6b656"
+  }
+}
+
+###############################################################################
+# Framework pipeline (right boundary)
+###############################################################################
+
+framework: Framework Pipeline (DecisionLedger) {
+  style.fill: "#d5e8d4"
+  style.stroke: "#82b366"
+  style.stroke-width: 2
+
+  routing: Route Decision {
+    shape: diamond
+    tooltip: "ROUTE_TO_GATE or FAST_PATH_ALLOW/BLOCK"
+    style.fill: "#82b366"
+    style.stroke: "#82b366"
+    style.font-color: "#ffffff"
+  }
+
+  gate: Policy Gate {
+    tooltip: "Retrieves policy snippets (pgvector + ES). Invokes LLM with rendered prompt. Produces PolicyGateOutput."
+    style.fill: "#d5e8d4"
+    style.stroke: "#82b366"
+  }
+
+  fast_path: Fast Path {
+    tooltip: "Bypasses live LLM invocation. Enforces fast-path action directly. GateContext stored for shadow evaluation."
+    style.fill: "#fff2cc"
+    style.stroke: "#d6b656"
+  }
+
+  enforcement: Enforcement {
+    tooltip: "Deterministic rule-based action resolution. Re-runnable against cached gate output."
+    style.fill: "#d5e8d4"
+    style.stroke: "#82b366"
+  }
+
+  bundle: Decision Bundle {
+    tooltip: "Complete audit record: raw event, reasoner context, gate context, rendered prompt, LLM response, enforcement decision."
+    style.fill: "#d5e8d4"
+    style.stroke: "#82b366"
+  }
+
+  framework.routing -> framework.gate: "ROUTE_TO_GATE" {
+    style.stroke: "#82b366"
+  }
+  framework.routing -> framework.fast_path: "FAST_PATH_ALLOW\nFAST_PATH_BLOCK" {
+    style.stroke: "#d6b656"
+  }
+  framework.gate -> framework.enforcement
+  framework.fast_path -> framework.enforcement
+  framework.enforcement -> framework.bundle
+}
+
+###############################################################################
+# Cross-boundary flows
+###############################################################################
+
+domain.assembler -> observation: "assembled Observation" {
+  style.stroke: "#333333"
+  style.stroke-width: 2
+}
+
+observation -> framework.routing {
+  style.stroke: "#333333"
+  style.stroke-width: 2
+}
+
+###############################################################################
+# Observation fields → framework consumption
+###############################################################################
+
+observation.reasoner_context -> framework.bundle: "stored verbatim" {
+  style.stroke: "#82b366"
+  style.stroke-dash: 4
+}
+
+observation.gate_context -> framework.gate: "jurisdictions + risk_tier\nfor retrieval filtering;\ntemplate_vars for prompt render" {
+  style.stroke: "#82b366"
+  style.stroke-dash: 4
+}
+
+observation.gate_context -> framework.fast_path: "stored for shadow evaluation" {
+  style.stroke: "#d6b656"
+  style.stroke-dash: 4
+}
+
+observation.fast_path_record -> framework.bundle: "stored verbatim\n(fast path only)" {
+  style.stroke: "#d6b656"
+  style.stroke-dash: 4
+}

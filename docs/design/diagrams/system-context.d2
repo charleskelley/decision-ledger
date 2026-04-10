@@ -1,0 +1,67 @@
+###############################################################################
+# DecisionLedger — C4 Level 1: System Context
+#
+# Render:  d2 --theme 0 system-context.d2 ../../assets/diagrams/system-context.svg
+# Ref:     docs/design/architecture.md
+###############################################################################
+
+title: |md
+  # DecisionLedger — System Context
+| {near: top-center}
+
+direction: right
+
+###############################################################################
+# External systems and actors
+###############################################################################
+
+ai_ml_reasoner: AI/ML Reasoner {
+  style.fill: "#dae8fc"
+  style.stroke: "#6c8ebf"
+  tooltip: "Domain-specific ML/AI system (e.g. ATO Reasoner) that assembles Observations from raw events via Feature Engine → Scorer → Assembler and submits them to DecisionLedger via the ReasonerContext + GateContext contracts."
+}
+
+security_analyst: Decision Analyst {
+  shape: person
+  style.fill: "#dae8fc"
+  style.stroke: "#6c8ebf"
+  tooltip: "Inspects persisted Decision Bundles in PostgreSQL; runs the eval suite to review retrieval quality, faithfulness, and decision consistency."
+}
+
+###############################################################################
+# Systems
+###############################################################################
+
+decision_ledger: DecisionLedger {
+  style.fill: "#d5e8d4"
+  style.stroke: "#82b366"
+  style.font-size: 16
+  tooltip: "Governed decision framework: ML + LLM policy gate with deterministic enforcement and full audit replay."
+}
+
+openai: OpenAI API {
+  style.fill: "#f5f5f5"
+  style.stroke: "#666666"
+  tooltip: "LLM inference for the policy gate."
+}
+
+###############################################################################
+# Relationships
+###############################################################################
+
+ai_ml_reasoner -> decision_ledger: "Submits Observation\n(ReasonerContext + GateContext)" {
+  style.stroke: "#6c8ebf"
+}
+
+decision_ledger -> ai_ml_reasoner: "EnforcementDecision" {
+  style.stroke: "#82b366"
+}
+
+security_analyst -> decision_ledger: "Inspects bundles\nruns eval suite" {
+  style.stroke: "#6c8ebf"
+}
+
+decision_ledger -> openai: "Policy gate prompt\nreceives structured JSON output" {
+  style.stroke: "#666666"
+  style.stroke-dash: 4
+}

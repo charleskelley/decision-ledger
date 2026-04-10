@@ -1,0 +1,93 @@
+site_name: DecisionLedger
+docs_dir: docs
+site_description: A model-agnostic governed decision framework for AI systems.
+site_url: https://charleskelley.github.io/decision-ledger
+repo_url: https://github.com/charleskelley/decision-ledger
+repo_name: charleskelley/decision-ledger
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/decision-ledger-fullmark-mono-white-scalable.svg
+  favicon: assets/favicon.svg
+
+  font:
+    text: Outfit
+    code: JetBrains Mono
+
+  palette:
+    # Light mode — triggered by OS preference, togglable manually
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+    # Dark mode — triggered by OS preference, togglable manually
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - stylesheets/color-swatches.js
+
+nav:
+  - Home: index.md
+  - Design:
+    - Overview: design/index.md
+    - Architecture: design/architecture.md
+    - Pipeline: design/pipeline.md
+    - Data Model: design/data.md
+    - Interfaces: design/interface.md
+    - Infrastructure: design/infrastructure.md
+    - Evaluation: design/evaluation.md
+    - Decisions: design/decisions.md
+  - Development:
+    - Contributing: development/contributing.md
+    - Style Guide: development/style.md
+    - Design Palette: development/design-palette.md
+    - Docs Migration: development/docs-migration.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - tables
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search

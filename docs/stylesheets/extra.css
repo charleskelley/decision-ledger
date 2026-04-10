@@ -1,0 +1,166 @@
+/* =============================================================================
+   DecisionLedger — custom Material theme overrides
+   Design palette: Deep Teal & Charcoal
+   Light accent: #0d9488  |  Dark accent: #14b8a6
+   Light bg:     #f6f7f8  |  Dark bg:     #111416
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Light theme (scheme: default)
+   ----------------------------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  /* Primary — teal, used for nav header, active indicators */
+  --md-primary-fg-color:        #0d9488;
+  --md-primary-fg-color--light: rgba(13, 148, 136, 0.54);
+  --md-primary-fg-color--dark:  #086b62;
+  --md-primary-bg-color:        #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  /* Accent — links, focus rings, interactive highlights */
+  --md-accent-fg-color:              #0d9488;
+  --md-accent-fg-color--transparent: rgba(13, 148, 136, 0.08);
+  --md-accent-bg-color:              #ffffff;
+
+  /* Default foreground — body text (Structure token) */
+  --md-default-fg-color:          #1c2024;
+  --md-default-fg-color--light:   rgba(28, 32, 36, 0.54);
+  --md-default-fg-color--lighter: rgba(28, 32, 36, 0.32);
+  --md-default-fg-color--lightest: rgba(28, 32, 36, 0.07);
+
+  /* Default background — page canvas (Background token) */
+  --md-default-bg-color:          #f6f7f8;
+  --md-default-bg-color--light:   rgba(246, 247, 248, 0.7);
+  --md-default-bg-color--lighter: rgba(246, 247, 248, 0.3);
+  --md-default-bg-color--lightest: rgba(246, 247, 248, 0.07);
+
+  /* Code blocks — Surface token */
+  --md-code-fg-color: #1c2024;
+  --md-code-bg-color: #e9ecef;
+
+  /* Links */
+  --md-typeset-a-color: #0d9488;
+
+  /* Search result match highlight — Accent Subtle */
+  --md-search-result-match-color: rgba(13, 148, 136, 0.15);
+}
+
+/* -----------------------------------------------------------------------------
+   Dark theme (scheme: slate)
+   ----------------------------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  /* Primary — teal shifts slightly brighter on dark for visual weight parity */
+  --md-primary-fg-color:        #14b8a6;
+  --md-primary-fg-color--light: rgba(20, 184, 166, 0.54);
+  --md-primary-fg-color--dark:  #0d9488;
+  --md-primary-bg-color:        #111416;
+  --md-primary-bg-color--light: rgba(17, 20, 22, 0.7);
+
+  /* Accent */
+  --md-accent-fg-color:              #14b8a6;
+  --md-accent-fg-color--transparent: rgba(20, 184, 166, 0.08);
+  --md-accent-bg-color:              #111416;
+
+  /* Default foreground — Structure token dark variant */
+  --md-default-fg-color:           #e6eaed;
+  --md-default-fg-color--light:    rgba(230, 234, 237, 0.7);
+  --md-default-fg-color--lighter:  rgba(230, 234, 237, 0.5);
+  --md-default-fg-color--lightest: rgba(230, 234, 237, 0.07);
+
+  /* Default background — Background token dark */
+  --md-default-bg-color:           #111416;
+  --md-default-bg-color--light:    rgba(17, 20, 22, 0.7);
+  --md-default-bg-color--lighter:  rgba(17, 20, 22, 0.3);
+  --md-default-bg-color--lightest: rgba(17, 20, 22, 0.07);
+
+  /* Code blocks — Surface token dark */
+  --md-code-fg-color: #e6eaed;
+  --md-code-bg-color: #1a1e21;
+
+  /* Links */
+  --md-typeset-a-color: #14b8a6;
+
+  /* Search result match highlight */
+  --md-search-result-match-color: rgba(20, 184, 166, 0.15);
+}
+
+/* -----------------------------------------------------------------------------
+   Typeset — headings, blockquotes, tables
+   ----------------------------------------------------------------------------- */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-weight: 600;
+}
+
+/* H1 uses --md-default-fg-color--light by default in Material, which renders
+   as the Structure color at 54% opacity — a medium gray. Override to match
+   the full foreground color used by H2–H6 and body text. */
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+}
+
+/* -----------------------------------------------------------------------------
+   Color swatches — inline previews for hex/rgba tokens in code spans
+   ----------------------------------------------------------------------------- */
+.color-swatch {
+  display: inline-block;
+  width: 0.75em;
+  height: 0.75em;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  margin-right: 0.3em;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+[data-md-color-scheme="slate"] .color-swatch {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.md-typeset blockquote {
+  border-left-color: var(--md-primary-fg-color);
+  color: var(--md-default-fg-color--light);
+}
+
+/* Table borders — Border token */
+[data-md-color-scheme="default"] .md-typeset table:not([class]) th,
+[data-md-color-scheme="default"] .md-typeset table:not([class]) td {
+  border-color: #d5d9dd;
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th,
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) td {
+  border-color: #262c30;
+}
+
+/* Horizontal rules — Border token */
+[data-md-color-scheme="default"] .md-typeset hr {
+  border-color: #d5d9dd;
+}
+
+[data-md-color-scheme="slate"] .md-typeset hr {
+  border-color: #262c30;
+}
+
+/* -----------------------------------------------------------------------------
+   Footer — inherit page background, add a top border
+   ----------------------------------------------------------------------------- */
+.md-footer {
+  background-color: var(--md-default-bg-color);
+  border-top: 1px solid;
+}
+
+[data-md-color-scheme="default"] .md-footer {
+  border-color: #d5d9dd;
+}
+
+[data-md-color-scheme="slate"] .md-footer {
+  border-color: #262c30;
+}
+
+.md-footer-meta {
+  background-color: var(--md-default-bg-color);
+}
