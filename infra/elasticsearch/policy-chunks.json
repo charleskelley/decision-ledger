@@ -1,0 +1,59 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "similarity": {
+      "default": {
+        "type": "BM25",
+        "k1": 1.2,
+        "b": 0.75
+      }
+    }
+  },
+  "mappings": {
+    "_meta": {
+      "description": "BM25 sparse index over the ATO Reasoner policy corpus.",
+      "analyzer_strategy": "DR-13: text uses dual-analyzer multi-fields. text (english analyzer) handles natural language queries with stemming. text.keyword_search (standard analyzer) handles exact regulatory identifiers (AAL2, NIST 800-63B §5.2.3, INTERNAL-RISK-v2.1). Retriever must query both fields. See docs/design/decisions.md DR-13."
+    },
+    "properties": {
+      "chunk_id": {
+        "type": "keyword"
+      },
+      "policy_id": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "english"
+      },
+      "version": {
+        "type": "keyword"
+      },
+      "jurisdiction": {
+        "type": "keyword"
+      },
+      "risk_tier": {
+        "type": "keyword"
+      },
+      "section_path": {
+        "type": "text",
+        "analyzer": "english",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          }
+        }
+      },
+      "text": {
+        "type": "text",
+        "analyzer": "english",
+        "fields": {
+          "keyword_search": {
+            "type": "text",
+            "analyzer": "standard"
+          }
+        }
+      }
+    }
+  }
+}
