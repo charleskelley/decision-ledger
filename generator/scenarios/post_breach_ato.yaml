@@ -1,0 +1,56 @@
+scenario_id: post_breach_ato
+display_name: Post-Breach Account Takeover
+description: >
+  Attacker with valid credentials (sourced from a breach) accesses a target
+  account from a new device in a new geographic region, with a velocity spike
+  relative to the victim's baseline. The high success rate distinguishes this
+  from credential stuffing. Requires LLM policy gate reasoning over conflicting
+  policy guidance — NIST 800-63B recommends immediate session controls while
+  internal policy may prescribe progressive friction. Expected: HOLD or BLOCK.
+
+expected_actions:
+  - HOLD
+  - BLOCK
+
+generation:
+  user_count: 5
+  events_per_run: 25
+
+  velocity:
+    events_per_minute: 3.0     # Spike vs. victim's 0.4 baseline
+    jitter_factor: 0.2
+
+  device:
+    fingerprint_count: 3       # New device (unseen fingerprint for this account)
+    consistency: rotating
+
+  network:
+    ip_rotation: moderate
+    asn_rotation: low
+
+  geo:
+    mobility: erratic
+    impossible_travel: true    # Login from attacker geo shortly after victim's last login
+    country_count: 3
+
+  auth:
+    outcome_weights:
+      SUCCESS: 0.80            # High success — attacker has valid credentials
+      FAILURE: 0.20
+    method: PASSWORD
+
+notes: >
+  The ATO signature: valid credentials + new device + new geography + velocity
+  spike. The 80% success rate distinguishes this from stuffing. The impossible
+  travel flag (victim logged in from home, attacker logs in from another country
+  minutes later) should be the primary high-risk signal.
+
+  Policy conflict expected between:
+    - NIST 800-63B §7.1: Strong authentication required after credential compromise
+    - INTERNAL-RISK-v2.1: Velocity threshold for BLOCK is higher (false positive concern)
+    - INTERNAL-RISK-v1.0: Superseded by v2.1 — retrieval must prefer latest
+
+  The policy gate is invoked (ambiguous band) and should flag the jurisdiction
+  conflict, triggering the enforcement layer's conflict routing rule → HOLD
+  with review packet. BLOCK is also acceptable if the scorer's confidence is
+  high enough to bypass the gate.

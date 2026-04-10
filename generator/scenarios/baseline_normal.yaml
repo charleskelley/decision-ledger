@@ -1,0 +1,45 @@
+scenario_id: baseline_normal
+display_name: Baseline Normal
+description: >
+  Single user, single device, known location, normal velocity. Represents a
+  legitimate user with a well-established behavioral pattern. Provides the
+  statistical baseline against which all anomaly signals are calibrated.
+
+expected_actions:
+  - ALLOW
+
+generation:
+  user_count: 1
+  events_per_run: 50
+
+  velocity:
+    events_per_minute: 0.4     # ~1 login per 2.5 minutes — realistic active session cadence
+    jitter_factor: 0.3         # ±30% timing variation (natural human behavior)
+
+  device:
+    fingerprint_count: 1
+    consistency: stable
+
+  network:
+    ip_rotation: none
+    asn_rotation: none
+
+  geo:
+    mobility: static
+    impossible_travel: false
+    country_count: 1
+
+  auth:
+    outcome_weights:
+      SUCCESS: 0.95
+      FAILURE: 0.05
+    method: PASSWORD
+
+notes: >
+  Calibrated against DAS RBA dataset distributions for a representative normal
+  user: single-country logins, consistent device fingerprint, IP from a single
+  residential ASN, and low failure rate. The 0.4 events/min velocity reflects
+  realistic login cadence for an active session. This scenario establishes the
+  "safe" end of the scoring distribution — the XGBoost scorer should route
+  directly to ALLOW via the low-confidence fast path without invoking the LLM
+  policy gate.

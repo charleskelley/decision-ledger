@@ -1,0 +1,55 @@
+scenario_id: high_velocity_legitimate
+display_name: High Velocity Legitimate
+description: >
+  Legitimate high-frequency API client or automated system with elevated but
+  consistent velocity. Tests false positive containment — the system must not
+  block or permanently challenge legitimate high-frequency users. A consistent
+  device fingerprint, known IP, stable geography, and near-perfect success rate
+  are the distinguishing signals from an attack. Expected: ALLOW or CHALLENGE.
+
+expected_actions:
+  - ALLOW
+  - CHALLENGE
+
+generation:
+  user_count: 1
+  events_per_run: 200
+
+  velocity:
+    events_per_minute: 30.0    # High — but consistent and from a known system
+    jitter_factor: 0.03        # Very low jitter — automated system behavior
+
+  device:
+    fingerprint_count: 1       # Single stable fingerprint (dedicated API server)
+    consistency: stable
+
+  network:
+    ip_rotation: none          # Fixed IP — API server has a static address
+    asn_rotation: none
+
+  geo:
+    mobility: static           # Single datacenter location
+    impossible_travel: false
+    country_count: 1
+
+  auth:
+    outcome_weights:
+      SUCCESS: 0.99
+      FAILURE: 0.01            # Near-zero failure rate (service account credentials)
+    method: SSO                # Service-to-service SSO pattern
+
+notes: >
+  The challenge for the system: high velocity (30 events/min) without the
+  other attack signals. An attacker at this velocity would have: rotating IPs,
+  new devices, geographic spread, high failure rates. This scenario has none
+  of those. The scorer's novelty features should be low, device consistency
+  should be high, and the velocity signal should be offset by the consistency.
+
+  CHALLENGE is acceptable early in the account's history (before the system
+  has established that this is a legitimate high-frequency client). ALLOW is
+  expected once sufficient historical context exists. This tests the system's
+  ability to learn legitimate patterns without over-triggering on velocity alone.
+
+  See also: INTERNAL-RISK-v2.1 §4.2 — "API clients with established behavioral
+  patterns are exempt from velocity-based BLOCK rules; CHALLENGE is the
+  maximum action pending human review of usage pattern."

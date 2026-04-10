@@ -1,0 +1,54 @@
+scenario_id: geo_impossible
+display_name: Geographic Impossibility
+description: >
+  Consecutive logins from geographically distant locations within a time window
+  that makes physical travel impossible. Travel speed between locations exceeds
+  1,200 km/h — faster than any commercial aircraft. Classic impossible-travel
+  attack signature. Expected: BLOCK via fast path or enforcement rule.
+
+expected_actions:
+  - BLOCK
+
+generation:
+  user_count: 3
+  events_per_run: 20
+
+  velocity:
+    events_per_minute: 1.5
+    jitter_factor: 0.1
+
+  device:
+    fingerprint_count: 2       # Different device each location (separate logins)
+    consistency: rotating
+
+  network:
+    ip_rotation: moderate
+    asn_rotation: moderate
+
+  geo:
+    mobility: erratic
+    impossible_travel: true
+    min_travel_speed_kmh: 1200.0  # >900 km/h is impossible for commercial travel
+    country_count: 4              # Events placed in cities on different continents
+
+  auth:
+    outcome_weights:
+      SUCCESS: 0.75
+      FAILURE: 0.25
+    method: PASSWORD
+
+notes: >
+  The generator places consecutive events in cities separated by >5,000 km
+  with <30 minutes between events, producing travel speeds of 10,000+ km/h.
+  The impossible_travel boolean feature and travel_speed_kmh float are the
+  primary signals computed by the online feature layer.
+
+  Highest-confidence BLOCK scenario — the travel speed alone is definitive.
+  The XGBoost scorer should route to BLOCK via the high-confidence fast path
+  without LLM policy gate invocation. If the gate is invoked (e.g., first
+  event from a novel entity), it should cite NIST 800-63B §7.2 and FFIEC
+  guidance on anomalous geographic access patterns.
+
+  Note: this scenario also validates the travel_speed_kmh feature computation
+  in the online feature layer — if the feature value is wrong, the BLOCK
+  routing will fail. Feature layer tests for this scenario are critical.

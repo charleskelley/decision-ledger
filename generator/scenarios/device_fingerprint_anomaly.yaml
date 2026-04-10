@@ -1,0 +1,55 @@
+scenario_id: device_fingerprint_anomaly
+display_name: Device Fingerprint Anomaly
+description: >
+  Partial device fingerprint match — consistent with a browser update, OS upgrade,
+  or user switching between a desktop and laptop. The device_consistency_score
+  falls into the ambiguous zone (~0.5): not clearly the same device, not clearly
+  a new device. Other signals are clean: stable geography, known IP, normal
+  velocity, high success rate. Expected: CHALLENGE (step-up MFA).
+
+expected_actions:
+  - CHALLENGE
+
+generation:
+  user_count: 2
+  events_per_run: 30
+
+  velocity:
+    events_per_minute: 0.5
+    jitter_factor: 0.3
+
+  device:
+    fingerprint_count: 2
+    consistency: partial
+    partial_match_score: 0.52  # Forces device_consistency_score into the ambiguous zone
+
+  network:
+    ip_rotation: none
+    asn_rotation: none
+
+  geo:
+    mobility: static
+    impossible_travel: false
+    country_count: 1
+
+  auth:
+    outcome_weights:
+      SUCCESS: 0.85
+      FAILURE: 0.15
+    method: PASSWORD
+
+notes: >
+  partial_match_score of 0.52 places device_consistency_score just above the
+  midpoint — ambiguous enough to warrant friction, not suspicious enough to
+  warrant BLOCK. The mitigating factors (stable geo, known IP, normal velocity,
+  reasonable success rate) should keep the scorer in the ambiguous band and
+  route to the LLM policy gate.
+
+  The policy gate should reason: device anomaly present (requires MFA per
+  NIST 800-63B AAL2), but no corroborating attack signals → CHALLENGE is
+  the proportionate response. The citation should reference NIST 800-63B
+  §5.1.3 (MFA required when device confidence is below threshold).
+
+  This scenario tests the system's ability to distinguish "ambiguous device"
+  (CHALLENGE) from "clearly new device + new geo + velocity spike" (HOLD/BLOCK
+  as in post_breach_ato). The distinction is in the corroborating signals.
