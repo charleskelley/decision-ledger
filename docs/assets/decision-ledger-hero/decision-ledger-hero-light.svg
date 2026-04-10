@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 280" width="680" height="280" fill="none">
+  <!-- Mark -->
+  <g transform="translate(305,16) scale(0.88)">
+    <line x1="20" y1="10" x2="40" y2="33" stroke="#1c2024" stroke-width="3" stroke-linecap="round"/>
+    <line x1="60" y1="10" x2="40" y2="33" stroke="#1c2024" stroke-width="3" stroke-linecap="round"/>
+    <line x1="24" y1="40" x2="56" y2="40" stroke="#0d9488" stroke-width="3.5" stroke-linecap="round"/>
+    <line x1="26" y1="48" x2="54" y2="48" stroke="#0d9488" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+    <line x1="30" y1="54" x2="50" y2="54" stroke="#0d9488" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+    <line x1="34" y1="60" x2="46" y2="60" stroke="#0d9488" stroke-width="1.2" stroke-linecap="round" opacity="0.4"/>
+    <line x1="37" y1="66" x2="43" y2="66" stroke="#0d9488" stroke-width="1" stroke-linecap="round" opacity="0.3"/>
+    <line x1="40" y1="47" x2="20" y2="70" stroke="#1c2024" stroke-width="3" stroke-linecap="round"/>
+    <line x1="40" y1="47" x2="60" y2="70" stroke="#1c2024" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="340" y="118" font-family="Outfit, sans-serif" font-weight="500" font-size="34" fill="#1c2024" letter-spacing="-0.02em" text-anchor="middle">DecisionLedger</text>
+  <!-- Rule -->
+  <line x1="270" y1="134" x2="410" y2="134" stroke="#0d9488" stroke-width="1" stroke-linecap="round" opacity="0.25"/>
+  <!-- Tagline -->
+  <text x="340" y="154" font-family="JetBrains Mono, monospace" font-weight="400" font-size="12.5" fill="#6b7b86" text-anchor="middle" letter-spacing="0.01em">The control plane your AI system is missing</text>
+  <!-- Pills -->
+  <rect x="8" y="183" width="120" height="24" rx="12" fill="none" stroke="#d5d9dd"/>
+  <rect x="136" y="183" width="120" height="24" rx="12" fill="none" stroke="#d5d9dd"/>
+  <rect x="264" y="183" width="152" height="24" rx="12" fill="none" stroke="#d5d9dd"/>
+  <rect x="424" y="183" width="120" height="24" rx="12" fill="none" stroke="#d5d9dd"/>
+  <rect x="552" y="183" width="120" height="24" rx="12" fill="none" stroke="#d5d9dd"/>
+  <text x="68" y="199" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#0d9488" letter-spacing="0.02em" text-anchor="middle">Context Tracking</text>
+  <text x="196" y="199" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#0d9488" letter-spacing="0.02em" text-anchor="middle">Hybrid RAG</text>
+  <text x="340" y="199" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#0d9488" letter-spacing="0.02em" text-anchor="middle">Policy-Grounded LLM</text>
+  <text x="484" y="199" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#0d9488" letter-spacing="0.02em" text-anchor="middle">5D Eval</text>
+  <text x="612" y="199" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#0d9488" letter-spacing="0.02em" text-anchor="middle">Audit Replay</text>
+  <!-- Phrases -->
+  <text x="340" y="240" font-family="Outfit, sans-serif" font-weight="300" font-size="12" fill="#6b7b86" text-anchor="middle" opacity="0.9">Model-agnostic reasoning   ·   Governance at inference time   ·   Deterministic telemetry</text>
+  <text x="340" y="260" font-family="Outfit, sans-serif" font-weight="500" font-size="12" fill="#1c2024" text-anchor="middle" opacity="0.4">No black boxes.</text>
+</svg>
