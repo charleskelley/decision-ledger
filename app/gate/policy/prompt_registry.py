@@ -1,6 +1,6 @@
 """YamlPromptRegistry — file-based PromptRegistry implementation.
 
-Loads versioned prompt templates from YAML files in ``app/policy_gate/prompts/``
+Loads versioned prompt templates from YAML files in ``app/gate/policy/prompts/``
 at startup. This is the same structural pattern as the policy corpus builder: a
 directory of structured files is parsed into an in-memory lookup — no external
 store dependency.
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from core.gate import PromptTemplate
+from core.gate.policy import PromptTemplate
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -81,13 +81,13 @@ def _load_template(path: Path) -> PromptTemplate:
         template_id=raw.get("template_id", path.stem),
         version=raw["version"],
         description=raw["description"],
-        template_str=template_str,
+        template_text=template_str,
         required_vars=_extract_required_vars(template_str),
     )
 
 
 class YamlPromptRegistry:
-    """File-based PromptRegistry that loads from ``app/policy_gate/prompts/*.yaml``.
+    """File-based PromptRegistry that loads from ``app/gate/policy/prompts/*.yaml``.
 
     Templates are loaded once at startup. The prompts directory is the source
     of truth: adding a YAML file registers a new template. Templates are
@@ -97,7 +97,7 @@ class YamlPromptRegistry:
 
     Args:
         prompts_dir: Directory to scan for ``*.yaml`` template files.
-            Defaults to ``app/policy_gate/prompts/``. Override in tests
+            Defaults to ``app/gate/policy/prompts/``. Override in tests
             to point at a fixture directory.
 
     Raises:

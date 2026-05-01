@@ -36,21 +36,24 @@ class ReasonerRegistration(BaseModel):
             stable cross-bundle query key.
         reasoner_name: Human-readable display name for dashboards and
             audit reports (e.g., ``"ATO Reasoner"``).
+        allowed_gate_ids: Gate types this reasoner is authorized to
+            target via ``GateContext.gate_id``. The framework rejects any
+            Observation whose gate_id is not in this set.
         allowed_prompt_template_ids: Prompt templates this reasoner is
-            authorized to reference in ``GateContext.prompt_template_id``.
-            The framework rejects any Observation whose template_id is
-            not in this set. Must be non-empty.
+            authorized to reference via ``gate_config["template_id"]``.
+            Validated by convention — skipped when the key is absent
+            from gate_config. An empty frozenset means no restriction.
         allowed_jurisdictions: Regulatory jurisdictions this reasoner is
-            authorized to include in ``GateContext.jurisdictions``. The
-            framework rejects any Observation whose jurisdictions list
-            contains a value outside this set. An empty frozenset means
-            no jurisdiction restriction is configured for this reasoner.
+            authorized to claim via ``gate_config["jurisdictions"]``.
+            Validated by convention — skipped when the key is absent
+            from gate_config. An empty frozenset means no restriction.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     reasoner_id: str
     reasoner_name: str
+    allowed_gate_ids: frozenset[str]
     allowed_prompt_template_ids: frozenset[str]
     allowed_jurisdictions: frozenset[str]
 

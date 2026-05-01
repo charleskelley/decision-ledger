@@ -9,25 +9,25 @@ from __future__ import annotations
 
 import json
 
-from app.policy_gate.gate import (
-    _parse_gate_output,
+from app.gate.policy.gate import (
+    _parse_verdict,
     _render_prompt,
     _render_snippets,
 )
 from core.actions import DecisionAction
-from core.bundle import PolicySnippet
+from core.snippet import RetrievedSnippet
 
 
 def _make_snippet(
-    policy_id: str,
+    document_id: str,
     text: str = "Sample policy text.",
     *,
     jurisdiction: str = "US_FEDERAL",
     section_path: str = "Section 1",
-) -> PolicySnippet:
-    return PolicySnippet(
-        policy_id=policy_id,
-        title=f"Policy {policy_id}",
+) -> RetrievedSnippet:
+    return RetrievedSnippet(
+        document_id=document_id,
+        title=f"Policy {document_id}",
         version="1.0",
         jurisdiction=jurisdiction,
         section_path=section_path,
@@ -136,28 +136,28 @@ def test_render_prompt_multiple_vars():
 
 
 # ---------------------------------------------------------------------------
-# _parse_gate_output
+# _parse_verdict
 # ---------------------------------------------------------------------------
 
 
-def test_parse_gate_output_valid_json_returns_output():
-    result = _parse_gate_output(_valid_gate_json(), decision_id="dec-001")
+def test_parse_verdict_valid_json_returns_output():
+    result = _parse_verdict(_valid_gate_json(), decision_id="dec-001")
     assert result is not None
     assert result.permitted_actions == [DecisionAction.ALLOW]
     assert result.confidence == 0.88
 
 
-def test_parse_gate_output_invalid_json_returns_none():
-    result = _parse_gate_output("this is not json", decision_id="dec-001")
+def test_parse_verdict_invalid_json_returns_none():
+    result = _parse_verdict("this is not json", decision_id="dec-001")
     assert result is None
 
 
-def test_parse_gate_output_empty_string_returns_none():
-    result = _parse_gate_output("", decision_id="dec-001")
+def test_parse_verdict_empty_string_returns_none():
+    result = _parse_verdict("", decision_id="dec-001")
     assert result is None
 
 
-def test_parse_gate_output_missing_required_field_returns_none():
+def test_parse_verdict_missing_required_field_returns_none():
     # Missing 'rationale' — schema validation should fail
     data = json.dumps(
         {
@@ -169,21 +169,21 @@ def test_parse_gate_output_missing_required_field_returns_none():
             "escalation_reason": None,
         }
     )
-    result = _parse_gate_output(data, decision_id="dec-001")
+    result = _parse_verdict(data, decision_id="dec-001")
     assert result is None
 
 
-def test_parse_gate_output_extra_fields_are_ignored():
+def test_parse_verdict_extra_fields_are_ignored():
     # prompt_version and model_id are LLM-added fields absent from PolicyGateOutput
-    result = _parse_gate_output(
+    result = _parse_verdict(
         _valid_gate_json(prompt_version="ato-v1", model_id="gpt-4o-2024-08-06"),
         decision_id="dec-001",
     )
     assert result is not None
 
 
-def test_parse_gate_output_multiple_permitted_actions():
-    result = _parse_gate_output(
+def test_parse_verdict_multiple_permitted_actions():
+    result = _parse_verdict(
         _valid_gate_json(permitted_actions=["ALLOW", "CHALLENGE"]),
         decision_id="dec-001",
     )
@@ -192,8 +192,8 @@ def test_parse_gate_output_multiple_permitted_actions():
     assert DecisionAction.ALLOW in result.permitted_actions
 
 
-def test_parse_gate_output_escalate_to_human_true():
-    result = _parse_gate_output(
+def test_parse_verdict_escalate_to_human_true():
+    result = _parse_verdict(
         _valid_gate_json(
             escalate_to_human=True,
             escalation_reason="Jurisdiction conflict requires legal review.",
@@ -205,9 +205,9 @@ def test_parse_gate_output_escalate_to_human_true():
     assert result.escalation_reason is not None
 
 
-def test_parse_gate_output_confidence_out_of_range_returns_none():
+def test_parse_verdict_confidence_out_of_range_returns_none():
     # confidence > 1.0 should fail Pydantic field validation (le=1.0)
-    result = _parse_gate_output(
+    result = _parse_verdict(
         _valid_gate_json(confidence=1.5),
         decision_id="dec-001",
     )

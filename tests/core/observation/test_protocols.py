@@ -15,8 +15,8 @@ coverage without adding signal.
 
 from datetime import UTC, datetime
 
-from core.gate import GateRouting
 from core.observation import Observation
+from core.routes import GateRoute
 
 
 def test_login_event_satisfies_observation_protocol(login_event):
@@ -64,17 +64,17 @@ def test_observation_satisfied_by_any_conforming_type(
 ):
     # Any object with all required Observation fields satisfies the protocol,
     # regardless of inheritance. This is structural subtyping (PEP 544).
-    _ctx = gate_context  # capture before class scope
-    _rc = reasoner_context
+    _gate_context = gate_context  # capture before class scope
+    _reasoner_context = reasoner_context
 
     class MinimalObservation:
         event_id = "minimal-001"
         entity_id = login_event.entity_id
         entity_type = "vendor"
         timestamp = datetime.now(UTC)
-        routing = GateRouting.ROUTE_TO_GATE
-        reasoner_context = _rc
+        route = GateRoute.ROUTE_TO_GATE
+        reasoner_context = _reasoner_context
         fast_path_rationale = None
-        gate_context = _ctx
+        gate_context = _gate_context
 
     assert isinstance(MinimalObservation(), Observation)

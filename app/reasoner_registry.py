@@ -76,6 +76,7 @@ class StaticReasonerRegistry:
 ATO_REASONER_REGISTRATION = ReasonerRegistration(
     reasoner_id="ato-reasoner",
     reasoner_name="ATO Reasoner",
+    allowed_gate_ids=frozenset({"policy"}),
     allowed_prompt_template_ids=frozenset({"ato-v1"}),
     allowed_jurisdictions=frozenset({"US_FEDERAL", "US_STATE", "EU_GDPR", "INTERNAL"}),
 )

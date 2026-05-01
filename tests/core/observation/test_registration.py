@@ -48,12 +48,14 @@ class _RegistryStub:
 def _make_registration(
     *,
     reasoner_id: str = "ato-reasoner",
+    gate_ids: frozenset[str] = frozenset({"policy"}),
     template_ids: frozenset[str] = frozenset({"ato-v1"}),
     jurisdictions: frozenset[str] = frozenset({"US_FEDERAL", "INTERNAL"}),
 ) -> ReasonerRegistration:
     return ReasonerRegistration(
         reasoner_id=reasoner_id,
         reasoner_name="Test Reasoner",
+        allowed_gate_ids=gate_ids,
         allowed_prompt_template_ids=template_ids,
         allowed_jurisdictions=jurisdictions,
     )
@@ -67,6 +69,7 @@ def _make_registration(
 def test_reasoner_registration_construction():
     reg = _make_registration()
     assert reg.reasoner_id == "ato-reasoner"
+    assert "policy" in reg.allowed_gate_ids
     assert "ato-v1" in reg.allowed_prompt_template_ids
     assert "US_FEDERAL" in reg.allowed_jurisdictions
 
@@ -79,6 +82,7 @@ def test_reasoner_registration_is_immutable():
 
 def test_reasoner_registration_allowed_sets_are_frozensets():
     reg = _make_registration()
+    assert isinstance(reg.allowed_gate_ids, frozenset)
     assert isinstance(reg.allowed_prompt_template_ids, frozenset)
     assert isinstance(reg.allowed_jurisdictions, frozenset)
 
@@ -140,9 +144,10 @@ def test_validate_observation_passes_when_jurisdictions_empty(
     login_event, gate_context
 ):
     # Empty jurisdictions list means no filter — always permitted.
-    obs = login_event.model_copy(
-        update={"gate_context": gate_context.model_copy(update={"jurisdictions": []})}
+    ctx = gate_context.model_copy(
+        update={"gate_config": {"jurisdictions": [], "risk_tier": "STANDARD"}}
     )
+    obs = login_event.model_copy(update={"gate_context": ctx})
     registry = _RegistryStub(
         [_make_registration(jurisdictions=frozenset({"US_FEDERAL"}))]
     )
@@ -153,13 +158,15 @@ def test_validate_observation_passes_when_allowed_jurisdictions_empty(
     login_event, gate_context
 ):
     # Empty allowed_jurisdictions on the registration means no restriction.
-    obs = login_event.model_copy(
+    ctx = gate_context.model_copy(
         update={
-            "gate_context": gate_context.model_copy(
-                update={"jurisdictions": ["US_FEDERAL", "EU_GDPR"]}
-            )
+            "gate_config": {
+                "jurisdictions": ["US_FEDERAL", "EU_GDPR"],
+                "risk_tier": "STANDARD",
+            }
         }
     )
+    obs = login_event.model_copy(update={"gate_context": ctx})
     registry = _RegistryStub([_make_registration(jurisdictions=frozenset())])
     validate_observation(obs, registry=registry)
 
@@ -195,13 +202,15 @@ def test_validate_observation_raises_for_disallowed_template(login_event):
 def test_validate_observation_raises_for_disallowed_jurisdiction(
     login_event, gate_context
 ):
-    obs = login_event.model_copy(
+    ctx = gate_context.model_copy(
         update={
-            "gate_context": gate_context.model_copy(
-                update={"jurisdictions": ["US_FEDERAL", "EU_GDPR"]}
-            )
+            "gate_config": {
+                "jurisdictions": ["US_FEDERAL", "EU_GDPR"],
+                "risk_tier": "STANDARD",
+            }
         }
     )
+    obs = login_event.model_copy(update={"gate_context": ctx})
     registry = _RegistryStub(
         [_make_registration(jurisdictions=frozenset({"US_FEDERAL"}))]
     )

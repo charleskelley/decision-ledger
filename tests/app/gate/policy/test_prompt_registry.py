@@ -3,7 +3,7 @@
 Tests are split into two groups:
 - PromptTemplate contract tests: pure Pydantic model validation, no filesystem.
 - YamlPromptRegistry tests: use the real prompts/ directory (ato-v1.yaml).
-  These tests depend on app/policy_gate/prompts/ato-v1.yaml being present.
+  These tests depend on app/gate/policy/prompts/ato-v1.yaml being present.
   They do not require Docker or any infrastructure.
 """
 
@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.policy_gate.prompt_registry import YamlPromptRegistry, _extract_required_vars
-from core.gate import PromptRegistry, PromptTemplate
+from app.gate.policy.prompt_registry import YamlPromptRegistry, _extract_required_vars
+from core.gate.policy import PromptRegistry, PromptTemplate
 
-_PROMPTS_DIR = Path(__file__).parents[3] / "app" / "policy_gate" / "prompts"
+_PROMPTS_DIR = Path(__file__).parents[4] / "app" / "gate" / "policy" / "prompts"
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ def test_prompt_template_required_vars_is_frozenset():
         template_id="test-v1",
         version="1.0.0",
         description="Test template.",
-        template_str="Hello {name}.",
+        template_text="Hello {name}.",
         required_vars=frozenset({"name"}),
     )
     assert isinstance(t.required_vars, frozenset)
@@ -64,7 +64,7 @@ def test_prompt_template_is_immutable():
         template_id="test-v1",
         version="1.0.0",
         description="Test.",
-        template_str="Hello {name}.",
+        template_text="Hello {name}.",
         required_vars=frozenset({"name"}),
     )
     with pytest.raises(ValidationError):
@@ -89,7 +89,7 @@ def test_registry_loads_ato_v1(registry):
 
 def test_registry_ato_v1_has_policy_snippets_placeholder(registry):
     template = registry.get("ato-v1")
-    assert "{policy_snippets}" in template.template_str
+    assert "{policy_snippets}" in template.template_text
 
 
 def test_registry_ato_v1_required_vars_excludes_policy_snippets(registry):

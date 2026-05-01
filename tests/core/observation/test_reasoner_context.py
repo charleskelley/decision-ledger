@@ -1,4 +1,4 @@
-"""Behavioral tests for ReasonerContext, LabelType, and AttributionSummary.
+"""Behavioral tests for ReasonerContext, LabelType, Contribution, AttributionSummary.
 
 Key contracts:
 - ReasonerContext is immutable once constructed.
@@ -8,12 +8,21 @@ Key contracts:
 - AttributionSummary accepts any combination of its three optional fields,
   including all-None (valid but produces a low-quality audit record).
 - inference_latency_ms is non-negative.
+- Contribution.contribution accepts negative values — sign semantics are defined
+  by contribution_method (e.g., SHAP values are signed, attention scores
+  are not). The framework does not interpret the value.
+- Contribution is immutable once constructed.
 """
 
 import pytest
 from pydantic import ValidationError
 
-from core.observation import AttributionSummary, LabelType, ReasonerContext, Signal
+from core.observation import (
+    AttributionSummary,
+    Contribution,
+    LabelType,
+    ReasonerContext,
+)
 
 
 def _make_reasoner_context(**overrides) -> ReasonerContext:
@@ -50,21 +59,21 @@ def test_label_type_categorical_value():
 
 
 def test_reasoner_context_numerical_label_accepts_float():
-    ctx = _make_reasoner_context(label_type=LabelType.NUMERICAL, label_value=0.87)
-    assert ctx.label_value == 0.87
+    context = _make_reasoner_context(label_type=LabelType.NUMERICAL, label_value=0.87)
+    assert context.label_value == 0.87
 
 
 def test_reasoner_context_categorical_label_accepts_string():
-    ctx = _make_reasoner_context(
+    context = _make_reasoner_context(
         label_type=LabelType.CATEGORICAL,
         label_name="fraud_label",
         label_value="FRAUD",
     )
-    assert ctx.label_value == "FRAUD"
+    assert context.label_value == "FRAUD"
 
 
 def test_reasoner_context_feature_set_accepts_mixed_types():
-    ctx = _make_reasoner_context(
+    context = _make_reasoner_context(
         feature_set={
             "velocity": 3,
             "novelty": 0.7,
@@ -72,19 +81,19 @@ def test_reasoner_context_feature_set_accepts_mixed_types():
             "country": "US",
         }
     )
-    assert ctx.feature_set["velocity"] == 3
-    assert ctx.feature_set["impossible_travel"] is True
-    assert ctx.feature_set["country"] == "US"
+    assert context.feature_set["velocity"] == 3
+    assert context.feature_set["impossible_travel"] is True
+    assert context.feature_set["country"] == "US"
 
 
 def test_reasoner_context_attribution_is_optional():
-    ctx = _make_reasoner_context(attribution=None)
-    assert ctx.attribution is None
+    context = _make_reasoner_context(attribution=None)
+    assert context.attribution is None
 
 
 def test_reasoner_context_inference_latency_accepts_zero():
-    ctx = _make_reasoner_context(inference_latency_ms=0.0)
-    assert ctx.inference_latency_ms == 0.0
+    context = _make_reasoner_context(inference_latency_ms=0.0)
+    assert context.inference_latency_ms == 0.0
 
 
 def test_reasoner_context_inference_latency_rejects_negative():
@@ -93,14 +102,14 @@ def test_reasoner_context_inference_latency_rejects_negative():
 
 
 def test_reasoner_context_carries_reasoner_identity():
-    ctx = _make_reasoner_context(
+    context = _make_reasoner_context(
         reasoner_id="ato-reasoner",
         reasoner_name="ATO Reasoner",
         model_version="xgb-v1.2.0",
     )
-    assert ctx.reasoner_id == "ato-reasoner"
-    assert ctx.reasoner_name == "ATO Reasoner"
-    assert ctx.model_version == "xgb-v1.2.0"
+    assert context.reasoner_id == "ato-reasoner"
+    assert context.reasoner_name == "ATO Reasoner"
+    assert context.model_version == "xgb-v1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +118,9 @@ def test_reasoner_context_carries_reasoner_identity():
 
 
 def test_reasoner_context_is_immutable():
-    ctx = _make_reasoner_context()
+    context = _make_reasoner_context()
     with pytest.raises(ValidationError):
-        ctx.label_value = 0.99
+        context.label_value = 0.99
 
 
 # ---------------------------------------------------------------------------
@@ -121,16 +130,21 @@ def test_reasoner_context_is_immutable():
 
 def test_attribution_summary_all_none_is_valid():
     summary = AttributionSummary()
-    assert summary.observation_signals is None
+    assert summary.feature_contributions is None
     assert summary.feature_importance is None
     assert summary.narrative is None
 
 
-def test_attribution_summary_with_observation_signals():
-    signal = Signal(feature_name="velocity_1min", shap_value=0.31, raw_value=5.0)
-    summary = AttributionSummary(observation_signals=[signal])
-    assert len(summary.observation_signals) == 1
-    assert summary.observation_signals[0].feature_name == "velocity_1min"
+def test_attribution_summary_with_feature_contributions():
+    signal = Contribution(
+        feature_name="velocity_1min",
+        value=0.31,
+        method="shap",
+        feature_value=5.0,
+    )
+    summary = AttributionSummary(feature_contributions=[signal])
+    assert len(summary.feature_contributions) == 1
+    assert summary.feature_contributions[0].feature_name == "velocity_1min"
 
 
 def test_attribution_summary_with_feature_importance():
@@ -147,13 +161,18 @@ def test_attribution_summary_with_narrative():
 
 
 def test_attribution_summary_accepts_all_fields_simultaneously():
-    signal = Signal(feature_name="geo_novelty", shap_value=0.22, raw_value=1.0)
+    signal = Contribution(
+        feature_name="geo_novelty",
+        value=0.22,
+        method="shap",
+        feature_value=1.0,
+    )
     summary = AttributionSummary(
-        observation_signals=[signal],
+        feature_contributions=[signal],
         feature_importance={"geo_novelty": 0.25},
         narrative="New country access is the dominant signal.",
     )
-    assert summary.observation_signals is not None
+    assert summary.feature_contributions is not None
     assert summary.feature_importance is not None
     assert summary.narrative is not None
 
@@ -171,5 +190,44 @@ def test_attribution_summary_is_immutable():
 
 def test_reasoner_context_stores_attribution_verbatim(reasoner_context):
     assert reasoner_context.attribution is not None
-    assert reasoner_context.attribution.observation_signals is not None
-    assert len(reasoner_context.attribution.observation_signals) == 1
+    assert reasoner_context.attribution.feature_contributions is not None
+    assert len(reasoner_context.attribution.feature_contributions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Contribution
+# ---------------------------------------------------------------------------
+
+
+def test_signal_contribution_may_be_negative():
+    # Negative contributions are valid — sign semantics depend on the
+    # contribution_method (e.g., negative SHAP = pushes away from positive
+    # class). The framework must not reject negative values.
+    signal = Contribution(
+        feature_name="device_novelty",
+        value=-0.12,
+        method="shap",
+        feature_value=0.0,
+    )
+    assert signal.value == -0.12
+
+
+def test_signal_contribution_may_be_positive():
+    signal = Contribution(
+        feature_name="velocity_1min",
+        value=0.31,
+        method="shap",
+        feature_value=12.0,
+    )
+    assert signal.value == 0.31
+
+
+def test_signal_is_immutable():
+    signal = Contribution(
+        feature_name="velocity_1min",
+        value=0.05,
+        method="shap",
+        feature_value=1.0,
+    )
+    with pytest.raises(ValidationError):
+        signal.value = 0.99
