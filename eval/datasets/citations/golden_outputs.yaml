@@ -1,0 +1,56 @@
+# Citation-dimension golden output set.
+#
+# Each case is a (claim, cited snippet) pair the judges score for relevance
+# and entailment. Hand-curated from canonical scenario gate outputs.
+#
+# Add cases as the gate produces them on new scenarios. The dimension scales
+# linearly with case count; max_concurrency in the runner caps in-flight
+# judge calls.
+#
+# This is a starter set of 4 illustrative cases. Expand as gate output is
+# captured for each canonical scenario.
+
+cases:
+  - case_id: c01-stepup-on-new-device
+    claim: "Step-up authentication is required when a session is initiated from a previously unobserved device."
+    document_id: NIST-SP-800-63B
+    document_version: "Rev-3"
+    section_path: "5.1.7"
+    snippet_text: |
+      When a verifier observes a session originating from a device or context
+      not previously associated with the subscriber, the verifier SHALL re-bind
+      the authenticator through a step-up process at AAL2 or higher prior to
+      granting access.
+
+  - case_id: c02-impossible-travel-block
+    claim: "Impossible travel patterns mandate an immediate session block."
+    document_id: INT-GEO-RISK-V1
+    document_version: "1.0"
+    section_path: "2.3"
+    snippet_text: |
+      Authentication attempts whose source geolocation is incompatible with
+      the subject's prior session location given the elapsed time (commonly
+      >1000 km/h apparent velocity) must be treated as impossible-travel
+      events. The pipeline SHALL block the session.
+
+  - case_id: c03-velocity-rate-limit
+    claim: "Sustained authentication velocity exceeding the per-account threshold triggers rate limiting."
+    document_id: INT-VELOCITY-V1
+    document_version: "1.3"
+    section_path: "4.1"
+    snippet_text: |
+      When the rolling 60-minute authentication count for an account exceeds
+      the configured threshold, the system applies progressive rate-limiting
+      controls and routes subsequent attempts through CHALLENGE or HOLD
+      pending review.
+
+  - case_id: c04-novel-entity-hold
+    claim: "Newly registered accounts with insufficient history are held for review on suspicious authentication patterns."
+    document_id: INT-NOVEL-ENTITY-V1
+    document_version: "1.0"
+    section_path: "3.2"
+    snippet_text: |
+      Accounts created within the prior 7 days, or with fewer than 5 prior
+      successful authentications, are subject to enhanced scrutiny. Suspicious
+      authentication patterns from these accounts route to HOLD with an
+      analyst review packet rather than to ALLOW or BLOCK.

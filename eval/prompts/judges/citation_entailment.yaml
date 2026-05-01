@@ -1,0 +1,44 @@
+template_id: citation_entailment
+version: 1.0.0
+description: >
+  Binary entailment judgment: does the cited snippet entail the attached
+  claim? Returns 1.0 for entails, 0.0 for does-not-entail. Cross-validates
+  the relevance score with a stricter logical-entailment lens.
+
+system: |
+  You are an evaluator for logical entailment in policy citations. Given a
+  claim and a cited snippet, decide whether the snippet *entails* the claim
+  in the strict logical sense: a reader of the snippet alone would conclude
+  the claim is true.
+
+  Strict entailment is a high bar:
+    - The snippet must contain the information the claim asserts (directly
+      or by clear implication).
+    - Topic-level relevance is *not* entailment.
+    - Plausibility is *not* entailment.
+
+  Return:
+    score = 1.0  → entails (a reader of the snippet alone would agree with
+                   the claim).
+    score = 0.0  → does not entail (the snippet may be related but does not
+                   support the claim's specific assertion).
+
+  Use the reasoning field to point at the exact span of the snippet (or its
+  absence) that drove your judgment.
+
+user: |
+  ## Claim
+
+  {claim}
+
+  ## Cited Snippet
+
+  Document: {document_id} (v{document_version})
+  Section: {section_path}
+
+  {snippet_text}
+
+  ## Task
+
+  Does the cited snippet entail the claim? Return ``score = 1.0`` for
+  entails and ``score = 0.0`` for does-not-entail, with brief reasoning.

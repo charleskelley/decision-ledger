@@ -1,0 +1,118 @@
+# Retrieval-dimension golden queries.
+#
+# Hand-curated test cases with annotated relevant document IDs. The dimension
+# scores precision@k, recall@k, MRR, and zero-tolerance version + jurisdiction
+# filters against this set.
+#
+# Adding a query: pick a representative authentication-policy intent, identify
+# the document(s) that should appear in the top-k, and pick the document
+# expected to rank #1 (with its current version). When a corpus document is
+# superseded, update expected_top_document_id and expected_top_version to the
+# new version — that's exactly the regression this dataset catches.
+#
+# Starter set (12 queries). Grow toward 30 over time as new policy areas are
+# added to the corpus.
+
+queries:
+  # ── Direct regulatory queries ─────────────────────────────────────────
+  - query_id: q01-aal2-stepup
+    query: "AAL2 step-up authentication for high-risk authentication events"
+    relevant_document_ids:
+      - NIST-SP-800-63B
+      - INT-MFA-REQ-V2
+    expected_top_document_id: NIST-SP-800-63B
+    expected_top_version: "Rev-3"
+
+  - query_id: q02-pci-mfa
+    query: "PCI DSS multi-factor authentication requirement administrative access"
+    relevant_document_ids:
+      - PCI-DSS-V4-REQ8
+      - INT-MFA-REQ-V2
+    expected_top_document_id: PCI-DSS-V4-REQ8
+    expected_top_version: "4.0"
+
+  - query_id: q03-fido2-passkey
+    query: "FIDO2 WebAuthn passkey phishing-resistant authenticator credential"
+    relevant_document_ids:
+      - FIDO2-WEBAUTHN-CRED
+    expected_top_document_id: FIDO2-WEBAUTHN-CRED
+    expected_top_version: "Level2"
+
+  # ── Internal policy queries ───────────────────────────────────────────
+  - query_id: q04-velocity-rate-limit
+    query: "velocity rate limiting credential stuffing burst authentication"
+    relevant_document_ids:
+      - INT-VELOCITY-V1
+      - INT-CRED-STUFF-V2
+    expected_top_document_id: INT-VELOCITY-V1
+    expected_top_version: "1.3"
+
+  - query_id: q05-novel-entity-hold
+    query: "new account novel entity insufficient history hold review"
+    relevant_document_ids:
+      - INT-NOVEL-ENTITY-V1
+      - INT-HOLD-QUEUE-V1
+    expected_top_document_id: INT-NOVEL-ENTITY-V1
+    expected_top_version: "1.0"
+
+  - query_id: q06-impossible-travel
+    query: "impossible travel geographic anomaly mandatory block authentication"
+    relevant_document_ids:
+      - INT-GEO-RISK-V1
+    expected_top_document_id: INT-GEO-RISK-V1
+    expected_top_version: "1.0"
+
+  - query_id: q07-device-fingerprint
+    query: "new unrecognized device fingerprint challenge authentication"
+    relevant_document_ids:
+      - INT-DEVICE-FP-V1
+      - INT-AUTH-RISK-V2
+    expected_top_document_id: INT-DEVICE-FP-V1
+    expected_top_version: "1.0"
+
+  # ── Version-resolution queries (latest wins over superseded) ──────────
+  - query_id: q08-auth-risk-controls-latest
+    query: "authentication risk controls policy step-up MFA requirements"
+    relevant_document_ids:
+      - INT-AUTH-RISK-V2
+    expected_top_document_id: INT-AUTH-RISK-V2
+    expected_top_version: "2.1"
+
+  - query_id: q09-ato-detection-latest
+    query: "account takeover detection response policy investigation playbook"
+    relevant_document_ids:
+      - INT-ATO-DETECT-V2
+    expected_top_document_id: INT-ATO-DETECT-V2
+    expected_top_version: "2.0"
+
+  # ── Jurisdiction-scoped queries (filter must hold) ────────────────────
+  - query_id: q10-eu-gdpr-auth
+    query: "GDPR authentication security personal data processing"
+    jurisdictions:
+      - EU_GDPR
+      - INTERNAL
+    relevant_document_ids:
+      - GDPR-ART32-SECURITY
+      - INT-DATA-MIN-GDPR-V1
+    expected_top_document_id: GDPR-ART32-SECURITY
+    expected_top_version: "2018"
+
+  - query_id: q11-us-federal-banking
+    query: "FFIEC layered security banking authentication risk-based"
+    jurisdictions:
+      - US_FEDERAL
+    relevant_document_ids:
+      - FFIEC-AUTH-GUIDANCE
+      - GLBA-SAFEGUARDS
+    expected_top_document_id: FFIEC-AUTH-GUIDANCE
+    expected_top_version: "2011-updated"
+
+  # ── High-value-account risk-tier query ────────────────────────────────
+  - query_id: q12-hva-policy
+    query: "high-value account elevated authentication mandatory passkey"
+    risk_tier: HIGH_VALUE
+    relevant_document_ids:
+      - INT-HVA-POLICY-V2
+      - INT-MFA-REQ-V2
+    expected_top_document_id: INT-HVA-POLICY-V2
+    expected_top_version: "2.0"
