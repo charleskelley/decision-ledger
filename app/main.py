@@ -21,7 +21,6 @@ import structlog
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
@@ -31,46 +30,10 @@ from app.gate.policy import PolicyGate, YamlPromptRegistry
 from app.monitoring import configure_logging
 from app.retrieval.retriever import PolicyRetriever
 from app.scorer import AtoScorer
+from app.settings import Settings
 from reasoner.account_takeover.events import LoginEvent  # noqa: TC001
 
 log = structlog.get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------------
-
-
-class Settings(BaseSettings):
-    """Environment-driven configuration with docker-compose defaults."""
-
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_user: str = "account_takeover"
-    postgres_password: str = "account_takeover"  # noqa: S105
-    postgres_db: str = "account_takeover"
-
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-
-    elasticsearch_url: str = "http://localhost:9200"
-
-    openai_api_key: str = ""
-
-    scorer_model_path: str = "app/scorer/models/ato-v1.ubj"
-
-    corpus_version: str = "unknown"
-
-    log_json: bool = True
-    log_level: str = "INFO"
-
-    @property
-    def postgres_dsn(self) -> str:
-        """Build a PostgreSQL connection string from components."""
-        return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
 
 
 # ---------------------------------------------------------------------------
