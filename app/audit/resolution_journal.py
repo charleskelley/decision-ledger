@@ -65,7 +65,7 @@ _CREATE_ATTEMPTS_TABLE = """
 CREATE TABLE IF NOT EXISTS decision_resolution_attempts (
     attempt_id        TEXT        PRIMARY KEY,
     decision_id       TEXT        NOT NULL,
-    sequence          INTEGER     NOT NULL,
+    attempt_sequence  INTEGER     NOT NULL,
     started_at        TIMESTAMPTZ NOT NULL,
     completed_at      TIMESTAMPTZ,
     resolver_kind     TEXT        NOT NULL,
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS decision_resolution_attempts (
     note              TEXT        NOT NULL,
     evidence          JSONB,
     payload           JSONB       NOT NULL,
-    UNIQUE (decision_id, sequence)
+    UNIQUE (decision_id, attempt_sequence)
 );
 """
 
@@ -145,7 +145,8 @@ class ResolutionJournal:
             cur.execute(
                 """
                 INSERT INTO decision_resolution_attempts
-                    (attempt_id, decision_id, sequence, started_at, completed_at,
+                    (attempt_id, decision_id, attempt_sequence,
+                     started_at, completed_at,
                      resolver_kind, resolver_id, status, resolution_action,
                      note, payload)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
@@ -180,7 +181,7 @@ class ResolutionJournal:
         )
 
     def load_attempts(self, decision_id: str) -> list[ResolutionAttempt]:
-        """Load all attempts for a decision, ordered by ``sequence`` ascending.
+        """Load all attempts for a decision, ordered by ``attempt_sequence`` ascending.
 
         Each row is reconstructed into the appropriate concrete subclass
         (``HumanResolutionAttempt`` etc.) via discriminated-union
@@ -199,7 +200,7 @@ class ResolutionJournal:
                 SELECT payload
                 FROM decision_resolution_attempts
                 WHERE decision_id = %s
-                ORDER BY sequence ASC
+                ORDER BY attempt_sequence ASC
                 """,
                 (decision_id,),
             )

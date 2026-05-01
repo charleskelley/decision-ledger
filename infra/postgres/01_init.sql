@@ -8,4 +8,3 @@ create extension if not exists vector;
 
 -- Project schema — all ATO Reasoner tables live here
 create schema if not exists account_takeover;
-

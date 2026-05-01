@@ -250,8 +250,8 @@ def write_postgres(
         cur.executemany(
             """
             INSERT INTO account_takeover.policy_chunks
-                (chunk_id, policy_id, version, jurisdiction, risk_tier,
-                 section_path, text, embedding)
+                (chunk_id, policy_id, policy_version, jurisdiction, risk_tier,
+                 section_path, chunk_text, embedding)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [

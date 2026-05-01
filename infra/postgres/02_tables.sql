@@ -21,25 +21,25 @@
 -- account_id: ATO domain business key — use for operational queries
 -- ---------------------------------------------------------------------------
 create table if not exists account_takeover.decision_bundles (
-    decision_id     uuid        primary key,
-    entity_id       uuid        not null,
-    account_id      text        not null,
-    created_at      timestamptz not null,
-    decision_action text        not null,
-    bundle          jsonb       not null
+    decision_id uuid primary key,
+    entity_id uuid not null,
+    account_id text not null,
+    created_at timestamptz not null,
+    decision_action text not null,
+    bundle jsonb not null
 );
 
 create index if not exists idx_decision_bundles_entity_id
-    on account_takeover.decision_bundles (entity_id);
+on account_takeover.decision_bundles (entity_id);
 
 create index if not exists idx_decision_bundles_account_id
-    on account_takeover.decision_bundles (account_id);
+on account_takeover.decision_bundles (account_id);
 
 create index if not exists idx_decision_bundles_created_at
-    on account_takeover.decision_bundles (created_at desc);
+on account_takeover.decision_bundles (created_at desc);
 
 create index if not exists idx_decision_bundles_decision_action
-    on account_takeover.decision_bundles (decision_action);
+on account_takeover.decision_bundles (decision_action);
 
 -- ---------------------------------------------------------------------------
 -- policy_chunks — pgvector HNSW index for dense policy retrieval
@@ -49,59 +49,60 @@ create index if not exists idx_decision_bundles_decision_action
 -- Current model: all-MiniLM-L6-v2 → 384 dimensions.
 -- Update vector(384) here and in the corpus loader if the model changes.
 --
--- risk_tier is nullable: NULL means the chunk applies to all tiers.
+-- risk_tier is nullable: null means the chunk applies to all tiers.
 -- Populated chunks are filtered by jurisdiction and risk_tier at retrieval
 -- time before the HNSW index is queried.
 -- ---------------------------------------------------------------------------
 create table if not exists account_takeover.policy_chunks (
-    chunk_id      uuid        primary key default gen_random_uuid(),
-    policy_id     text        not null,
-    version       text        not null,
-    jurisdiction  text        not null,
-    risk_tier     text,
-    section_path  text        not null,
-    text          text        not null,
-    embedding     vector(384) not null,
-    created_at    timestamptz not null default now()
+    chunk_id uuid primary key default gen_random_uuid(),
+    policy_id text not null,
+    policy_version text not null,
+    jurisdiction text not null,
+    risk_tier text,
+    section_path text not null,
+    chunk_text text not null,
+    embedding vector(384) not null,
+    created_at timestamptz not null default now()
 );
 
 create index if not exists idx_policy_chunks_hnsw
-    on account_takeover.policy_chunks
-    using hnsw (embedding vector_cosine_ops);
+on account_takeover.policy_chunks
+using hnsw (embedding vector_cosine_ops);
 
 create index if not exists idx_policy_chunks_policy_version
-    on account_takeover.policy_chunks (policy_id, version);
+on account_takeover.policy_chunks (policy_id, policy_version);
 
 create index if not exists idx_policy_chunks_jurisdiction
-    on account_takeover.policy_chunks (jurisdiction);
+on account_takeover.policy_chunks (jurisdiction);
 
 -- ---------------------------------------------------------------------------
 -- replay_logs — deterministic enforcement replay audit trail
 --
--- One row per replay invocation. matched = true means re-executing enforcement
--- against the cached policy_gate_output produced the same decision_action as
--- the original decision. diff is populated only when matched = false and
--- contains the action discrepancy for investigation.
+-- One row per replay invocation. is_matched = true means re-executing
+-- enforcement against the cached policy_gate_output produced the same
+-- decision_action as the original decision. diff is populated only when
+-- is_matched = false and contains the action discrepancy for investigation.
 -- ---------------------------------------------------------------------------
 create table if not exists account_takeover.replay_logs (
-    replay_id    uuid        primary key default gen_random_uuid(),
-    decision_id  uuid        not null
-                             references account_takeover.decision_bundles (decision_id),
-    replayed_at  timestamptz not null default now(),
-    matched      boolean     not null,
-    diff         jsonb
+    replay_id uuid primary key default gen_random_uuid(),
+    decision_id uuid not null references account_takeover.decision_bundles (
+        decision_id
+    ),
+    replayed_at timestamptz not null default now(),
+    is_matched boolean not null,
+    diff jsonb
 );
 
 create index if not exists idx_replay_logs_decision_id
-    on account_takeover.replay_logs (decision_id);
+on account_takeover.replay_logs (decision_id);
 
 -- ---------------------------------------------------------------------------
 -- decision_resolution_attempts — append-only log of resolution attempts
 -- against non-terminal DecisionBundles (CHALLENGE / HOLD).
 --
 -- Each row is immutable. Multiple rows per decision_id are ordered by
--- (decision_id, sequence). The realized action of a decision is computed at
--- read time by folding the attempt chain — never stored.
+-- (decision_id, attempt_sequence). The realized action of a decision is
+-- computed at read time by folding the attempt chain — never stored.
 --
 -- Per DR-21, the typed-subclass payload (one of HumanResolutionAttempt,
 -- SlaDefaultResolutionAttempt, …) is stored verbatim in the `payload`
@@ -115,24 +116,25 @@ create index if not exists idx_replay_logs_decision_id
 -- intermediate paths). PENDING / EXPIRED attempts may have null action.
 -- ---------------------------------------------------------------------------
 create table if not exists account_takeover.decision_resolution_attempts (
-    attempt_id        uuid        primary key,
-    decision_id       uuid        not null
-                                  references account_takeover.decision_bundles (decision_id),
-    sequence          integer     not null,
-    started_at        timestamptz not null,
-    completed_at      timestamptz,
-    resolver_kind     text        not null,
-    resolver_id       text        not null,
-    status            text        not null,
+    attempt_id uuid primary key,
+    decision_id uuid not null references account_takeover.decision_bundles (
+        decision_id
+    ),
+    attempt_sequence integer not null,
+    started_at timestamptz not null,
+    completed_at timestamptz,
+    resolver_kind text not null,
+    resolver_id text not null,
+    status text not null,
     resolution_action text,
-    note              text        not null,
-    evidence          jsonb,
-    payload           jsonb       not null,
-    unique (decision_id, sequence)
+    note text not null,
+    evidence jsonb,
+    payload jsonb not null,
+    unique (decision_id, attempt_sequence)
 );
 
 create index if not exists idx_resolution_attempts_decision_id
-    on account_takeover.decision_resolution_attempts (decision_id);
+on account_takeover.decision_resolution_attempts (decision_id);
 
 create index if not exists idx_resolution_attempts_status
-    on account_takeover.decision_resolution_attempts (status);
+on account_takeover.decision_resolution_attempts (status);

@@ -235,8 +235,8 @@ class PolicyRetriever:
         where = ("WHERE " + " AND ".join(filter_parts)) if filter_parts else ""
 
         sql = f"""
-            SELECT policy_id, version, jurisdiction, section_path, text,
-                   (1 - (embedding <=> %s)) AS relevance_score
+            SELECT policy_id, policy_version, jurisdiction, section_path,
+                   chunk_text, (1 - (embedding <=> %s)) AS relevance_score
             FROM account_takeover.policy_chunks
             {where}
             ORDER BY embedding <=> %s
@@ -454,10 +454,10 @@ class PolicyRetriever:
         return RetrievedSnippet(
             document_id=doc_id,
             title=self._titles.get(doc_id, doc_id),
-            version=row["version"],
+            version=row["policy_version"],
             jurisdiction=row["jurisdiction"],
             section_path=row["section_path"],
-            text=row["text"],
+            text=row["chunk_text"],
             relevance_score=float(row["relevance_score"]),
             retrieval_path=retrieval_path,
         )
