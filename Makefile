@@ -76,7 +76,7 @@ test-replay:
 	uv run pytest tests/ -m replay -v
 
 eval:
-	uv run pytest eval/ -m evaluation -v
+	uv run python -m eval.runners.harness
 
 # -----------------------------------------------------------------------------
 # Scorer training and evaluation

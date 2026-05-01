@@ -125,6 +125,10 @@ scen/*.jsonl
 eval/results/
 eval/reports/
 
+# Ephemeral working artifacts (eval reports, shadow runs, drift snapshots, etc.)
+# Tracked baselines under outputs/<tool>/ are intentionally NOT ignored.
+outputs/stage/
+
 # Policy corpus embeddings (regenerable from source docs)
 data/vectors/
 data/index/

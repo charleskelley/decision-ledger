@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -147,23 +148,58 @@ def _build_default_dimensions() -> list[Dimension]:
     return []
 
 
-def main() -> int:
-    """CLI entrypoint — exits non-zero on any threshold violation.
+_DEFAULT_OUTPUT_PATH = Path("outputs/stage/eval/eval-report.json")
 
-    Reads ``EVAL_OUTPUT_PATH`` from the environment (defaults to
-    ``eval-report.json`` in the working directory) and runs the default
-    dimension set.
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for ``make eval``.
+
+    Resolves the output path (in precedence order: ``--output`` flag,
+    ``EVAL_OUTPUT_PATH`` env var, then the default staging path),
+    constructs the default dimension set, and runs the harness.
+
+    Exit codes:
+        0: all dimensions passed thresholds (``overall_passed=True``).
+        1: one or more dimensions failed thresholds.
+        2: config error — no dimensions registered. No report written.
+
+    Args:
+        argv: Optional argv override (defaults to ``sys.argv[1:]``).
+            Provided for testability.
+
+    Returns:
+        Process exit code.
     """
-    output_path = Path(os.environ.get("EVAL_OUTPUT_PATH", "eval-report.json"))
+    parser = argparse.ArgumentParser(
+        prog="eval.runners.harness",
+        description="Run the 5-dimension evaluation harness.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Path to write the EvalReport JSON. Defaults to "
+            "$EVAL_OUTPUT_PATH or outputs/stage/eval/eval-report.json."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    output_path: Path = args.output or Path(
+        os.environ.get("EVAL_OUTPUT_PATH", str(_DEFAULT_OUTPUT_PATH))
+    )
+
     dimensions = _build_default_dimensions()
-
     if not dimensions:
-        log.warning(
-            "eval.harness.no_dimensions",
-            component="eval_harness",
-            note="no dimensions registered; report will be empty",
+        print(
+            "error: no dimensions registered; eval harness has nothing to "
+            "evaluate. See eval/README.md for the dimension wiring story "
+            "(MVP plan Step 3).",
+            file=sys.stderr,
         )
+        return 2
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     report = asyncio.run(run_eval(dimensions=dimensions, output_path=output_path))
     return 0 if report.overall_passed else 1
 
