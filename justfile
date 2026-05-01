@@ -1,5 +1,7 @@
-# project-name — justfile
+# DecisionLedger — justfile
 # Run `just` with no args to list all tasks.
+# Primary build automation is the Makefile. This justfile provides
+# convenience recipes for tasks not covered there (e.g., diagrams).
 
 default:
     @just --list
@@ -21,43 +23,33 @@ add pkg:
 
 # ─── Quality ─────────────────────────────────────────────────────────────────
 lint:
-    uv run ruff check src/ tests/
+    uv run ruff check --fix .
+    uv run ruff format .
 
 format:
-    uv run ruff format src/ tests/
+    uv run ruff format .
 
 format-check:
-    uv run ruff format --check src/ tests/
+    uv run ruff format --check .
 
 typecheck:
-    uv run basedpyright src/
+    uv run pyright
 
 test *args:
     uv run pytest tests/ {{args}}
 
 check: lint format-check typecheck test
 
-# ─── ML Workflow ─────────────────────────────────────────────────────────────
+# ─── Training ───────────────────────────────────────────────────────────────
 train *args:
-    uv run python -m PACKAGE_PLACEHOLDER.train {{args}}
-
-eval *args:
-    uv run python -m PACKAGE_PLACEHOLDER.evaluate {{args}}
-
-smoke:
-    @echo "Running smoke test..."
-    uv run python -m PACKAGE_PLACEHOLDER.train --max-steps 10 --smoke-test
-    uv run python -m PACKAGE_PLACEHOLDER.evaluate --smoke-test
+    uv run python -m app.scorer train {{args}}
 
 # ─── Infrastructure ──────────────────────────────────────────────────────────
-docker-build tag="latest":
-    docker build -t project-name:{{tag}} .
+up:
+    docker compose up -d
 
-docker-run tag="latest":
-    docker run --rm -it project-name:{{tag}}
-
-docker-shell tag="latest":
-    docker run --rm -it project-name:{{tag}} /bin/bash
+down:
+    docker compose down
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 clean:

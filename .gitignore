@@ -8,10 +8,15 @@
 zoo/
 
 # ----------------------------------------------------------------------------
+# Personal LLM-maintained knowledge base
+# See knowledge/CLAUDE.md (if present) for its operating schema.
+# Gitignored intentionally — KB is personal, upstream of the project.
+# ----------------------------------------------------------------------------
+knowledge/
+
+# ----------------------------------------------------------------------------
 # Claude Code
 # ----------------------------------------------------------------------------
-CLAUDE.md
-.claude/
 .claude/settings.local.json
 
 # ----------------------------------------------------------------------------

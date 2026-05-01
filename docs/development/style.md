@@ -219,7 +219,7 @@ Foreign key columns use the same name as the primary key they reference:
 |---|---|
 | `decision_id` (FK → `decision_bundles.decision_id`) | `decisions_id` |
 | `entity_id` | `entities_id` |
-| `final_action` | `final_actions` |
+| `decision_action` | `decision_actions` |
 
 **Array columns — plural `snake_case`**
 
