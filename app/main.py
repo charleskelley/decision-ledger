@@ -11,8 +11,6 @@ Run locally::
 
 from __future__ import annotations
 
-import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -26,15 +24,13 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
-from app.audit import BundleStore, build_bundle
-from app.enforcement.resolver import resolve
+from app.audit import BundleStore
+from app.decide import execute_pipeline
 from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
-from app.monitoring import configure_logging, duration_ms
+from app.monitoring import configure_logging
 from app.retrieval.retriever import PolicyRetriever
 from app.scorer import AtoScorer
-from core.routes import GateRoute
-from reasoner.account_takeover.assembler import build_observation
 from reasoner.account_takeover.events import LoginEvent  # noqa: TC001
 
 log = structlog.get_logger(__name__)
@@ -217,106 +213,33 @@ def create_decision(event: LoginEvent, request: Request) -> DecisionResponse:
     Returns:
         DecisionResponse summary with decision_id and decision_action.
     """
-    feature_svc: FeatureService = request.app.state.feature_svc
-    scorer: AtoScorer = request.app.state.scorer
-    retriever: PolicyRetriever = request.app.state.retriever
-    gate: PolicyGate = request.app.state.gate
-    store: BundleStore = request.app.state.store
-    corpus_version: str = request.app.state.corpus_version
-
-    latency: dict[str, float] = {}
-    decision_id = str(uuid.uuid4())
-    ingestion_ts = event.timestamp
-
-    # --- Features ---
-    t0 = time.perf_counter()
-    features = feature_svc.compute(event)
-    latency["features_ms"] = duration_ms(t0)
-
-    # --- Scorer ---
-    t0 = time.perf_counter()
-    scorer_output = scorer.score(features)
-    latency["scorer_ms"] = duration_ms(t0)
-
-    # Build retrieval query BEFORE assembly (needs pre-assembly domain types)
-    query = retriever.build_query(event, scorer_output)
-
-    # --- Assembly ---
-    obs = build_observation(event, features, scorer_output)
-
-    # --- Retrieval + Gate (conditional) ---
-    snippets = []
-    gate_result = None
-    retrieval_path = "skipped"
-
-    if obs.route == GateRoute.ROUTE_TO_GATE:
-        config = obs.gate_context.gate_config or {}
-        t0 = time.perf_counter()
-        snippets, retrieval_path = retriever.retrieve(
-            query=query,
-            k=5,
-            jurisdictions=config.get("jurisdictions"),
-            risk_tier=config.get("risk_tier"),
-        )
-        latency["retrieval_ms"] = duration_ms(t0)
-
-        t0 = time.perf_counter()
-        gate_result = gate.evaluate(
-            obs,  # type: ignore[arg-type]
-            snippets,
-            decision_id=decision_id,
-            corpus_version=corpus_version,
-        )
-        latency["gate_ms"] = duration_ms(t0)
-        verdict = gate_result.gate_output.verdict
-    else:
-        latency["retrieval_ms"] = 0.0
-        latency["gate_ms"] = 0.0
-        verdict = None
-
-    # --- Enforcement ---
-    t0 = time.perf_counter()
-    enforcement = resolve(
-        obs,  # type: ignore[arg-type]
-        verdict,
-        snippets=snippets,
-        decision_id=decision_id,
-    )
-    latency["enforcement_ms"] = duration_ms(t0)
-
-    # --- Bundle assembly + persistence ---
-    t0 = time.perf_counter()
-    bundle = build_bundle(
-        decision_id=decision_id,
-        obs=obs,  # type: ignore[arg-type]
+    bundle = execute_pipeline(
+        event=event,
+        feature_svc=request.app.state.feature_svc,
+        scorer=request.app.state.scorer,
+        retriever=request.app.state.retriever,
+        gate=request.app.state.gate,
+        store=request.app.state.store,
+        corpus_version=request.app.state.corpus_version,
         idempotency_key=event.event_id,
-        ingestion_timestamp=ingestion_ts,
-        retrieval_query=query if gate_result else "",
-        retrieval_results=snippets,
-        retrieval_path=retrieval_path,
-        gate_result=gate_result,
-        enforcement_decision=enforcement,
-        latency_breakdown=latency,
     )
-    store.write(bundle)
-    latency["bundle_ms"] = duration_ms(t0)
 
-    total_ms = sum(latency.values())
+    total_ms = sum(bundle.latency_breakdown.values())
 
     log.info(
         "api.decision_complete",
         component="api",
-        decision_id=decision_id,
-        decision_action=enforcement.decision_action.value,
-        route=obs.route.value,
+        decision_id=bundle.decision_id,
+        decision_action=bundle.decision_action.value,
+        route=bundle.raw_event.route.value,
         duration_ms=total_ms,
     )
 
     return DecisionResponse(
-        decision_id=decision_id,
-        decision_action=enforcement.decision_action.value,
-        enforcement_rule_applied=enforcement.enforcement_rule_applied,
-        route=obs.route.value,
+        decision_id=bundle.decision_id,
+        decision_action=bundle.decision_action.value,
+        enforcement_rule_applied=bundle.enforcement_rule_applied,
+        route=bundle.raw_event.route.value,
         latency_ms=total_ms,
     )
 
