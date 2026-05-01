@@ -6,7 +6,8 @@
 .DEFAULT_GOAL := help
 
 .PHONY: help lint lint-sql typecheck test test-smoke test-integration test-replay \
-        eval test-all check scenario build-policy-index install-hooks
+        eval test-all check scenario build-policy-index install-hooks \
+        train eval-model
 
 # -----------------------------------------------------------------------------
 # Help
@@ -31,6 +32,10 @@ help:
 	@echo ""
 	@echo "  Evaluation"
 	@echo "    eval              Full 5-dimension evaluation harness (slow, costs money)"
+	@echo ""
+	@echo "  Scorer"
+	@echo "    train             Train the ATO XGBoost scorer (writes artifact + card + CSVs)"
+	@echo "    eval-model        Evaluate the trained scorer on a fresh-seed test set"
 	@echo ""
 	@echo "  Development"
 	@echo "    scenario          Generate 10 baseline_normal events (quick smoke)"
@@ -73,6 +78,18 @@ test-replay:
 eval:
 	uv run pytest eval/ -m evaluation -v
 
+# -----------------------------------------------------------------------------
+# Scorer training and evaluation
+# -----------------------------------------------------------------------------
+
+train:
+	uv run python -m app.scorer train \
+		--output app/scorer/models/ato-v1.ubj \
+		--samples 5000
+
+eval-model:
+	uv run python -m app.scorer eval --model app/scorer/models/ato-v1.ubj
+
 test-all:
 	uv run pytest tests/ eval/ -v
 
@@ -81,10 +98,10 @@ test-all:
 # -----------------------------------------------------------------------------
 
 scenario:
-	uv run python -m scen run --scenario baseline_normal --count 10
+	uv run python -m generator run --scenario baseline_normal --count 10
 
 build-policy-index:
-	uv run python -m app.retrieval.index build
+	uv run python -m app.retrieval.corpus_loader
 
 install-hooks:
 	uv run pre-commit install
