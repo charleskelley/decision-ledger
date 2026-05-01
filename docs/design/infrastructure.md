@@ -45,7 +45,7 @@ create table if not exists account_takeover.decision_bundles (
     entity_id     uuid        not null,    -- UUID5 from account_id (framework identity)
     account_id    text        not null,    -- ATO domain business key
     created_at    timestamptz not null,
-    final_action  text        not null,    -- ALLOW | CHALLENGE | HOLD | BLOCK
+    decision_action text      not null,    -- ALLOW | CHALLENGE | HOLD | BLOCK (immutable; pipeline verdict)
     bundle        jsonb       not null     -- Full DecisionBundle serialized
 );
 ```

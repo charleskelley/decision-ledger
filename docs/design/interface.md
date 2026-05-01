@@ -37,15 +37,27 @@ core/                         # Framework contracts — no infrastructure, no do
 │   ├── observation.py        # Observation protocol, validate_observation
 │   ├── reasoner_context.py   # ReasonerContext, Signal, LabelType, AttributionSummary
 │   ├── gate_context.py       # GateContext
-│   ├── bundle.py             # DecisionBundle, ReviewPacket, TokenCost
+│   ├── bundle.py             # DecisionBundle
+│   ├── snippet.py            # RetrievedSnippet (universal retrieved corpus chunk)
+│   ├── enforcement.py        # EnforcementDecision (enforcement-layer output)
+│   ├── routes.py             # GateRoute (top-level routing enum)
+│   ├── resolution.py         # ResolutionAttempt, ResolverKind, ResolutionStatus
 │   └── exceptions.py         # ObservationContractError
-├── policy/
+├── gate/
 │   ├── __init__.py
-│   ├── corpus.py             # PolicyDocument, DocumentType, Jurisdiction, RiskTier
-│   ├── prompt.py             # PromptTemplate, PromptRegistry protocol
-│   ├── gate.py               # PolicyGateOutput, Citation
-│   ├── enforcement.py        # EnforcementDecision, EnforcementRule, routing triggers
-│   └── exceptions.py         # PolicyGateOutputError, RetrievalError, EnforcementError
+│   ├── input.py              # GateInput (universal base)
+│   ├── output.py             # GateOutput (universal base)
+│   ├── verdict.py            # GateVerdict (universal base)
+│   ├── corpus.py             # PolicyDocument, DocumentType
+│   ├── routes.py             # GateRoute enum
+│   ├── exceptions.py         # PolicyGateOutputError, RetrievalError, EnforcementError
+│   └── policy/               # LLM-backed policy gate concrete contracts
+│       ├── __init__.py
+│       ├── input.py          # PolicyGateInput(GateInput)
+│       ├── output.py         # PolicyGateOutput(GateOutput), TokenCost
+│       ├── verdict.py        # PolicyGateVerdict(GateVerdict)
+│       ├── citation.py       # Citation
+│       └── prompt.py         # PromptTemplate, PromptSnapshot, PromptRegistry
 └── eval/
     ├── __init__.py
     ├── dimensions.py         # EvalDimension enum, DimensionResult
@@ -70,75 +82,92 @@ reasoner/                     # ATO Reasoner domain layer — no infrastructure,
 
 ## Reasoning Layer Protocol
 
-The policy gate is pluggable. Any reasoning layer that satisfies `PolicyGateProtocol` can replace the LLM. The enforcement and audit layers depend only on `PolicyGateOutput` — they do not know or care what produced it.
+The gate is pluggable. Any reasoning layer that produces typed
+`GateInput` / `GateOutput` subclasses (with a valid `GateVerdict`
+subclass inside `GateOutput.verdict`) can replace the LLM policy gate.
+The enforcement and audit layers depend only on the universal
+`GateVerdict` base — they do not know or care what produced it.
+
+Per DR-20, each gate kind subclasses the universal contracts in its own
+subpackage (`core/gate/<kind>/`). See [`gates.md`](./gates.md) for the
+end-to-end implementation guide.
 
 ```python
 from typing import Protocol
-from core.policy.gate import PolicyGateOutput
-from core.decision.scorer import ScorerOutput
-from core.policy.retrieval import RetrievalResult
-from core.decision.observation import Observation
+from core.snippet import RetrievedSnippet
+from core.observation import Observation
 
-class PolicyGateProtocol(Protocol):
-    """Contract for the reasoning layer.
+class GateProtocol(Protocol):
+    """Contract for any gate implementation.
 
     Any implementation — LLM, rules engine, ML classifier, human reviewer —
-    must satisfy this interface. The enforcement layer calls `reason()` and
-    receives a schema-validated PolicyGateOutput.
+    produces typed input/output subclasses (e.g., PolicyGateInput,
+    PolicyGateOutput). The framework reads GateOutput.verdict to drive
+    enforcement; it does not interpret kind-specific fields.
 
-    The gate never reads domain field names. All domain context arrives
-    pre-rendered in GateContext.template_vars by the domain assembler.
+    See DR-19 / DR-20 for the contract layering.
     """
 
-    def reason(
+    def evaluate(
         self,
-        gate_context: GateContext,
-        snippets: list[PolicySnippet],
-    ) -> PolicyGateOutput:
-        """Produce a schema-valid policy gate output from the given context.
+        obs: Observation,
+        snippets: list[RetrievedSnippet],
+        *,
+        decision_id: str,
+        # Per-implementation kwargs as needed (e.g., corpus_version for
+        # retrieval-using gates) — not part of the framework contract.
+    ) -> GateResult:
+        """Produce a GateResult carrying typed gate_input / gate_output.
 
-        Args:
-            gate_context: Domain-assembled context carrying prompt_template_id,
-                pre-rendered template_vars, and retrieval filters. The gate
-                resolves the prompt template, substitutes vars, and appends
-                the retrieved snippets before calling the LLM.
-            snippets: Retrieved policy chunks from the hybrid retrieval layer,
-                already filtered by jurisdiction and risk_tier.
-
-        Returns:
-            A validated PolicyGateOutput with permitted actions, required
-            controls, rationale, and citations.
-
-        Raises:
-            PolicyGateOutputError: If the output cannot be produced or
-                validated. Callers route to HOLD on this error.
+        gate_output.verdict is None when the gate's response failed
+        validation; in that case enforcement routes to HOLD via the
+        schema-failure tier.
         """
         ...
 ```
+
+### Implementing a new gate
+
+See [`gates.md`](./gates.md) for the full guide. In brief: subclass the
+universal `GateInput`, `GateOutput`, `GateVerdict` in
+`core/gate/<your-kind>/`. Narrow `gate_id` to a Pydantic
+`Literal[<your-kind>]`. Add typed fields for kind-specific artifacts —
+no `dict[str, Any]` escape hatches. Place the runtime orchestrator in
+`app/gate/<your-kind>/`. Add the variant to the discriminated-union
+deserializer in `app/audit/store.py`.
 
 ---
 
 ## Enforcement Interface
 
-The enforcement layer takes a `PolicyGateOutput` and produces a final `EnforcementDecision`. It is a pure function — no network calls, no I/O. This is what makes deterministic replay possible.
+The enforcement layer takes a `GateVerdict` and produces a final
+`EnforcementDecision`. It is a pure function — no network calls, no I/O.
+This is what makes deterministic replay possible.
 
 ```python
-from core.policy.enforcement import EnforcementDecision, EnforcementContext
-from core.policy.gate import PolicyGateOutput
+from core.bundle import EnforcementDecision
+from core.gate import GateVerdict
 
 def resolve(
-    gate_output: PolicyGateOutput,
-    context: EnforcementContext,
+    obs: Observation,
+    gate_output: GateVerdict | None,  # bundle.gate_output.verdict at replay time
+    *,
+    snippets: list[RetrievedSnippet],
+    decision_id: str,
 ) -> EnforcementDecision:
     """Apply deterministic enforcement rules to produce the final action.
 
     Args:
-        gate_output: Validated output from the policy gate (reasoning layer).
-        context: Contextual flags — novel_entity, adversarial_flag, etc.
+        obs: Assembled Observation from the domain reasoner.
+        gate_output: Validated GateVerdict, or None on schema-failure /
+            fast path.
+        snippets: Policy snippets used by the gate (for tier-5 jurisdiction
+            conflict detection).
+        decision_id: Decision UUID for log context.
 
     Returns:
-        EnforcementDecision with final_action, enforcement_rule_applied,
-        override_log, and optional review_packet.
+        EnforcementDecision with decision_action, enforcement_rule_applied,
+        and override_log.
 
     Note:
         This function is pure and deterministic. Given the same inputs,
@@ -164,7 +193,7 @@ POST /v1/decisions
 Request body: LoginEvent (JSON)
 Response: DecisionResponse
     - decision_id: str
-    - final_action: DecisionAction
+    - decision_action: DecisionAction   # the pipeline's verdict (immutable)
     - required_controls: list[str]
     - latency_ms: float
     - bundle_url: str   # link to full bundle for inspection
@@ -177,7 +206,12 @@ GET /v1/decisions/{decision_id}
     Returns: Full DecisionBundle
 
 GET /v1/decisions/{decision_id}/replay
-    Returns: ReplayResult (final_action, byte_identical: bool, diff_summary)
+    Returns: ReplayResult (decision_action, actions_match: bool, diff_summary)
+
+GET /v1/decisions/{decision_id}/resolution
+    Returns: { resolution_status, realized_action, attempts: list[ResolutionAttempt] }
+    For non-terminal decision_action only; terminal actions trivially have
+    realized_action == decision_action.
 ```
 
 ### Health and Version

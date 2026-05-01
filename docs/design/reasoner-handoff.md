@@ -312,14 +312,15 @@ A Decision Bundle is considered complete and replayable if and only if:
    used (enables version-specific replay analysis).
 3. On fast path: `raw_event.fast_path_rationale` records the confidence-band
    rule that fired (enables threshold verification without re-running inference).
-4. On gate path: `rendered_prompt`, `raw_llm_response`, and
-   `policy_gate_output` are stored (replay re-runs enforcement against the
-   cached gate output — the LLM is not re-invoked).
+4. On gate path: `gate_input` and `gate_output` are stored (typed
+   contracts per DR-19). Replay re-runs enforcement against
+   `gate_output.verdict` — the gate is not re-invoked, regardless of its
+   implementation.
 5. `raw_event.gate_context` carries `prompt_template_id` and `template_vars`
    (enables reconstruction of the exact prompt that was rendered, and shadow
    evaluation of any fast-path decision).
 
 The enforcement layer is deterministic: re-executing `enforcement.resolve()`
-against the logged `policy_gate_output` must produce the same `final_action`.
+against the logged `gate_output.verdict` must produce the same `decision_action`.
 This is the replay guarantee. It holds because the LLM output is cached — not
 because the LLM itself is deterministic.
