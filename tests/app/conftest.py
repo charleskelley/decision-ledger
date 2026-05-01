@@ -7,14 +7,15 @@ from datetime import UTC, datetime
 import pytest
 
 from core.actions import DecisionAction
-from core.gate import Citation, GateRouting, PolicyGateOutput
+from core.gate.policy import Citation, PolicyGateVerdict
 from core.observation import (
     AttributionSummary,
+    Contribution,
     GateContext,
     LabelType,
     ReasonerContext,
-    Signal,
 )
+from core.routes import GateRoute
 from reasoner.account_takeover.events import (
     AuthMethod,
     AuthOutcome,
@@ -37,31 +38,39 @@ def geo_data():
 @pytest.fixture
 def gate_context():
     return GateContext(
-        prompt_template_id="ato-v1",
-        jurisdictions=["US_FEDERAL", "INTERNAL"],
-        risk_tier="STANDARD",
-        template_vars={
-            "risk_score": "0.150",
+        gate_id="policy",
+        gate_config={
+            "template_id": "ato-v1",
+            "template_vars": {
+                "risk_score": "0.150",
+                "risk_tier": "STANDARD",
+                "auth_method": "PASSWORD",
+                "outcome": "SUCCESS",
+                "jurisdiction": "US",
+                "top_signals": "velocity_1min=1.0 (SHAP +0.050)",
+                "impossible_travel": "False",
+                "velocity_1min": "1",
+                "velocity_5min": "3",
+                "velocity_60min": "8",
+                "device_novelty": "0.00",
+                "ip_novelty": "0.00",
+                "geo_novelty": "0.00",
+                "sparse_history": "False",
+            },
+            "jurisdictions": ["US_FEDERAL", "INTERNAL"],
             "risk_tier": "STANDARD",
-            "auth_method": "PASSWORD",
-            "outcome": "SUCCESS",
-            "jurisdiction": "US",
-            "top_signals": "velocity_1min=1.0 (SHAP +0.050)",
-            "impossible_travel": "False",
-            "velocity_1min": "1",
-            "velocity_5min": "3",
-            "velocity_60min": "8",
-            "device_novelty": "0.00",
-            "ip_novelty": "0.00",
-            "geo_novelty": "0.00",
-            "sparse_history": "False",
         },
     )
 
 
 @pytest.fixture
 def signal():
-    return Signal(feature_name="velocity_1min", shap_value=0.05, raw_value=1.0)
+    return Contribution(
+        feature_name="velocity_1min",
+        feature_value=1.0,
+        method="shap",
+        value=0.05,
+    )
 
 
 @pytest.fixture
@@ -88,7 +97,7 @@ def reasoner_context(signal):
             "user_agent_consistency": 0.98,
             "sparse_history": False,
         },
-        attribution=AttributionSummary(observation_signals=[signal]),
+        attribution=AttributionSummary(feature_contributions=[signal]),
     )
 
 
@@ -105,7 +114,7 @@ def login_event(geo_data, gate_context, reasoner_context):
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
         auth_method=AuthMethod.PASSWORD,
         outcome=AuthOutcome.SUCCESS,
-        routing=GateRouting.FAST_PATH_ALLOW,
+        route=GateRoute.FAST_PATH_ALLOW,
         reasoner_context=reasoner_context,
         fast_path_rationale="risk_score=0.150 < 0.20 → FAST_PATH_ALLOW",
         gate_context=gate_context,
@@ -125,7 +134,7 @@ def citation():
 
 @pytest.fixture
 def gate_output(citation):
-    return PolicyGateOutput(
+    return PolicyGateVerdict(
         permitted_actions=[DecisionAction.ALLOW],
         required_controls=[],
         rationale="Low risk profile. No anomalous signals. Known device and IP.",

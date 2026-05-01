@@ -12,9 +12,9 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 from app.retrieval.retriever import PolicyRetriever
-from core.bundle import PolicySnippet
-from core.gate import GateRouting
-from core.observation import Signal
+from core.observation import Contribution
+from core.routes import GateRoute
+from core.snippet import RetrievedSnippet
 from reasoner.account_takeover.events import (
     AuthMethod,
     AuthOutcome,
@@ -42,14 +42,14 @@ def _make_retriever() -> PolicyRetriever:
 
 
 def _make_snippet(
-    policy_id: str,
+    document_id: str,
     section_path: str = "Overview",
     *,
     relevance_score: float = 0.5,
-) -> PolicySnippet:
-    return PolicySnippet(
-        policy_id=policy_id,
-        title=policy_id,
+) -> RetrievedSnippet:
+    return RetrievedSnippet(
+        document_id=document_id,
+        title=document_id,
         version="1.0",
         jurisdiction="US_FEDERAL",
         section_path=section_path,
@@ -85,12 +85,17 @@ def _make_scorer_output(feature_names: list[str]) -> ScorerOutput:
         entity_id=uuid4(),
         risk_score=0.7,
         top_signals=[
-            Signal(feature_name=name, shap_value=0.3, raw_value=1.0)
+            Contribution(
+                feature_name=name,
+                feature_value=1.0,
+                method="shap",
+                value=0.3,
+            )
             for name in feature_names
         ],
         scorer_version="xgb-v1.0.0",
         inference_latency_ms=2.5,
-        routing=GateRouting.ROUTE_TO_GATE,
+        route=GateRoute.ROUTE_TO_GATE,
     )
 
 
@@ -108,7 +113,7 @@ def test_rrf_fuse_accumulates_scores_for_overlapping_chunk():
 
     fused = r.rrf_fuse([shared, dense_only], [shared, sparse_only], k=3)
 
-    scores = {s.policy_id: s.relevance_score for s in fused}
+    scores = {s.document_id: s.relevance_score for s in fused}
     assert scores["SHARED-DOC"] > scores["DENSE-ONLY"]
     assert scores["SHARED-DOC"] > scores["SPARSE-ONLY"]
 
@@ -121,7 +126,7 @@ def test_rrf_fuse_deduplicates_same_snippet():
     fused = r.rrf_fuse([snippet], [snippet], k=5)
 
     assert len(fused) == 1
-    assert fused[0].policy_id == "DOC-A"
+    assert fused[0].document_id == "DOC-A"
 
 
 def test_rrf_fuse_truncates_to_k():
@@ -201,7 +206,7 @@ def test_build_query_uses_generic_fallback_for_empty_everything():
     """Returns generic fallback when signals are unknown and auth method is unknown."""
     r = _make_retriever()
     event = _make_event(auth_method=AuthMethod.PASSWORD)
-    # Signals with unrecognised feature names, no auth method term gap
+    # Contributions with unrecognised feature names, no auth method term gap
     scorer = _make_scorer_output(["unknown_feature_xyz"])
 
     query = r.build_query(event, scorer)
@@ -275,9 +280,9 @@ def test_rerank_reorders_by_cross_encoder_score():
     result, path = r.rerank("query", candidates, k=3)
 
     assert path == "reranked"
-    assert result[0].policy_id == "DOC-B"
-    assert result[1].policy_id == "DOC-C"
-    assert result[2].policy_id == "DOC-A"
+    assert result[0].document_id == "DOC-B"
+    assert result[1].document_id == "DOC-C"
+    assert result[2].document_id == "DOC-A"
 
 
 def test_rerank_updates_relevance_score_and_retrieval_path():
