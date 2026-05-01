@@ -1,4 +1,4 @@
-"""Deterministic enforcement resolver — translates gate output into a final action.
+"""Deterministic enforcement resolver — translates gate output into a decision action.
 
 resolve() is the only public entry point. It evaluates six priority tiers in
 order and returns on the first trigger that fires. Every tier check is logged
@@ -8,6 +8,11 @@ available for audit without re-running enforcement.
 Fast-path observations (FAST_PATH_ALLOW / FAST_PATH_BLOCK) return immediately
 with no tier evaluation — the domain reasoner was confident enough to bypass
 the gate.
+
+The enforcement layer produces the bundle's ``decision_action``. For
+non-terminal actions (CHALLENGE, HOLD) the realized outcome is determined
+later via the resolution attempt log (see ``core.resolution``); enforcement is
+not concerned with that downstream lifecycle.
 
 Tier constants (tune without changing resolver logic):
     LOW_CONFIDENCE_THRESHOLD  — below this, gate output confidence is considered
@@ -20,19 +25,18 @@ Tier constants (tune without changing resolver logic):
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
 from core.actions import DecisionAction
-from core.bundle import EnforcementDecision, ReviewPacket
-from core.gate import GateRouting
+from core.enforcement import EnforcementDecision
+from core.routes import GateRoute
 
 if TYPE_CHECKING:
-    from core.bundle import PolicySnippet
-    from core.gate import PolicyGateOutput
-    from core.observation import Observation, Signal
+    from core.gate import GateVerdict
+    from core.observation import Observation
+    from core.snippet import RetrievedSnippet
 
 log = structlog.get_logger(__name__)
 
@@ -63,12 +67,12 @@ _EU_JURISDICTIONS = frozenset({"EU_GDPR"})
 
 def resolve(
     obs: Observation,
-    gate_output: PolicyGateOutput | None,
+    gate_output: GateVerdict | None,
     *,
-    snippets: list[PolicySnippet],
+    snippets: list[RetrievedSnippet],
     decision_id: str,
 ) -> EnforcementDecision:
-    """Resolve a final action from the policy gate output and observation context.
+    """Resolve a decision action from the gate's typed verdict and observation context.
 
     Evaluates six priority tiers in order and returns on the first trigger.
     All tier checks are recorded in the returned ``override_log`` for full
@@ -76,76 +80,61 @@ def resolve(
 
     Args:
         obs: The assembled Observation from the domain reasoner.
-        gate_output: Validated policy gate output, or ``None`` if the LLM
-            response failed schema validation or the gate was not invoked.
+        gate_output: Validated gate verdict (a ``GateVerdict``), or ``None``
+            if the gate response failed schema validation or the gate was
+            not invoked.
         snippets: Policy snippets returned by the retriever for this
             observation. Used for jurisdiction-conflict detection (Tier 5).
         decision_id: The ``decision_id`` of the bundle being assembled.
-            Used to populate ``ReviewPacket.decision_id`` on HOLD decisions.
+            Carried in the structured log context.
 
     Returns:
-        An immutable ``EnforcementDecision`` with the final action, the
-        override rule that fired (if any), the full override log, and a
-        ``ReviewPacket`` for HOLD decisions.
+        An immutable ``EnforcementDecision`` with the decision action, the
+        override rule that fired (if any), and the full override log.
     """
     log_ctx = {
         "component": "enforcement",
         "decision_id": decision_id,
         "event_id": obs.event_id,
-        "routing": obs.routing.value,
+        "route": obs.route.value,
     }
 
     # Fast-path: domain reasoner was high-confidence — no tier evaluation.
-    if obs.routing == GateRouting.FAST_PATH_ALLOW:
+    if obs.route == GateRoute.FAST_PATH_ALLOW:
         log.debug("enforcement.fast_path_allow", **log_ctx)
         return EnforcementDecision(
-            final_action=DecisionAction.ALLOW,
+            decision_action=DecisionAction.ALLOW,
             enforcement_rule_applied=None,
             override_log=["fast_path_allow: FAST_PATH_ALLOW — policy gate skipped"],
-            review_packet=None,
         )
 
-    if obs.routing == GateRouting.FAST_PATH_BLOCK:
+    if obs.route == GateRoute.FAST_PATH_BLOCK:
         log.debug("enforcement.fast_path_block", **log_ctx)
         return EnforcementDecision(
-            final_action=DecisionAction.BLOCK,
+            decision_action=DecisionAction.BLOCK,
             enforcement_rule_applied=None,
             override_log=["fast_path_block: FAST_PATH_BLOCK — policy gate skipped"],
-            review_packet=None,
         )
 
     # Gate-path: evaluate tiers in priority order.
     override_log: list[str] = []
-    risk_score = _extract_risk_score(obs)
-    top_signals = _extract_signals(obs)
 
-    def _make_hold(rule: str, reason: str, *, priority: int = 0) -> EnforcementDecision:
+    def _make_hold(rule: str, reason: str) -> EnforcementDecision:
         override_log.append(f"{rule}: fired — {reason}")
         log.info("enforcement.hold", rule=rule, **log_ctx)
         return EnforcementDecision(
-            final_action=DecisionAction.HOLD,
+            decision_action=DecisionAction.HOLD,
             enforcement_rule_applied=rule,
             override_log=override_log,
-            review_packet=ReviewPacket(
-                decision_id=decision_id,
-                entity_id=obs.entity_id,
-                created_at=datetime.now(UTC),
-                hold_reason=reason,
-                enforcement_rule=rule,
-                risk_score=risk_score,
-                top_signals=top_signals,
-                priority=priority,
-            ),
         )
 
     def _make_block(rule: str, reason: str) -> EnforcementDecision:
         override_log.append(f"{rule}: fired — {reason}")
         log.info("enforcement.block_override", rule=rule, **log_ctx)
         return EnforcementDecision(
-            final_action=DecisionAction.BLOCK,
+            decision_action=DecisionAction.BLOCK,
             enforcement_rule_applied=rule,
             override_log=override_log,
-            review_packet=None,
         )
 
     # --- Tier 1: Schema failure ---
@@ -153,7 +142,6 @@ def resolve(
         return _make_hold(
             "tier1_schema_failure",
             "Policy gate output failed schema validation — routed to HOLD for review",
-            priority=2,
         )
     override_log.append("tier1_schema_failure: not fired — gate output present")
 
@@ -172,7 +160,6 @@ def resolve(
         return _make_hold(
             "tier3_novel_entity",
             "Insufficient account history for confident decision — HOLD for review",
-            priority=1,
         )
     override_log.append("tier3_novel_entity: not fired — history sufficient")
 
@@ -188,7 +175,6 @@ def resolve(
                 f"Gate confidence {gate_output.confidence:.2f} below threshold "
                 f"{LOW_CONFIDENCE_THRESHOLD} with high-risk action {conservative.value}"
             ),
-            priority=1,
         )
     override_log.append(
         f"tier4_low_confidence: not fired — confidence={gate_output.confidence:.2f}"
@@ -199,37 +185,22 @@ def resolve(
         return _make_hold(
             "tier5_jurisdiction_conflict",
             "Conflicting policy requirements across jurisdictions — HOLD for review",
-            priority=2,
         )
     override_log.append("tier5_jurisdiction_conflict: not fired")
 
     # --- Tier 6: Default — accept gate output ---
-    final = _most_conservative(gate_output.permitted_actions)
-    override_log.append(f"tier6_default: accepted gate output — action={final.value}")
+    action = _most_conservative(gate_output.permitted_actions)
+    override_log.append(f"tier6_default: accepted gate output — action={action.value}")
     log.info(
         "enforcement.resolved",
-        final_action=final.value,
+        decision_action=action.value,
         gate_confidence=gate_output.confidence,
         **log_ctx,
     )
     return EnforcementDecision(
-        final_action=final,
+        decision_action=action,
         enforcement_rule_applied=None,
         override_log=override_log,
-        review_packet=(
-            ReviewPacket(
-                decision_id=decision_id,
-                entity_id=obs.entity_id,
-                created_at=datetime.now(UTC),
-                hold_reason="Gate output accepted — HOLD per gate recommendation",
-                enforcement_rule=None,
-                risk_score=risk_score,
-                top_signals=top_signals,
-                priority=0,
-            )
-            if final == DecisionAction.HOLD
-            else None
-        ),
     )
 
 
@@ -247,8 +218,8 @@ def _most_conservative(actions: list[DecisionAction]) -> DecisionAction:
 
 
 def _has_jurisdiction_conflict(
-    gate_output: PolicyGateOutput,
-    snippets: list[PolicySnippet],
+    gate_output: GateVerdict,
+    snippets: list[RetrievedSnippet],
 ) -> bool:
     """Return True if a jurisdiction conflict is signalled."""
     # Gate explicitly flagged it.
@@ -268,22 +239,3 @@ def _has_jurisdiction_conflict(
     return bool(jurisdictions & _US_JURISDICTIONS) and bool(
         jurisdictions & _EU_JURISDICTIONS
     )
-
-
-def _extract_risk_score(obs: Observation) -> float:
-    """Extract the numeric risk score from reasoner_context, defaulting to 0.0."""
-    rc = obs.reasoner_context
-    if rc is None:
-        return 0.0
-    try:
-        return float(rc.label_value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _extract_signals(obs: Observation) -> list[Signal]:
-    """Extract the top SHAP signals from reasoner_context attribution."""
-    rc = obs.reasoner_context
-    if rc is None or rc.attribution is None:
-        return []
-    return list(rc.attribution.observation_signals or [])

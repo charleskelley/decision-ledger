@@ -178,18 +178,67 @@ class Citation(BaseModel):
     snippet: str
     relevance: str      # Human-readable relevance explanation
 
-class PolicyGateOutput(BaseModel):
-    model_config = ConfigDict(strict=True, frozen=True)
+```
+
+### Gate-invocation contracts (DR-19, DR-20)
+
+Gate-invocation artifacts are captured in two typed contracts on the
+bundle: `GateInput` (input side) and `GateOutput` (output side). Both are
+`None` on the fast path. Both populated when the gate ran (whether or not
+validation succeeded).
+
+Per DR-20, the framework defines **universal base contracts**;
+**concrete subclasses live in per-gate-type subpackages** (e.g.,
+`core/gate/policy/` for the LLM-backed policy gate). The bundle types its
+fields as the universal base; subclass instances are preserved at runtime.
+
+```python
+# Universal — core/gate/
+class GateVerdict(BaseModel):
+    """Enforcement-consumable verdict; carries only what enforcement reads."""
+    gate_id: str
     permitted_actions: list[DecisionAction]
     required_controls: list[str]
-    rationale: str              # max 200 words
-    citations: list[Citation]
-    confidence: float           # [0.0–1.0]
+    confidence: float                       # [0.0–1.0]
     escalate_to_human: bool
     escalation_reason: str | None
-    # prompt_template_id is recorded in GateContext (raw_event.gate_context),
-    # not here — it is an audit key on the Observation, not a gate output field.
+
+class GateInput(BaseModel):
+    gate_id: str                            # discriminator (Literal in subclasses)
+
+class GateOutput(BaseModel):
+    gate_id: str
+    verdict: GateVerdict | None             # None when validation failed
+
+# LLM-policy concrete — core/gate/policy/
+class PolicyGateVerdict(GateVerdict):
+    gate_id: Literal["policy"] = "policy"
+    rationale: str                          # max 200 words
+    citations: list[Citation]
+
+class PolicyGateInput(GateInput):
+    gate_id: Literal["policy"] = "policy"
+    model_version: str
+    prompt_template_id: str
+    prompt_template_version: str
+    corpus_version: str
+    rendered_prompt: str
+    prompt_snapshot: PromptSnapshot
+    template_vars: dict[str, str]
+
+class PolicyGateOutput(GateOutput):
+    gate_id: Literal["policy"] = "policy"
+    verdict: PolicyGateVerdict | None       # narrowed type
+    response_text: str | None = None        # raw LLM output
+    token_cost: TokenCost | None = None
 ```
+
+The bundle's persistence layer (`app/audit/store.py`) uses Pydantic
+discriminated-union deserialization (closed union over framework-known
+gate kinds) to reconstruct the correct subclass when reading a stored
+bundle. Adding a new gate kind extends the union; the bundle's typed
+surface (`gate_input: GateInput | None`) does not change. See
+[`gates.md`](./gates.md) for the gate-implementation guide.
 
 ---
 
@@ -223,26 +272,22 @@ class DecisionBundle(BaseModel):
 
     # Retrieval layer — None on fast path (retrieval is skipped)
     retrieval_query: str | None
-    retrieval_results: list[PolicySnippet]
+    retrieval_results: list[RetrievedSnippet]
     retrieval_path: str | None  # "reranked" | "rrf_only" | None
 
-    # Gate layer — None on fast path (LLM is not invoked)
-    rendered_prompt: str | None         # Full prompt as sent to the LLM
-    raw_llm_response: str | None        # Raw string response from LLM API
-    policy_gate_output: PolicyGateOutput | None  # None if schema validation failed or fast path
+    # Gate layer (DR-19) — both None on fast path. Both populated when
+    # the gate ran (even if validation failed; in that case
+    # gate_output.verdict is None).
+    gate_input: GateInput | None
+    gate_output: GateOutput | None
 
     # Decision layer
-    final_action: DecisionAction
+    decision_action: DecisionAction
     enforcement_rule_applied: str | None
     override_log: list[str]
-    review_packet: ReviewPacket | None
-
-    # Corpus version
-    policy_corpus_version: str          # Version tag of the loaded corpus at decision time
 
     # Telemetry
     latency_breakdown: dict[str, float]  # component → duration_ms
-    llm_token_cost: TokenCost | None     # None on fast path
 ```
 
 ### Replay fields
@@ -257,13 +302,49 @@ The replay guarantee relies on fields stored inside `raw_event`:
 | Feature hash (drift detection) | `raw_event.fast_path_record.feature_hash` |
 | Prompt template used | `raw_event.gate_context.prompt_template_id` |
 | Rendered template vars | `raw_event.gate_context.template_vars` |
-| Cached LLM output (gate path) | `rendered_prompt` + `raw_llm_response` + `policy_gate_output` |
+| Cached gate invocation (gate path) | `gate_input` + `gate_output` (with `gate_output.verdict` as the typed payload enforcement consumes) |
 
 ### Replay Contract
 
-The replay guarantee: given a `DecisionBundle`, re-executing `enforcement.resolve()` against the logged `policy_gate_output` and `feature_snapshot` produces the same `final_action`.
+The replay guarantee: given a `DecisionBundle`, re-executing `enforcement.resolve()` against the logged `gate_output.verdict` and `feature_snapshot` produces the same `decision_action`.
 
-Replay does **not** re-invoke the LLM. The `raw_llm_response` and `policy_gate_output` are already in the bundle. Replay feeds the cached output back through enforcement — the same deterministic rule evaluation that ran at decision time. This is what "deterministic replay" means: verifying enforcement determinism, not LLM reproducibility.
+### Action vocabulary
+
+The framework distinguishes three concepts (DR-18):
+
+| Term | Source | Meaning |
+|---|---|---|
+| `decision_action` | `DecisionBundle` row | The action the pipeline produced at decision time. Immutable. |
+| `resolution_action` | `ResolutionAttempt` row | The action a resolver produced for a non-terminal decision. Immutable per row. |
+| `realized_action` | computed | The action ultimately taken on the entity. For terminal `decision_action` (`ALLOW`, `BLOCK`) it equals `decision_action`; for non-terminal (`CHALLENGE`, `HOLD`) it is the first terminal `resolution_action` in the attempt chain, or `None` while still pending. |
+
+### Resolution attempt log
+
+For non-terminal `decision_action`, the realized outcome is recorded in
+the append-only `decision_resolution_attempts` table as one or more
+`ResolutionAttempt` rows per `decision_id`:
+
+```python
+class ResolutionAttempt(BaseModel):
+    decision_id: str                       # FK to DecisionBundle
+    attempt_id: str                        # UUID for this attempt
+    sequence: int                          # Ordering within decision_id
+    started_at: datetime
+    completed_at: datetime | None
+    resolver_kind: ResolverKind            # HUMAN, SLA_DEFAULT, STEP_UP_AUTH, ...
+    resolver_id: str
+    status: ResolutionStatus               # PENDING | COMPLETED | ESCALATED | EXPIRED
+    resolution_action: DecisionAction | None
+    note: str
+    evidence: dict[str, Any]               # Per-resolver-kind payload
+```
+
+Multi-step resolvers (escalation, outreach-initiated then confirmed) are
+expressed as ordered attempts; new states are new rows, never row
+mutations. The `realized_action` fold walks attempts in `sequence` order
+and returns the first terminal `resolution_action`.
+
+Replay does **not** re-invoke the gate. The `gate_response` and `gate_output` are already in the bundle. Replay feeds the cached output back through enforcement — the same deterministic rule evaluation that ran at decision time. This is what "deterministic replay" means: verifying enforcement determinism, not gate reproducibility.
 
 ```bash
 # Replay a single decision

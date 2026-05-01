@@ -6,9 +6,15 @@ from enum import StrEnum
 class DecisionAction(StrEnum):
     """Final action the enforcement layer produces for a governed decision.
 
-    Severity is ordered: ALLOW < CHALLENGE < HOLD < BLOCK. The enforcement
-    layer resolves to the most conservative permissible action when the policy
-    gate indicates multiple actions.
+    Members are declared in ascending severity: ALLOW, CHALLENGE, HOLD, BLOCK.
+    Severity ordering is an enforcement concern, not a property of this enum.
+    The enforcement resolver (``app.enforcement.resolver``) defines and owns
+    the authoritative severity ranking via ``_SEVERITY_ORDER``.
+
+    .. warning::
+        ``StrEnum`` comparison is lexicographic — ``BLOCK < CHALLENGE``
+        alphabetically. Never use ``<`` / ``>`` on ``DecisionAction`` to
+        determine severity.
 
     Attributes:
         ALLOW: No friction. The request proceeds without additional controls.

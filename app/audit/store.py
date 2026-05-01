@@ -35,8 +35,10 @@ from typing import TYPE_CHECKING
 import structlog
 
 from app.enforcement.resolver import resolve
-from core.bundle import DecisionBundle, EnforcementDecision, PolicySnippet
-from core.gate import PolicyGateOutput, PromptSnapshot
+from core.bundle import DecisionBundle
+from core.enforcement import EnforcementDecision  # noqa: TC001 (runtime use)
+from core.gate.policy import PolicyGateInput, PolicyGateOutput
+from core.snippet import RetrievedSnippet
 from reasoner.account_takeover.events import LoginEvent
 
 if TYPE_CHECKING:
@@ -81,9 +83,9 @@ class ReplayResult:
 
     Args:
         decision_id: The replayed decision ID.
-        original_action: Final action recorded in the stored bundle.
-        replayed_action: Final action produced by re-running enforcement against
-            the cached intermediate states.
+        original_action: Decision action recorded in the stored bundle.
+        replayed_action: Decision action produced by re-running enforcement
+            against the cached intermediate states.
         actions_match: True when original and replayed actions are identical.
             A mismatch signals a non-determinism bug in the enforcement layer.
         enforcement_decision: Full EnforcementDecision from the replay run,
@@ -131,34 +133,20 @@ def _serialize_bundle(bundle: DecisionBundle) -> str:
         ],
         "retrieval_path": bundle.retrieval_path,
         "index_version": bundle.index_version,
-        "gate_input_snapshot": (
-            bundle.gate_input_snapshot.model_dump(mode="json")
-            if bundle.gate_input_snapshot is not None
+        "gate_input": (
+            bundle.gate_input.model_dump(mode="json")
+            if bundle.gate_input is not None
             else None
         ),
-        "rendered_prompt": bundle.rendered_prompt,
-        "raw_llm_response": bundle.raw_llm_response,
         "gate_output": (
             bundle.gate_output.model_dump(mode="json")
             if bundle.gate_output is not None
             else None
         ),
-        "final_action": bundle.final_action.value,
+        "decision_action": bundle.decision_action.value,
         "enforcement_rule_applied": bundle.enforcement_rule_applied,
         "override_log": list(bundle.override_log),
-        "review_packet": (
-            bundle.review_packet.model_dump(mode="json")
-            if bundle.review_packet is not None
-            else None
-        ),
-        "gate_model_version": bundle.gate_model_version,
-        "policy_corpus_version": bundle.policy_corpus_version,
         "latency_breakdown": dict(bundle.latency_breakdown),
-        "llm_token_cost": (
-            bundle.llm_token_cost.model_dump(mode="json")
-            if bundle.llm_token_cost is not None
-            else None
-        ),
     }
     return json.dumps(data, default=str)
 
@@ -181,12 +169,16 @@ def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
     raw_event = LoginEvent.model_validate(data["raw_event"], strict=False)
 
     retrieval_results = [
-        PolicySnippet.model_validate(r, strict=False) for r in data["retrieval_results"]
+        RetrievedSnippet.model_validate(r, strict=False)
+        for r in data["retrieval_results"]
     ]
 
-    gate_input_snapshot = (
-        PromptSnapshot.model_validate(data["gate_input_snapshot"], strict=False)
-        if data.get("gate_input_snapshot") is not None
+    # Discriminated-union deserialization: pick concrete subclass by gate_id.
+    # MVP closes over a single variant (PolicyGateInput / PolicyGateOutput);
+    # a second gate kind would be added here as a Union arm.
+    gate_input = (
+        PolicyGateInput.model_validate(data["gate_input"], strict=False)
+        if data.get("gate_input") is not None
         else None
     )
 
@@ -195,20 +187,6 @@ def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
         if data.get("gate_output") is not None
         else None
     )
-
-    review_packet_data = data.get("review_packet")
-    review_packet = None
-    if review_packet_data is not None:
-        from core.bundle import ReviewPacket
-
-        review_packet = ReviewPacket.model_validate(review_packet_data, strict=False)
-
-    llm_token_cost_data = data.get("llm_token_cost")
-    llm_token_cost = None
-    if llm_token_cost_data is not None:
-        from core.bundle import TokenCost
-
-        llm_token_cost = TokenCost.model_validate(llm_token_cost_data, strict=False)
 
     from core.actions import DecisionAction
 
@@ -223,18 +201,12 @@ def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
         retrieval_results=retrieval_results,
         retrieval_path=data["retrieval_path"],
         index_version=data["index_version"],
-        gate_input_snapshot=gate_input_snapshot,
-        rendered_prompt=data["rendered_prompt"],
-        raw_llm_response=data["raw_llm_response"],
+        gate_input=gate_input,
         gate_output=gate_output,
-        final_action=DecisionAction(data["final_action"]),
+        decision_action=DecisionAction(data["decision_action"]),
         enforcement_rule_applied=data.get("enforcement_rule_applied"),
         override_log=list(data["override_log"]),
-        review_packet=review_packet,
-        gate_model_version=data.get("gate_model_version"),
-        policy_corpus_version=data["policy_corpus_version"],
         latency_breakdown=dict(data.get("latency_breakdown") or {}),
-        llm_token_cost=llm_token_cost,
     )
 
 
@@ -303,7 +275,7 @@ class BundleStore:
             "audit.bundle_written",
             component="audit",
             decision_id=bundle.decision_id,
-            final_action=bundle.final_action.value,
+            decision_action=bundle.decision_action.value,
         )
 
     def load(self, decision_id: str) -> DecisionBundle:
@@ -352,15 +324,16 @@ class BundleStore:
         """
         bundle = self.load(decision_id)
 
+        verdict = bundle.gate_output.verdict if bundle.gate_output is not None else None
         replay_decision = resolve(
             bundle.raw_event,
-            bundle.policy_gate_output,
+            verdict,
             snippets=list(bundle.retrieval_results),
             decision_id=decision_id,
         )
 
-        original_action = bundle.final_action.value
-        replayed_action = replay_decision.final_action.value
+        original_action = bundle.decision_action.value
+        replayed_action = replay_decision.decision_action.value
         actions_match = original_action == replayed_action
 
         if not actions_match:

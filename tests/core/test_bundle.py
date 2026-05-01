@@ -2,11 +2,8 @@
 
 DecisionBundle is the convergence point — it imports from every other core
 module. These tests verify that the bundle accepts domain types through their
-framework protocol interfaces and that the frozen/immutability contract holds.
-
-Domain-specific provenance (feature snapshot, scorer output, scorer model
-version) now travels in raw_event.gate_context and raw_event.fast_path_rationale.
-The bundle schema is leaner and domain-agnostic at the top level.
+framework protocol interfaces, that subclass-typed gate contracts work, and
+that the frozen/immutability contract holds.
 """
 
 from datetime import UTC, datetime
@@ -15,19 +12,41 @@ import pytest
 from pydantic import ValidationError
 
 from core.actions import DecisionAction
-from core.bundle import DecisionBundle, PolicySnippet, ReviewPacket, TokenCost
+from core.bundle import DecisionBundle
+from core.gate.policy import PolicyGateInput, PolicyGateOutput, TokenCost
+from core.snippet import RetrievedSnippet
 
 
-def test_policy_snippet_construction(policy_snippet):
-    assert policy_snippet.policy_id == "NIST-800-63B"
-    assert policy_snippet.relevance_score == 0.91
-    assert policy_snippet.retrieval_path == "reranked"
+def _gate_input(prompt_snapshot, *, rendered: str = "<prompt>") -> PolicyGateInput:
+    return PolicyGateInput(
+        model_version="gpt-4o-2024-08-06",
+        prompt_template_id=prompt_snapshot.template_id,
+        prompt_template_version=prompt_snapshot.version,
+        corpus_version="corpus-v1.0",
+        rendered_prompt=rendered,
+        prompt_snapshot=prompt_snapshot,
+        template_vars={},
+    )
 
 
-def test_policy_snippet_rejects_negative_relevance_score():
+def _gate_output(verdict, *, raw: str | None = None) -> PolicyGateOutput:
+    return PolicyGateOutput(
+        verdict=verdict,
+        response_text=raw,
+        token_cost=None,
+    )
+
+
+def test_retrieved_snippet_construction(retrieved_snippet):
+    assert retrieved_snippet.document_id == "NIST-800-63B"
+    assert retrieved_snippet.relevance_score == 0.91
+    assert retrieved_snippet.retrieval_path == "reranked"
+
+
+def test_retrieved_snippet_rejects_negative_relevance_score():
     with pytest.raises(ValidationError):
-        PolicySnippet(
-            policy_id="NIST-800-63B",
+        RetrievedSnippet(
+            document_id="NIST-800-63B",
             title="Digital Identity Guidelines",
             version="4.0",
             jurisdiction="US_FEDERAL",
@@ -38,9 +57,9 @@ def test_policy_snippet_rejects_negative_relevance_score():
         )
 
 
-def test_policy_snippet_is_immutable(policy_snippet):
+def test_retrieved_snippet_is_immutable(retrieved_snippet):
     with pytest.raises(ValidationError):
-        policy_snippet.policy_id = "OTHER"
+        retrieved_snippet.document_id = "OTHER"
 
 
 def test_token_cost_construction(token_cost):
@@ -60,34 +79,13 @@ def test_token_cost_rejects_negative_values():
         )
 
 
-def test_review_packet_construction(review_packet, login_event):
-    assert review_packet.entity_id == login_event.entity_id
-    assert review_packet.priority == 0
-
-
-def test_review_packet_rejects_risk_score_outside_unit_interval(login_event):
-    with pytest.raises(ValidationError):
-        ReviewPacket(
-            decision_id="dec-001",
-            entity_id=login_event.entity_id,
-            created_at=datetime(2024, 1, 15, tzinfo=UTC),
-            hold_reason="Test.",
-            enforcement_rule=None,
-            risk_score=1.1,
-            top_signals=[],
-        )
-
-
 @pytest.mark.smoke
 def test_decision_bundle_accepts_login_event_as_observation(
     login_event,
-    policy_snippet,
+    retrieved_snippet,
     policy_gate_output,
     prompt_snapshot,
 ):
-    # Domain provenance (fast_path_rationale, gate_context) travels in raw_event.
-    # The bundle no longer carries feature_snapshot or scorer_output at the
-    # top level.
     bundle = DecisionBundle(
         decision_id="dec-smoke-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
@@ -96,33 +94,34 @@ def test_decision_bundle_accepts_login_event_as_observation(
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=1,
         retrieval_query="MFA requirements for new device login",
-        retrieval_results=[policy_snippet],
+        retrieval_results=[retrieved_snippet],
         retrieval_path="reranked",
         index_version="corpus-v1.0",
-        gate_input_snapshot=prompt_snapshot,
-        rendered_prompt="<prompt>",
-        raw_llm_response='{"permitted_actions": ["ALLOW"]}',
-        gate_output=policy_gate_output,
-        final_action=DecisionAction.ALLOW,
+        gate_input=_gate_input(prompt_snapshot),
+        gate_output=_gate_output(
+            policy_gate_output, raw='{"permitted_actions": ["ALLOW"]}'
+        ),
+        decision_action=DecisionAction.ALLOW,
         enforcement_rule_applied=None,
         override_log=[],
-        review_packet=None,
-        gate_model_version="gpt-4o-2024-08-06",
-        policy_corpus_version="corpus-v1.0",
         latency_breakdown={"ingestion_ms": 1.2, "gate_ms": 420.0},
-        llm_token_cost=None,
     )
-    assert bundle.final_action == DecisionAction.ALLOW
+    assert bundle.decision_action == DecisionAction.ALLOW
     assert bundle.raw_event is login_event
-    # Domain provenance is accessible via the Observation
-    assert bundle.raw_event.gate_context.prompt_template_id == "ato-v1"
+    gate_config = bundle.raw_event.gate_context.gate_config
+    assert gate_config is not None
+    assert gate_config["template_id"] == "ato-v1"
     assert bundle.raw_event.fast_path_rationale is not None
     assert "FAST_PATH_ALLOW" in bundle.raw_event.fast_path_rationale
+    # Subclass-typed gate contracts survive on the bundle
+    assert isinstance(bundle.gate_input, PolicyGateInput)
+    assert bundle.gate_input.gate_id == "policy"
+    assert isinstance(bundle.gate_output, PolicyGateOutput)
+    assert bundle.gate_output.verdict is policy_gate_output
 
 
-def test_decision_bundle_gate_output_may_be_none(login_event, prompt_snapshot):
-    # None gate_output is valid — represents a schema validation failure.
-    # Enforcement routes these to HOLD.
+def test_decision_bundle_schema_failure_shape(login_event, prompt_snapshot):
+    # gate_output is non-None; verdict is None; response_text populated.
     bundle = DecisionBundle(
         decision_id="dec-gate-fail-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
@@ -134,26 +133,46 @@ def test_decision_bundle_gate_output_may_be_none(login_event, prompt_snapshot):
         retrieval_results=[],
         retrieval_path="skipped",
         index_version="corpus-v1.0",
-        gate_input_snapshot=prompt_snapshot,
-        rendered_prompt="<prompt>",
-        raw_llm_response="unparseable llm output",
-        gate_output=None,
-        final_action=DecisionAction.HOLD,
+        gate_input=_gate_input(prompt_snapshot),
+        gate_output=_gate_output(None, raw="unparseable gate output"),
+        decision_action=DecisionAction.HOLD,
         enforcement_rule_applied="schema_validation_failure",
-        override_log=["schema_validation_failure: gate_output is None → HOLD"],
-        review_packet=None,
-        gate_model_version=None,
-        policy_corpus_version="corpus-v1.0",
+        override_log=["schema_validation_failure: verdict is None → HOLD"],
         latency_breakdown={"ingestion_ms": 1.1},
-        llm_token_cost=None,
     )
+    assert bundle.gate_output is not None
+    assert bundle.gate_output.verdict is None
+    assert isinstance(bundle.gate_output, PolicyGateOutput)
+    assert bundle.gate_output.response_text == "unparseable gate output"
+    assert bundle.decision_action == DecisionAction.HOLD
+
+
+def test_decision_bundle_fast_path_has_no_gate_artifacts(login_event):
+    bundle = DecisionBundle(
+        decision_id="dec-fast-001",
+        created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
+        raw_event=login_event,
+        idempotency_key="sha256-fast",
+        ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
+        queue_position=None,
+        retrieval_query="",
+        retrieval_results=[],
+        retrieval_path="skipped",
+        index_version="unknown",
+        gate_input=None,
+        gate_output=None,
+        decision_action=DecisionAction.ALLOW,
+        enforcement_rule_applied=None,
+        override_log=["fast_path_allow"],
+        latency_breakdown={},
+    )
+    assert bundle.gate_input is None
     assert bundle.gate_output is None
-    assert bundle.final_action == DecisionAction.HOLD
 
 
 def test_decision_bundle_is_immutable(
     login_event,
-    policy_snippet,
+    retrieved_snippet,
     policy_gate_output,
     prompt_snapshot,
 ):
@@ -165,21 +184,15 @@ def test_decision_bundle_is_immutable(
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=None,
         retrieval_query="test",
-        retrieval_results=[policy_snippet],
+        retrieval_results=[retrieved_snippet],
         retrieval_path="rrf_only",
         index_version="corpus-v1.0",
-        gate_input_snapshot=prompt_snapshot,
-        rendered_prompt="<prompt>",
-        raw_llm_response="{}",
-        gate_output=policy_gate_output,
-        final_action=DecisionAction.ALLOW,
+        gate_input=_gate_input(prompt_snapshot),
+        gate_output=_gate_output(policy_gate_output, raw="{}"),
+        decision_action=DecisionAction.ALLOW,
         enforcement_rule_applied=None,
         override_log=[],
-        review_packet=None,
-        gate_model_version="gpt-4o-2024-08-06",
-        policy_corpus_version="corpus-v1.0",
         latency_breakdown={},
-        llm_token_cost=None,
     )
     with pytest.raises(ValidationError):
-        bundle.final_action = DecisionAction.BLOCK
+        bundle.decision_action = DecisionAction.BLOCK

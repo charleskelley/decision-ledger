@@ -1,61 +1,54 @@
-"""Policy gate output contracts and citation schema."""
+"""GateOutput — universal output contract for a gate invocation.
+
+A ``GateOutput`` (or subclass) exists exactly when a gate ran. The base
+class carries only what's truly universal: the gate identity and the
+typed verdict the framework consumes for enforcement.
+
+``GateOutput`` itself encodes two outcomes:
+
+  * ``verdict`` is a ``GateVerdict``: the gate ran and its response
+    validated against the kind's verdict schema. Enforcement reads
+    ``verdict`` to produce ``decision_action``.
+  * ``verdict is None``: the gate ran but its response failed
+    validation. Enforcement routes to HOLD via the schema-failure tier
+    (DR-19). Per-kind subclasses carry the forensic evidence of what
+    the gate actually emitted (e.g., ``PolicyGateOutput.response_text``
+    holds the raw LLM string for HOLD-review investigation).
+
+The third decision-bundle state — *gate not invoked* — is signaled at
+the bundle level by ``DecisionBundle.gate_output is None`` (e.g., on the
+fast path). That's a bundle concern, not a ``GateOutput`` state; this
+type does not represent the absence of a gate run.
+
+Gate-implementation-specific output artifacts (raw text response, token
+cost, structured tool-call payload, rule-evaluation trace, etc.) live on
+per-gate-type subclasses in their own subpackage — see
+``core/gate/policy/output.py`` for the reference LLM policy gate's
+``PolicyGateOutput``.
+"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from core.actions import DecisionAction
+from core.gate.verdict import GateVerdict
 
 
-class Citation(BaseModel):
-    """A single policy citation supporting a rationale claim.
+class GateOutput(BaseModel):
+    """Universal output contract for a gate invocation.
 
     Args:
-        policy_id: Identifier of the cited policy document.
-        snippet: The specific text passage cited (verbatim from the corpus).
-        relevance: Human-readable explanation of how this snippet supports
-            the rationale claim it is attached to.
+        gate_id: Identifier of the gate that ran. Subclasses narrow this
+            to ``Literal[...]`` for Pydantic discriminated-union
+            deserialization.
+        verdict: The validated typed verdict the framework consumes for
+            enforcement. ``None`` when the gate's response failed schema
+            validation; in that case enforcement routes to HOLD via the
+            schema-failure tier and subclass-specific forensic fields
+            carry the evidence.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
-    policy_id: str
-    snippet: str
-    relevance: str
-
-
-class PolicyGateOutput(BaseModel):
-    """Structured LLM policy gate output, validated against this Pydantic schema.
-
-    The policy gate produces this record as structured JSON. Pydantic validation
-    is the enforcement boundary — a response that fails validation is logged as
-    ``raw_llm_response`` and the event is routed to ``HOLD``. A passing
-    ``PolicyGateOutput`` is never modified by the enforcement layer; enforcement
-    only selects from ``permitted_actions``.
-
-    Args:
-        permitted_actions: Actions the policy permits for this event. Enforcement
-            selects the most conservative action from this list.
-        required_controls: Controls that must be applied alongside the action
-            (e.g., "log_step_up_reason", "notify_account_owner").
-        rationale: Plain-language reasoning grounded in retrieved policy evidence.
-            Maximum 200 words.
-        citations: Policy citations supporting the rationale. Each citation links
-            a specific snippet to its claim.
-        confidence: Gate's self-reported confidence in the output, in [0.0, 1.0].
-            Low confidence + high-risk action triggers a HOLD override in enforcement.
-        escalate_to_human: True if the gate recommends human review regardless
-            of the final action.
-        escalation_reason: Required when ``escalate_to_human`` is True; describes
-            the specific concern requiring human judgment.
-    """
-
-    model_config = ConfigDict(strict=True, frozen=True)
-
-    permitted_actions: list[DecisionAction]
-    required_controls: list[str]
-    rationale: str
-    citations: list[Citation]
-    confidence: float = Field(ge=0.0, le=1.0)
-    escalate_to_human: bool
-    escalation_reason: str | None
+    gate_id: str
+    verdict: GateVerdict | None

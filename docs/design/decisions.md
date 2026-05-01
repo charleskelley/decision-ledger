@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-15.** The next record is DR-16.
+**Current head: DR-21.** The next record is DR-22.
 
 ### Status values
 
@@ -475,6 +475,24 @@ thresholds, novelty scores, impossible travel flags, IP reputation signals).
   production data (impossible for a reference implementation), IEEE-CIS fraud
   dataset (transaction-level, not authentication-level — wrong domain).
 
+### Scoping note (added 2026-04-29)
+
+The "calibrate from the DAS Group RBA dataset" intent above was implemented
+in the MVP as **qualitative calibration informed by the *published*
+descriptive statistics in Wiefling et al. (ACM TOPS 2022)** — not by
+ingesting the raw 31.3M-event dataset and fitting empirical distributions
+to it. The scenario generator's archetype distributions and the trainer's
+`_generate_sample` distributions are designed against the same archetypes
+the paper characterizes; specific numbers (success/failure rates, device
+class shares, OS shares, browser shares, login-frequency moments) are
+cited from the paper's §4.1 and §4.3.
+
+A polish-phase project that does the proper raw-dataset analysis (EDA →
+distribution fitting → scenario re-tune → empirical validation) is scoped
+in [`scenarios.md`](./scenarios.md). It's intentionally a separate
+artifact rather than blocking the MVP — the architecture is the point at
+this stage; the data-pipeline depth is a follow-on portfolio piece.
+
 ---
 
 ## DR-11: Two-layer core/ structure — framework protocols and domain implementations
@@ -851,3 +869,771 @@ flows better than ELK for that diagram).
   rendering, heavy dependency chain); draw.io / Excalidraw (binary export, not
   diffable); Structurizr DSL with D2 export (still requires external tooling and
   a separate workspace model to maintain).
+
+---
+
+## DR-16: FastAPI entry point — summary DTO, sync handlers, and replay endpoint
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+Every pipeline component (ingestion through audit/replay) is implemented and
+unit-tested. The final MVP deliverable is a FastAPI application that wires all
+services into HTTP endpoints. Several design questions arose:
+
+1. **Response shape.** Should `POST /api/v1/decisions` return the full
+   `DecisionBundle` (~5–10 KB) or a summary DTO? The bundle is the canonical
+   audit record — useful for debugging — but large for a synchronous response.
+
+2. **Concurrency model.** All pipeline components (Redis, psycopg, Elasticsearch,
+   OpenAI SDK) are synchronous. FastAPI supports both sync and async handlers.
+
+3. **Replay exposure.** `BundleStore.replay()` already exists for deterministic
+   enforcement replay. Should it be exposed via HTTP now, or deferred until a
+   future CLI/eval tool?
+
+4. **Model artifact bootstrap.** `AtoScorer` requires a pre-trained XGBoost
+   model file at startup. Should the API auto-train if the file is missing?
+
+### Decision
+
+**Summary DTO with full bundle on a separate endpoint.**
+`POST /api/v1/decisions` returns a `DecisionResponse` with `decision_id`,
+`decision_action`, `enforcement_rule_applied`, `routing`, and `latency_ms`. The
+full `DecisionBundle` is available at `GET /api/v1/decisions/{decision_id}`.
+This separation keeps the primary response small and forces the GET endpoint to
+exist — which a planned post-MVP reviewer UI will consume directly.
+
+**Sync handlers.** All components are synchronous. FastAPI runs sync handlers in
+a thread pool via `run_in_executor`, which is sufficient for the reference
+implementation's concurrency needs. Migrating to async later requires no changes
+to the component interfaces — only the handler functions and connection clients
+would change.
+
+**Replay endpoint included.** `POST /api/v1/decisions/{decision_id}/replay` is
+included in the MVP API. The planned post-MVP reviewer application (likely
+Streamlit or Django) will need HTTP access to both bundle retrieval and replay.
+Building the endpoint now avoids giving the reviewer app direct database access
+or requiring a separate CLI shim.
+
+**Hard fail on missing model.** If `app/scorer/models/ato-v1.ubj` does not
+exist at startup, the lifespan raises `FileNotFoundError` with a message
+pointing to `make train`. Auto-training on startup was rejected: implicit
+behavior during startup masks a missing prerequisite step and makes
+first-run behavior unpredictable.
+
+**Service lifecycle via lifespan context manager.** All infrastructure clients
+(Redis, psycopg, Elasticsearch) and domain services (FeatureService, AtoScorer,
+PolicyRetriever, PolicyGate, BundleStore) are constructed once at startup,
+stored on `app.state`, and shared across requests. Connections are closed on
+shutdown. This replaces the deprecated `@app.on_event("startup")` pattern.
+
+### Consequences
+
+- The API surface is four endpoints: `POST /decisions` (decide),
+  `GET /decisions/{id}` (retrieve), `POST /decisions/{id}/replay` (replay),
+  and `GET /health` (liveness). This is the minimum surface the reviewer UI
+  needs.
+- Switching to full-bundle POST response later is a one-line change (swap the
+  return type and value). No pipeline logic changes required.
+- Sync handlers mean request throughput is bounded by the thread pool size.
+  For the reference implementation this is acceptable. Production deployments
+  would either increase the thread pool or migrate to async clients.
+- Hard fail on missing model means `docker compose up` + `uvicorn` is not
+  sufficient — `make train` must be run first. This is documented in the
+  runbook and the error message.
+- Alternatives rejected: full-bundle response on POST (large payload, no
+  forcing function for the GET endpoint); async handlers (premature — all
+  clients are sync, and the interface migration cost is low); replay deferred
+  (would require the reviewer app to implement its own replay path or get
+  direct DB access); auto-train on startup (implicit, unpredictable startup
+  time, masks missing prerequisite).
+
+---
+
+## DR-17: Model artifact fingerprint over model registry integration
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+`ReasonerContext.model_version` records a human-readable version string
+(e.g., `"xgb-v1.0.0"`) in every DecisionBundle. This is a label, not a
+verifiable reference. If the model file is overwritten, renamed, or a
+version collision occurs in the artifact store, there is no way to prove
+which exact binary produced a given prediction. In regulated environments,
+model governance requires demonstrating artifact-level provenance.
+
+Two approaches were considered: (1) integrate a model registry into the
+framework (MLflow, SageMaker Model Registry, etc.), or (2) record a
+content-addressable fingerprint and leave artifact management external.
+
+### Decision
+
+Add `model_artifact_sha256: str | None` to `ReasonerContext`. The domain
+scorer computes `hashlib.sha256(model_bytes).hexdigest()` once at startup
+and includes the digest in every `ReasonerContext` it produces. The
+framework carries the value in the DecisionBundle without interpreting it.
+
+To verify a bundle's model claim: hash the candidate artifact file and
+compare to `model_artifact_sha256`. Matching digests prove the exact
+binary. The field is `None` for API-based models (OpenAI, vendor black
+boxes) where no local artifact exists.
+
+Model artifact storage, versioning, discovery, and lifecycle management
+remain the domain's responsibility or are delegated to an external model
+registry (MLflow, W&B, SageMaker).
+
+### Consequences
+
+- Every bundle now carries a verifiable model fingerprint alongside the
+  human-readable version string. Together they answer "which model?"
+  (version) and "prove it" (hash).
+- Zero infrastructure added to the framework. The fingerprint is a string
+  field on a Pydantic model — stays within the `core/` boundary.
+- The framework does not manage model artifacts, model registries, or
+  model lifecycle. This is an explicit scope boundary, not an oversight.
+  Production deployments should pair DecisionLedger with an external model
+  registry.
+- Alternatives rejected: framework-integrated model registry (duplicates
+  MLflow/W&B/SageMaker functionality; adds infrastructure dependencies to
+  a pure-contract layer; every model registry does this better than a
+  custom implementation would).
+
+---
+
+## DR-18: Bundle is immutable; resolution is an append-only attempt log; CHALLENGE and HOLD are non-terminal
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+Earlier the framework carried a `ReviewPacket` field on every HOLD bundle —
+a sub-record assembled by the enforcement layer that re-stated bundle data
+(decision_id, entity_id, enforcement_rule, top SHAP signals) plus a
+`priority` and a `hold_reason`. It was intended to feed a downstream review
+queue, but that queue was never modeled. The corpus document
+`int-hold-queue-v1.md` declared the bundle itself "the authoritative source
+of truth," contradicting having a separate audit-side artifact that
+duplicates the bundle.
+
+More fundamentally, the framework had no path for the *post-decision*
+lifecycle. A HOLD decision indicates the pipeline produced a non-terminal
+action that requires further work (human review, MFA challenge outcome,
+SLA-default expiry, automated outreach, etc.) — but there was no schema for
+recording what actually happened. The same observation applies to
+CHALLENGE: the gate emits CHALLENGE, the auth subsystem applies a step-up,
+but the eventual pass/fail outcome had nowhere to live.
+
+The action vocabulary also leaked the missing model. `final_action` on the
+bundle implied terminality even when the action was HOLD or CHALLENGE,
+which conflate "what the pipeline decided" with "what was ultimately
+realized on the entity."
+
+Three load-bearing constraints framed the redesign:
+
+1. The framework's marquee guarantee (DR-13) is replay determinism: given a
+   bundle, re-running enforcement against the cached gate output must
+   reproduce the same action. Mutating the bundle post-decision (to attach
+   resolution outcome, status, or reviewer rationale) breaks this contract
+   structurally — the stored row no longer reflects "what the pipeline
+   produced at decision time."
+2. Resolution is heterogeneous and frequently multi-step. Real resolvers
+   include analyst review, SLA-expiry defaults, MFA step-up, automated
+   outreach, second-opinion models, external ticket systems, self-service
+   verification, leadership overrides, and escalation chains. A
+   single-record resolution slot cannot represent multi-step flows
+   (escalation followed by review; outreach initiated then later confirmed)
+   without either overwriting state or re-inventing an attempt-list inside
+   a single field.
+3. Decision actions partition naturally into terminal {ALLOW, BLOCK} and
+   non-terminal {CHALLENGE, HOLD} (MECE). Only non-terminal actions need
+   resolution; terminal actions are realized by the pipeline itself.
+
+### Decision
+
+**Vocabulary.** Rename `final_action` → `decision_action` everywhere it
+appears (Pydantic models, JSONB keys, SQL columns, indexes, structured-log
+fields). Introduce a precise three-term action vocabulary:
+
+- `decision_action` — the action the pipeline produced at decision time.
+  Lives on the `DecisionBundle`. Immutable.
+- `resolution_action` — the action a resolver produced. Lives on
+  `ResolutionAttempt` rows. Immutable per row.
+- `realized_action` — what was ultimately taken on the entity. Computed
+  from the bundle plus the resolution attempt log. Never stored. For
+  terminal `decision_action` it equals `decision_action`; otherwise it is
+  the first terminal `resolution_action` in the attempt chain (or `None`
+  if pending).
+
+**Bundle is immutable.** The `decision_bundles` row is INSERT-only and
+never updated post-decision. `ReviewPacket` is removed from the framework
+entirely; the bundle itself carries every field a reviewer needs (entity,
+signals, retrieval results, gate output, override log).
+
+**Resolution is an append-only attempt log.** A new `core.resolution`
+module defines `ResolverKind`, `ResolutionStatus`, and `ResolutionAttempt`
+(Pydantic, frozen). A new `decision_resolution_attempts` table — INSERT-only,
+keyed by `(decision_id, sequence)` — stores attempt rows. Multi-step flows
+are expressed as multiple rows; new states are new attempts, never row
+mutations. `app.audit.resolution_journal.ResolutionJournal` mirrors the
+patterns of `BundleStore` (idempotent schema init, structured logging) and
+exposes `record_attempt`, `load_attempts`, `realized_action`, and
+`resolution_status`. The `realized_action` fold walks attempts in sequence
+order and returns the first terminal `resolution_action`.
+
+**Resolver-kind catalog.** `ResolverKind` enumerates the framework's
+resolver vocabulary. MVP implements only `HUMAN` and `SLA_DEFAULT`.
+`STEP_UP_AUTH`, `AUTOMATED_OUTREACH`, `SECOND_OPINION`, `EXTERNAL_TICKET`,
+`SELF_SERVICE`, `OVERRIDE`, and `ESCALATION` are wireframed extension
+points — the enum members exist so consumers can begin writing attempts of
+those kinds; per-kind `evidence` payload conventions are post-MVP work.
+
+**CHALLENGE and HOLD share the same lifecycle.** The MECE partition
+(terminal vs non-terminal) makes CHALLENGE not a magical "the auth layer
+handles it" hand-wave — it's a non-terminal `decision_action` whose
+realized outcome is captured by a `STEP_UP_AUTH` (or other) resolution
+attempt. The same `realized_action` fold applies uniformly to both.
+
+**Priority lives outside the framework.** Review-queue priority is a
+function of operational concerns (account tier, campaign correlation,
+business policy) that change independently of the framework's data model.
+Priority is computed by downstream queues from `enforcement_rule_applied`
+(or other fields) at consumption time. It is not stored on the bundle and
+not in `core.resolution`.
+
+### Consequences
+
+- **Replay determinism is preserved structurally.** The `decision_bundles`
+  row is byte-stable post-write. Replay produces the original
+  `decision_action` because no field of the bundle has changed. Resolution
+  outcomes live in a separate, additive table that does not affect replay.
+- **The action vocabulary is now MECE.** Terminal {ALLOW, BLOCK} and
+  non-terminal {CHALLENGE, HOLD} cover the complete action space. CHALLENGE
+  and HOLD share lifecycle machinery. Code that reads `decision_action`
+  always gets the pipeline's verdict; code that needs the realized outcome
+  calls `realized_action()` explicitly. The distinction is forced into the
+  type system rather than implied.
+- **Multi-step resolution is native.** Escalation, outreach-initiated +
+  outreach-confirmed, expired-then-retried, and bulk/coordinated
+  resolutions all express naturally as ordered attempt rows. No nested
+  list-of-events inside a mutable resolution slot.
+- **Heterogeneous resolvers without schema churn.** New resolver kinds add
+  an enum value and a per-kind `evidence` payload convention. The
+  framework schema does not change.
+- **Storage migration.** The bundle JSONB serializer drops `review_packet`
+  and renames `final_action` → `decision_action`. Old rows in dev
+  databases will not deserialize forward; pre-production MVP accepts a
+  drop-and-rebuild. Production deployments would require either a JSONB
+  rewrite migration or a tolerant deserializer; both are out of MVP
+  scope.
+- **Resolver implementations live outside the framework.** The framework
+  defines the data model (ResolutionAttempt) and persistence
+  (ResolutionJournal). The mechanics of a review queue (UI, SLA timer,
+  reviewer auth) and the integration of each resolver kind (auth
+  subsystem for STEP_UP_AUTH, ticket-system webhooks for EXTERNAL_TICKET,
+  outreach automation for AUTOMATED_OUTREACH, etc.) are downstream
+  concerns. Each post-MVP resolver kind warrants its own DR documenting
+  the integration contract.
+- **Alternatives rejected.** (a) *Mutable resolution slot on the bundle.*
+  Single record per decision with a `resolution: HoldResolution | None`
+  field that downstream queues fill in. Simplest reads; breaks bundle
+  immutability and replay-determinism contract; cannot natively express
+  multi-step resolvers. (b) *Linked child decision bundle.* Each
+  resolution recorded as a new full `DecisionBundle` with a
+  `parent_decision_id`. Maximally symmetric but heavyweight — every
+  resolution row carries the full retrieval/gate/observation surface,
+  most of which is empty for resolutions. (c) *Single-record resolution
+  table.* One row per decision in a separate `decision_resolutions`
+  table. Preserves immutability but cannot represent multi-step
+  resolution without re-introducing nested-list state inside a row.
+
+
+---
+
+## DR-19: GateInput / GateOutput contracts on the bundle (typed gate-invocation records)
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+Through DR-15 (gate-routing decoupling), DR-18 (decision_action / immutable
+bundle / resolution log), and an interim slice that renamed
+`final_action → decision_action` and added Optional gate-text fields, the
+bundle's domain-leaking surfaces had been incrementally peeled back. What
+remained was the gate-layer surface itself: six scattered top-level fields
+on `DecisionBundle` (`gate_input_snapshot`, `gate_input_text`,
+`gate_response`, `gate_output`, `gate_model_version`, `gate_token_cost`)
+each baking in an LLM/retrieval-shaped assumption.
+
+Each of those fields encoded an implicit claim about the gate. A rule
+engine has no `gate_model_version` (it has a `rules_version`); a typed gate
+that consumes structured input has no `gate_input_text`; a non-LLM gate
+has no `gate_token_cost`. New gate types had no contract telling them what
+they MUST capture — leaving them either to populate `None` for fields that
+don't apply (silent absence) or to lie via misleading values
+(`gate_model_version="rule-engine-v1.2"`).
+
+### Decision
+
+Replace the six scattered gate-layer fields on `DecisionBundle` with two
+typed Pydantic contracts:
+
+- `gate_input: GateInput | None` — the input artifacts of a gate invocation
+- `gate_output: GateOutput | None` — the output artifacts
+
+Both `None` on the fast path. Both populated when the gate ran (whether or
+not validation succeeded). Defined in `core/gate/input.py` and
+`core/gate/output.py`. The `GateOutput.verdict: GateVerdict | None` field
+holds the framework-consumable typed verdict (formerly `PolicyGateOutput`,
+renamed to `GateVerdict` to disambiguate from the new `GateOutput`
+wrapper).
+
+Each contract has a small set of universal required fields and an
+`extras: dict[str, Any]` extension surface. Per-gate-type Pydantic
+sub-records serialize through `extras` via `model_dump(mode="json")`;
+readers reconstruct with `Model.model_validate(extras["key"])`. The
+reference LLM policy gate stores `PromptSnapshot` in
+`gate_input.extras["prompt_snapshot"]` and writes `model_version`,
+`prompt_template_id`, `corpus_version`, etc. into `gate_input.config`.
+
+`TokenCost` moves from `core/bundle.py` into `core/gate/output.py`,
+co-located with the only thing that references it. Re-exported from
+`core/gate/__init__.py`.
+
+`corpus_version` flows orchestrator → `PolicyGate.evaluate(corpus_version=...)`.
+The gate writes it into `gate_input.config["corpus_version"]`. The reasoner
+layer is not involved — `corpus_version` is infrastructure-side metadata
+and stays out of `reasoner/` per the framework's domain-boundary discipline.
+
+### Consequences
+
+- **Bundle surface stays small as gate types proliferate.** Adding a
+  rule-engine gate, a second-opinion-model gate, or a webhook gate does
+  not require new fields on `DecisionBundle`. Each gate populates
+  `GateInput.config` and `GateInput.extras` with whatever it considers
+  part of its effective configuration; the framework persists the dicts
+  without interpretation.
+- **Self-documenting contract for new gate implementations.** A new gate
+  reads `GateInput` / `GateOutput` and knows what it must populate. The
+  base classes' Pydantic schemas plus their docstrings ARE the contract.
+- **Schema-failure invariant becomes structurally explicit.** The
+  three-state contract is now type-encoded:
+  - `gate_output is None` — gate not invoked (fast path).
+  - `gate_output is not None and gate_output.verdict is not None` — gate
+    ran, verdict valid.
+  - `gate_output is not None and gate_output.verdict is None` — gate ran,
+    verdict failed validation; `gate_output.response_text` carries
+    forensic evidence; enforcement routes to HOLD via tier1.
+- **Replay determinism contract holds.** Replay calls
+  `enforcement.resolve(..., bundle.gate_output.verdict, ...)` and asserts
+  the result matches `bundle.decision_action`. Same guarantee as before;
+  one extra `.verdict` dereference. Independent of gate implementation.
+- **Forward-only storage migration.** The bundle JSONB serializer now
+  emits two top-level keys (`gate_input`, `gate_output`) instead of six.
+  Old rows in dev databases will not deserialize forward; same precedent
+  as DR-18 — drop and rebuild the dev DB. Production deployments would
+  require either a JSONB-rewrite migration or a tolerant deserializer;
+  out of MVP scope.
+- **Slice-C remainder.** `PolicySnippet` (still in `core/bundle.py`) is
+  the largest remaining domain-leaking type name. `PromptSnapshot` lives
+  in `core/gate/prompt.py` and is still framework-level even though it's
+  LLM-specific (now stored inside `gate_input.extras` rather than as a
+  bundle field, so its presence at the framework level is reduced). Both
+  are deferred to a future slice.
+- **Alternatives rejected.** (a) *Single dict for both sides.*
+  `gate_input: dict[str, Any] | None` and `gate_output: dict[str, Any] |
+  None`. Maximum flexibility but loses Pydantic validation on the
+  framework-consumable verdict — and the verdict IS the load-bearing
+  contract that enforcement reads. (b) *Discriminated union per gate
+  kind.* `class LLMGateInput(GateInput)` etc. with Pydantic
+  discriminator. Highest type safety but requires the framework to know
+  every gate kind ahead of time, defeating the extensibility goal. The
+  base-contract + extras-dict pattern preserves typed validation where it
+  matters (universal fields + verdict) and stays open for gate-specific
+  data without framework changes. (c) *Keep the six scattered fields and
+  just add `gate_id` + `gate_config_snapshot`.* Considered as an
+  incremental step but rejected: it would have left the LLM-specific
+  fields on the bundle in perpetuity and not addressed the contract
+  question for new gate types.
+
+---
+
+## DR-20: Universal gate contracts; per-gate-type subpackages; closed discriminated union for MVP
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+DR-19 collapsed the bundle's six scattered gate-layer fields into typed
+`GateInput` / `GateOutput` contracts and renamed `PolicyGateOutput` →
+`GateVerdict`. Right structural move; stopped short of true abstraction:
+
+- The renamed `GateVerdict` still carried `rationale: str` and
+  `citations: list[Citation]` — both LLM-policy-explanation patterns. A
+  rule-engine gate has no rationale-as-prose; an ML classifier has no
+  citation list. Universal in name only.
+- `GateInput.input_text` and `GateInput.config: dict[str, Any]` were
+  LLM-shaped (text input, unconstrained config dict). A typed gate
+  consuming structured features doesn't have either.
+- `GateInput.extras` and `GateOutput.extras` were `dict[str, Any]`
+  escape hatches. Each gate type was documented to put a typed Pydantic
+  sub-record there, but the framework couldn't enforce it. The
+  "Pydantic-typed all the way" claim broke at this layer.
+- All policy-gate-specific types (`PolicyGateOutput`-now-`GateVerdict`,
+  `Citation`, `PromptSnapshot`, `PromptTemplate`, `PromptRegistry`)
+  lived at `core/gate/` top level mixed with the universal contracts —
+  the namespace didn't reflect the layering.
+
+### Decision
+
+**Universal vs concrete split.** Universal contracts at `core/gate/`
+(``GateInput``, ``GateOutput``, ``GateVerdict``) carry only what the
+framework's enforcement layer reads:
+
+- `GateVerdict` — `gate_id`, `permitted_actions`, `required_controls`,
+  `confidence`, `escalate_to_human`, `escalation_reason`. No rationale.
+  No citations. Only the action/control/confidence machinery
+  enforcement.resolve() actually consumes.
+- `GateOutput` — `gate_id`, `verdict`. No `response_text`, no
+  `token_cost`, no `extras`.
+- `GateInput` — `gate_id` only. No `config`, no `input_text`, no
+  `extras`.
+
+Concrete subclasses live in per-gate-type subpackages
+(``core/gate/policy/`` for the LLM-backed policy gate; future kinds get
+sibling subpackages like ``core/gate/rule/``). Each subclass narrows
+``gate_id`` to a Pydantic ``Literal[...]`` for discriminated-union
+deserialization and adds typed top-level fields for its
+implementation-specific artifacts:
+
+- `PolicyGateVerdict(GateVerdict)` adds `rationale` and `citations`.
+- `PolicyGateOutput(GateOutput)` adds `response_text` and `token_cost`.
+- `PolicyGateInput(GateInput)` adds `model_version`,
+  `prompt_template_id`, `prompt_template_version`, `corpus_version`,
+  `rendered_prompt`, `prompt_snapshot`, `template_vars`.
+
+`Citation`, `PromptSnapshot`, `PromptTemplate`, `PromptRegistry`,
+`TokenCost` move to ``core/gate/policy/`` since they were always
+LLM-policy-gate-specific.
+
+**App-layer mirror.** ``app/policy_gate/`` → ``app/gate/policy/``
+mirroring ``core/gate/policy/``. New gate kinds get sibling
+``app/gate/<kind>/`` subpackages.
+
+**Discriminated union for deserialization.** ``DecisionBundle`` types
+its fields as the universal base (``gate_input: GateInput | None``,
+``gate_output: GateOutput | None``); subclass instances assigned at
+construction are preserved at runtime. JSONB deserialization in
+``app/audit/store.py`` picks the concrete subclass — for MVP a
+single-variant union (``PolicyGateInput`` / ``PolicyGateOutput``);
+adding a future gate kind is a one-line union extension. Open registry
+plumbing for third-party gates is deferred to post-MVP.
+
+**Discriminator field is `gate_id`, not a separate `kind` or `name`.**
+The ``gate_id`` already on ``GateContext`` and on the universal base
+contracts doubles as the Pydantic discriminator via Literal narrowing
+in subclasses. No redundant near-synonym field.
+
+**No `extras: dict[str, Any]` at the framework level.** Removed, not
+deprecated. Per-gate-type subclasses must declare typed Pydantic fields
+for any artifact they want captured.
+
+### Consequences
+
+- **Pydantic-typed all the way.** No `dict[str, Any]` escape hatches at
+  any level. Every artifact a gate captures is a typed Pydantic field
+  on either the universal base (for truly universal data) or a concrete
+  subclass (for kind-specific data). Validation happens at construction
+  time; the IDE tells implementers what fields are required.
+- **Truly framework-level gate-type-agnosticism.** The universal
+  ``GateVerdict`` carries only what enforcement reads. A rule-engine
+  gate that produces ``RuleGateVerdict(GateVerdict)`` with a typed
+  rule-trace field is now structurally first-class — same rights as the
+  policy gate, no carve-outs, no abstract dict.
+- **Self-documenting per-gate contracts.** ``PolicyGateInput``'s
+  Pydantic schema IS the documentation for what the LLM gate captures.
+  Same for ``PolicyGateOutput`` and ``PolicyGateVerdict``. No
+  out-of-band conventions.
+- **Dependency inversion at the package boundary.** Framework code
+  (``core.bundle``, ``core.enforcement``-equivalent contracts) depends
+  only on universal base contracts. Per-gate-type code lives in its own
+  subpackage and depends on the universal base. ``core.bundle`` does
+  not import ``PolicyGateInput`` or any concrete gate type.
+- **Subpackage layout reflects layering.**
+  ``core/gate/<kind>/{input,output,verdict}.py`` plus ``app/gate/<kind>/``
+  for the runtime orchestrator. Pattern is predictable for new kinds.
+- **MVP closed-union acceptable cost.** Adding a new gate kind requires
+  adding the variant to a single union in ``app/audit/store.py``. For
+  2–5 gate kinds this is fine. Open registry can land post-MVP without
+  breaking the universal contracts.
+- **Forward-only storage migration**, same precedent as DR-18 / DR-19.
+  Old JSONB rows with ``gate_input.config`` / ``gate_output.extras``
+  shapes won't deserialize forward — drop and rebuild the dev DB.
+- **Alternatives rejected.**
+  (a) *Single dict for both sides* (``gate_input: dict[str, Any]``,
+  ``gate_output: dict[str, Any]``). Maximum flexibility but loses
+  Pydantic validation on the framework-consumable verdict — and the
+  verdict IS the load-bearing contract that enforcement reads.
+  (b) *Discriminated union per gate kind without a universal base.*
+  ``GateInput = Annotated[PolicyGateInput | RuleGateInput | ...,
+  Field(discriminator="gate_id")]`` with no shared base class. Tighter
+  type at deserialization but the framework loses a type to depend on
+  for "any gate's input." The base-class pattern with Literal narrowing
+  gives both: subclass instances preserved at runtime AND a universal
+  type to depend on at the framework layer.
+  (c) *Separate `kind` discriminator field*. The semantic distinction
+  (kind = category, name = identifier) has merit, but ``gate_id`` is
+  already the established identifier in ``GateContext`` and on the
+  universal contracts. Adding a near-synonymous ``kind`` field
+  duplicates concepts. Resolved by making ``gate_id`` itself the
+  discriminator via Literal narrowing.
+  (d) *Open registry for third-party gates*. Premature for MVP. The
+  closed-union pattern lets the framework know its supported gate kinds
+  at deliberate-PR cadence; runtime registration via a registry can be
+  added later without breaking the universal contracts.
+
+---
+
+## DR-21: SOLID cleanup — package surface, ResolutionAttempt subclassing, RetrievedSnippet rename, EnforcementDecision relocation
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+### Context
+
+A SOLID audit of `core/` after DR-20 surfaced four issues:
+
+1. **Cross-subpackage import.** `core/observation/observation.py` imported
+   `GateRoute` from `core.gate` — the only hard violation of the project's
+   own stated rule (in `core/__init__.py`'s docstring) that subpackages
+   never import from siblings.
+2. **Concrete-type leakage at the abstraction's `__init__`.** `core/gate/__init__.py`
+   re-exported eight `PolicyGate*` / `Citation` / `PromptSnapshot` /
+   `PromptTemplate` / `PromptRegistry` / `TokenCost` types from
+   `core.gate.policy` "for ergonomic convenience." Mixed abstraction
+   signal at the framework's package surface — reading
+   `from core.gate import PolicyGateInput` next to
+   `from core.gate import GateInput` told consumers concrete and abstract
+   types live at the same tier.
+3. **OCP-pattern inconsistency in `ResolutionAttempt`.** DR-20 eliminated
+   `extras: dict[str, Any]` from gate contracts. `ResolutionAttempt`
+   kept `evidence: dict[str, Any]` — the same soft-typing escape hatch.
+4. **Naming-honesty issues.** `PolicySnippet` (in `core/bundle.py`) was
+   the framework's universal retrieved-corpus-chunk type with an
+   LLM-policy-flavored name. `EnforcementDecision` (also in
+   `core/bundle.py`) was the enforcement layer's intermediate output
+   bundled with the `DecisionBundle` audit record — single-responsibility
+   nudge.
+
+### Decision
+
+**Slice 1 — package surface cleanup:**
+- `GateRoute` moves from `core/gate/routes.py` to top-level
+  `core/routes.py`. Both `core/observation/` and `core/gate/` import
+  from there; neither crosses subpackage boundaries.
+- `core/gate/__init__.py` exposes only universal contracts (`GateInput`,
+  `GateOutput`, `GateVerdict`, plus `DocumentType` and `PolicyDocument`
+  as framework-corpus metadata). Concrete LLM-policy types are accessed
+  via `from core.gate.policy import ...` explicitly.
+- `core/bundle.py` reaches into subpackages via their `__init__.py`
+  interfaces: `from core.gate import GateInput, GateOutput`,
+  `from core.observation import Observation`. Matches the project's
+  stated dependency rule.
+
+**Slice 2 — ResolutionAttempt discriminator pattern:**
+- `core/resolution.py` becomes `core/resolution/` (subpackage) with
+  the universal base in `attempt.py` and per-resolver-kind subclasses
+  in sibling modules (`human.py`, `sla_default.py`).
+- Universal `ResolutionAttempt` drops the `evidence: dict[str, Any]`
+  field. `HumanResolutionAttempt` adds typed `reviewer_role` and
+  `reference_ticket_id` fields. `SlaDefaultResolutionAttempt` adds
+  typed `account_tier` and `sla_window_seconds` fields.
+- Discriminator is `resolver_kind` (Pydantic Literal narrowing in each
+  subclass). `app/audit/resolution_journal.py` uses a closed
+  discriminated union for deserialization — same pattern as
+  `app/audit/store.py` for gate contracts.
+- Persistence: the `decision_resolution_attempts` SQL table gains a
+  `payload jsonb not null` column for the typed-subclass payload. The
+  legacy `evidence jsonb` column is preserved nullable for
+  backward-compatible reads of pre-DR-21 rows; new writes leave it null
+  and a follow-up migration drops it.
+- Other `ResolverKind` enum members (`STEP_UP_AUTH`,
+  `AUTOMATED_OUTREACH`, `SECOND_OPINION`, `EXTERNAL_TICKET`,
+  `SELF_SERVICE`, `OVERRIDE`, `ESCALATION`) remain enumerated for
+  forward declaration; their subclasses land when implemented post-MVP.
+
+**Slice 3 — naming + relocation:**
+- `PolicySnippet` becomes `RetrievedSnippet`, relocated from
+  `core/bundle.py` to `core/snippet.py`. Its `policy_id` field renames
+  to `document_id`. The DB column in `policy_chunks` keeps its name
+  (the schema is policy-corpus-specific by design); the retriever maps
+  `row["policy_id"]` → `RetrievedSnippet.document_id` at the boundary.
+- `EnforcementDecision` moves from `core/bundle.py` to
+  `core/enforcement.py`. Consumers (`app/audit/bundle.py`,
+  `app/audit/store.py`, `app/enforcement/resolver.py`) update import
+  paths.
+
+### Consequences
+
+- **Zero cross-subpackage imports inside `core/`.** The dependency
+  graph now matches the project's own stated rule. New subpackages
+  (e.g., a future `core/gate/rule/` for a rule-engine gate) inherit
+  the discipline by default.
+- **Framework-surface honesty.** Reading `from core.gate import ...`
+  in a consumer reveals only the universal contracts. Concrete
+  LLM-policy-gate types require an explicit
+  `from core.gate.policy import ...` — making the abstraction layer
+  a structural signal, not a documentation claim.
+- **Pydantic-typed all the way through `core/`.** No `dict[str, Any]`
+  escape hatches at the framework level. Both gate contracts (DR-20)
+  and resolution attempts (DR-21) follow the same subclass-with-
+  discriminator pattern — pattern consistency makes the next gate
+  kind or resolver kind a known move.
+- **`core/` file layout matches conceptual layout.** Each persisted
+  framework artifact lives in its own module:
+  `bundle.py` (DecisionBundle), `enforcement.py` (EnforcementDecision),
+  `snippet.py` (RetrievedSnippet), `resolution/` (ResolutionAttempt
+  + subclasses), plus the subpackages `gate/`, `observation/`, `eval/`
+  for self-contained functional concerns. SRP-clean.
+- **Domain-neutral names match domain-neutral semantics.**
+  `RetrievedSnippet.document_id` no longer claims "this is policy"
+  when it might equally be retrieved from a knowledge base, source
+  corpus, or rule index by a non-policy-LLM gate.
+- **Forward-only storage migration**, same precedent as DR-18/19/20.
+  The dev DB drops and rebuilds; production deployments need a JSONB
+  rewrite migration for the `payload` column on
+  `decision_resolution_attempts`. Out of MVP scope.
+- **Alternatives rejected.**
+  (a) *Keep `evidence: dict[str, Any]` on `ResolutionAttempt`.* Soft
+  typing for "extensibility" — but inconsistent with DR-20's stance on
+  gate contracts. The cost of the typed-subclass pattern (one new
+  module per resolver kind) is the same blast radius as the gate-kind
+  pattern, which we accepted.
+  (b) *Half-rename `PolicySnippet` → `RetrievedSnippet` while keeping
+  `policy_id` field.* Worse than no rename — type name and field name
+  drift apart. Full rename including the field forces a coherent
+  vocabulary at every consumer.
+  (c) *Re-export `EnforcementDecision` from `core/__init__.py` for
+  ergonomic convenience.* Same pattern we just removed from
+  `core/gate/__init__.py`. Consumers import from the canonical module.
+
+
+## DR-22: Eval harness — RAGAS in, openevals out, custom SDK-agnostic LLM-judge primitive
+
+**Status:** Accepted
+**Category:** Evaluation & Tooling
+
+### Context
+
+The 5-dimension eval harness defined by `core/eval/metrics.py` (retrieval,
+faithfulness, consistency, citation, robustness) needed two LLM-touching
+components: a RAG-style faithfulness scorer (claim decomposition +
+entailment against retrieved contexts) and an LLM-as-judge primitive used
+by faithfulness and citation. The market offers two off-the-shelf options:
+
+- **RAGAS** — paper-backed metric implementations (faithfulness via
+  claim-decomposition + per-claim entailment, context precision/recall,
+  answer relevance, etc.).
+- **openevals** (LangChain) — a `create_llm_as_judge` factory composing
+  prompt template + Pydantic-schema output + chat-client call.
+
+We had to choose what to bring in, what to skip, and how to defend the
+choices to a senior reviewer evaluating the project for engineering
+judgment as much as functionality.
+
+### Decision
+
+**RAGAS — accepted as a dev dependency.** Its faithfulness metric is the
+genuinely non-trivial work the eval harness needs. Reproducing
+claim-decomposition + per-claim entailment in-house wastes time on a
+solved problem and produces a less-defensible eval story. RAGAS lives
+behind an `eval/clients/ragas.py` adapter implementing the
+`RagasFaithfulnessScorer` protocol — the dimension code (`eval/dimensions/
+faithfulness.py`) never imports RAGAS directly. Imports are deferred to
+first-call to keep the unit-test layer fast.
+
+**openevals — rejected.** The decision rests on architecture, not
+dep-tree weight. Reasons:
+
+1. **Architectural consistency.** `app/gate/policy/` already uses raw
+   `OpenAI` SDK with structured outputs (`response_format=PydanticModel`).
+   The eval harness mirrors that style with `eval/clients/openai.py:
+   OpenAIJudgeClient`. One LLM-call abstraction in the codebase, not two.
+2. **Small, legible surface area.** The custom judge primitive is ~80
+   LOC of explicit Python (Pydantic schema + Protocol + thin adapter)
+   versus a factory call buried in a third-party library. Easier to
+   reason about, easier to extend with judge-specific tweaks (calibration,
+   retry policies, prompt iteration).
+3. **Multi-model swap.** The `JudgeClient` Protocol gives us first-class
+   SDK-agnosticism. Adding an Anthropic, DeepSeek, or local-endpoint
+   backend means writing one new file under `eval/clients/`. openevals'
+   LangChain coupling does not provide that boundary as cleanly.
+4. **Telemetry and error-handling control.** With our own client we
+   choose how parse failures and refusals surface. Using openevals means
+   inheriting LangChain's exception conventions.
+
+**The dep-tree-weight argument was rejected as a defense.** RAGAS already
+pulls `langchain`, `langchain-core`, `langchain-community`,
+`langchain-classic`, `langchain-openai`, `langchain-text-splitters`,
+`langsmith`, and `langgraph` into dev deps transitively. The marginal
+cost of openevals would be near zero in dependency terms. The asymmetry
+that justifies different decisions is *what each library implements*, not
+how heavy it is.
+
+### Implementation
+
+- **`JudgeClient` Protocol** (`eval/judge.py`) — SDK-agnostic
+  structured-completion contract: `complete_structured(*, system, user,
+  response_format) -> response_format`. Concrete clients live in
+  `eval/clients/`.
+- **`OpenAIJudgeClient`** (`eval/clients/openai.py`) — wraps
+  `AsyncOpenAI.beta.chat.completions.parse` to satisfy the protocol.
+  This is the only module under `eval/` permitted to import an OpenAI
+  SDK class.
+- **`RagasFaithfulnessScorer` Protocol** (`eval/dimensions/
+  faithfulness.py`) — same SDK-agnostic pattern; `eval/clients/ragas.py`
+  is the concrete adapter.
+- **Judge prompts** in YAML at `eval/prompts/judges/` — versioned,
+  snapshottable, mirrors the `app/gate/policy/prompt_registry.py`
+  pattern.
+- **Dimensions** (`eval/dimensions/{retrieval,faithfulness,consistency,
+  citation,robustness}.py`) consume only the protocols. None imports an
+  SDK class. Verified by grep.
+
+### Consequences
+
+- **Eval harness is multi-model from day one.** Swapping the judge LLM
+  is one new file under `eval/clients/`; nothing in the dimension or
+  runner code changes.
+- **Architecture is consistent across `app/` and `eval/`.** Both go
+  through raw OpenAI SDK with structured outputs. Reviewers see one
+  pattern, not two.
+- **RAGAS' LangChain footprint is encapsulated** in
+  `eval/clients/ragas.py`. The dimension code never touches LangChain.
+- **The defense to a senior reviewer is principled.** *RAGAS earns
+  its coupling because it implements paper-backed algorithms; openevals
+  doesn't — its primary offering is a wrapper the OpenAI SDK already
+  exposes. Different decisions, different reasons.*
+- **Tradeoff accepted.** Custom code means we own correctness for the
+  judge primitive. The size (~80 LOC) keeps that ownership cheap; if
+  the judge primitive grows complex, the openevals reconsideration is
+  warranted and gets its own DR.
+- **Alternatives rejected.**
+  (a) *Skip RAGAS too; build claim-decomposition + entailment in-house.*
+  Wastes effort reproducing solved-problem metric algorithms; weakens
+  the eval story.
+  (b) *Use openevals because LangChain is "already paid for" via RAGAS.*
+  Dep-tree weight is not the load-bearing argument — architecture is.
+  Adding a second LLM-call abstraction for a wrapper we don't need
+  fails the consistency test regardless of marginal dep cost.
+  (c) *Build the judge primitive but skip the `JudgeClient` Protocol.*
+  Couples the dimensions to `AsyncOpenAI` directly. Loses the
+  multi-model swap property — and the cleanest boundary the protocol
+  provides — for nothing in return.

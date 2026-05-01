@@ -134,7 +134,7 @@ See [`docs/design/reasoner-handoff.md`](./reasoner-handoff.md) for the full fiel
 4. **RRF fusion:** Reciprocal Rank Fusion merges dense and sparse result lists into a unified ranked list.
 5. **Cross-encoder reranking:** Reranker scores each (query, candidate) pair. **Latency-budget bypass:** if reranking inference exceeds `rerank_timeout_ms` (configurable), fall back to RRF-only results. Log which path was taken in the Decision Bundle.
 
-**Output:** `RetrievalResult` — top-k `PolicySnippet` objects, each with: `policy_id`, `title`, `version`, `jurisdiction`, `section_path`, `text`, `relevance_score`, `retrieval_path` (reranked or RRF-only).
+**Output:** `RetrievalResult` — top-k `RetrievedSnippet` objects, each with: `policy_id`, `title`, `version`, `jurisdiction`, `section_path`, `text`, `relevance_score`, `retrieval_path` (reranked or RRF-only).
 
 **Error handling:** pgvector unavailable → raise `RetrievalError`, route to `HOLD`. Elasticsearch unavailable → degrade to dense-only (log degradation). No relevant results found → return empty list, signal to policy gate.
 
@@ -142,16 +142,16 @@ See [`docs/design/reasoner-handoff.md`](./reasoner-handoff.md) for the full fiel
 
 ### C7 — LLM Policy Gate
 
-**Input:** `GateContext` (from the assembled `Observation`) + `list[PolicySnippet]` (from C6).
+**Input:** `GateContext` (from the assembled `Observation`) + `list[RetrievedSnippet]` (from C6).
 
 **Processing:** Resolves the versioned YAML prompt template via `YamlPromptRegistry` using `gate_context.prompt_template_id`. Renders the template with `gate_context.template_vars` (pre-rendered domain strings: risk score, auth method, travel speed, etc.) and the retrieved policy snippets. The gate never reads domain field names directly — all domain context arrives pre-rendered in `template_vars`.
 
-Calls LLM API (OpenAI GPT-4o or equivalent) with structured output mode. Parses and validates response against `PolicyGateOutput` Pydantic schema.
+Calls LLM API (OpenAI GPT-4o or equivalent) with structured output mode. Parses and validates response against `GateVerdict` Pydantic schema.
 
-**Output:** `PolicyGateOutput`:
+**Output:** `GateResult` carrying `GateInput` and `GateOutput` contracts (DR-19). The framework-consumable verdict lives at `GateOutput.verdict`:
 
 ```python
-class PolicyGateOutput(BaseModel):
+class GateVerdict(BaseModel):
     permitted_actions: list[DecisionAction]
     required_controls: list[str]
     rationale: str                    # max 200 words
@@ -159,10 +159,11 @@ class PolicyGateOutput(BaseModel):
     confidence: float                 # [0.0–1.0]
     escalate_to_human: bool
     escalation_reason: str | None
-    prompt_version: str               # recorded in every bundle
 ```
 
-**Schema failure handling:** Pydantic validation failure → raise `PolicyGateOutputError`, log the raw LLM response, route event to `HOLD`. Never silently pass an unvalidated output to enforcement.
+LLM-specific artifacts (`model_version`, `prompt_template_id`, `corpus_version`, rendered prompt, raw response, token cost, prompt snapshot) live inside `GateInput.config` / `GateInput.extras` and `GateOutput.response_text` / `GateOutput.token_cost`, populated by the LLM gate at invocation time.
+
+**Schema failure handling:** Pydantic validation failure on the LLM response → `GateOutput.verdict = None` and `GateOutput.response_text` carries the raw LLM string. Enforcement routes the event to `HOLD` via the schema-failure tier. Never silently pass an unvalidated verdict to enforcement.
 
 **Prompt versioning:** Prompt files are immutable once created. A change to prompt behavior requires a new version file (`v2.yaml`, `v3.yaml`, etc.). The active prompt version is recorded in every Decision Bundle. CI blocks merges that activate a new prompt version without a passing eval gate run against that version.
 
@@ -170,21 +171,21 @@ class PolicyGateOutput(BaseModel):
 
 ### C8 — Deterministic Enforcement
 
-**Input:** `PolicyGateOutput` (or direct scorer routing for high-confidence events).
+**Input:** `GateVerdict` (or direct scorer routing for high-confidence events / fast path).
 
 **Processing — Rule-Based Routing Triggers:**
 
 | Trigger | Condition | Result |
 |---------|-----------|--------|
-| Schema failure | `PolicyGateOutput` failed Pydantic validation | `HOLD` |
-| Novel entity | Fewer than N historical events for this account | `HOLD` with review packet |
+| Schema failure | Gate response failed Pydantic validation (`gate_output.verdict is None`) | `HOLD` |
+| Novel entity | Fewer than N historical events for this account | `HOLD` |
 | Adversarial flag | Preprocessing detected injection attempt | `BLOCK` |
 | Low confidence + high-risk action | `confidence < threshold` AND action is `BLOCK` or `HOLD` | `HOLD` |
-| Jurisdiction conflict | Retrieved policy includes conflicting guidance | `HOLD` with conflict detail |
+| Jurisdiction conflict | Retrieved policy includes conflicting guidance | `HOLD` |
 
 If no trigger fires, the enforcement layer applies the `permitted_actions` from the policy gate output, resolving to the most conservative permissible action.
 
-**Output:** `EnforcementDecision` — `final_action: DecisionAction`, `enforcement_rule_applied: str | None`, `override_log: list[str]`, `review_packet: ReviewPacket | None`.
+**Output:** `EnforcementDecision` — `decision_action: DecisionAction`, `enforcement_rule_applied: str | None`, `override_log: list[str]`.
 
 **Invariant:** Enforcement is pure rule-based logic with no LLM calls. Every execution path is deterministic given the same inputs. This is what makes replay work.
 
@@ -194,7 +195,15 @@ If no trigger fires, the enforcement layer applies the `permitted_actions` from 
 
 Every decision produces a complete `DecisionBundle`, written to the PostgreSQL audit store. See [Data — Decision Bundle](./data.md#decision-bundle) for the full schema.
 
-**Replay:** Given a bundle ID, the replay command loads all logged intermediate states and re-executes `enforcement.resolve()` against them. It does not re-invoke the LLM — the logged LLM output is fed directly to enforcement. The replay guarantee is: identical enforcement inputs → identical final action.
+**Replay:** Given a bundle ID, the replay command loads all logged intermediate states and re-executes `enforcement.resolve()` against them. It does not re-invoke the LLM — the logged LLM output is fed directly to enforcement. The replay guarantee is: identical enforcement inputs → identical `decision_action`.
+
+---
+
+### C10 — Post-decision lifecycle (resolution)
+
+Non-terminal `decision_action` values (`CHALLENGE`, `HOLD`) require a resolution to reach a realized terminal action (`ALLOW` or `BLOCK`). The bundle itself is immutable; resolution outcomes are recorded in the append-only `decision_resolution_attempts` table as one or more `ResolutionAttempt` rows per `decision_id`. Multi-step resolvers (escalation, outreach-initiated then confirmed, expired-then-retried) express naturally as ordered attempt rows.
+
+The realized action of a decision is computed at read time by folding the attempt chain — never stored. See DR-18 for the model rationale and `core.resolution` for the data surface.
 
 ---
 

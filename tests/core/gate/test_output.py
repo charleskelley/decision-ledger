@@ -1,103 +1,91 @@
-"""Behavioral tests for PolicyGateOutput and Citation contracts.
+"""Behavioral tests for the universal GateVerdict and GateOutput contracts.
 
-PolicyGateOutput is the Pydantic validation boundary between the LLM and the
-enforcement layer. Nothing unvalidated reaches enforcement. These tests verify
-the field constraints that protect that boundary.
+GateVerdict is the framework's enforcement-consumable verdict — universal
+across gate kinds. GateOutput wraps it. Concrete subclass tests for the
+LLM policy gate live under ``tests/core/gate/policy/``.
 """
 
 import pytest
 from pydantic import ValidationError
 
 from core.actions import DecisionAction
-from core.gate import PolicyGateOutput
+from core.gate import GateOutput, GateVerdict
 
 
-def test_citation_construction(citation):
-    assert citation.policy_id == "NIST-800-63B"
-    assert len(citation.snippet) > 0
-    assert len(citation.relevance) > 0
+def _make_verdict(**overrides) -> GateVerdict:
+    base = {
+        "gate_id": "policy",
+        "permitted_actions": [DecisionAction.ALLOW],
+        "required_controls": [],
+        "confidence": 0.85,
+        "escalate_to_human": False,
+        "escalation_reason": None,
+    }
+    base.update(overrides)
+    return GateVerdict(**base)
 
 
-def test_citation_is_immutable(citation):
+def test_gate_verdict_minimal_construction():
+    verdict = _make_verdict()
+    assert verdict.gate_id == "policy"
+    assert verdict.permitted_actions == [DecisionAction.ALLOW]
+
+
+def test_gate_verdict_rejects_confidence_above_one():
     with pytest.raises(ValidationError):
-        citation.policy_id = "OTHER"
+        _make_verdict(confidence=1.1)
 
 
-def test_policy_gate_output_construction(policy_gate_output):
-    assert DecisionAction.ALLOW in policy_gate_output.permitted_actions
-    assert policy_gate_output.confidence == 0.92
-    assert not policy_gate_output.escalate_to_human
-
-
-def test_policy_gate_output_rejects_confidence_above_one():
+def test_gate_verdict_rejects_confidence_below_zero():
     with pytest.raises(ValidationError):
-        PolicyGateOutput(
-            permitted_actions=[DecisionAction.ALLOW],
-            required_controls=[],
-            rationale="Test.",
-            citations=[],
-            confidence=1.1,
-            escalate_to_human=False,
-            escalation_reason=None,
-        )
+        _make_verdict(confidence=-0.1)
 
 
-def test_policy_gate_output_rejects_confidence_below_zero():
-    with pytest.raises(ValidationError):
-        PolicyGateOutput(
-            permitted_actions=[DecisionAction.ALLOW],
-            required_controls=[],
-            rationale="Test.",
-            citations=[],
-            confidence=-0.1,
-            escalate_to_human=False,
-            escalation_reason=None,
-        )
-
-
-def test_policy_gate_output_accepts_all_decision_actions_as_permitted():
-    output = PolicyGateOutput(
+def test_gate_verdict_accepts_multiple_permitted_actions():
+    verdict = _make_verdict(
         permitted_actions=[DecisionAction.ALLOW, DecisionAction.CHALLENGE],
         required_controls=["step_up_mfa"],
-        rationale="Moderate risk. Step-up authentication is sufficient.",
-        citations=[],
         confidence=0.75,
-        escalate_to_human=False,
-        escalation_reason=None,
     )
-    assert len(output.permitted_actions) == 2
+    assert len(verdict.permitted_actions) == 2
 
 
-def test_policy_gate_output_with_escalation_flag_and_reason():
-    output = PolicyGateOutput(
+def test_gate_verdict_with_escalation_flag_and_reason():
+    verdict = _make_verdict(
         permitted_actions=[DecisionAction.HOLD],
-        required_controls=["freeze_session"],
-        rationale="Conflicting jurisdiction signals require human review.",
-        citations=[],
         confidence=0.45,
         escalate_to_human=True,
-        escalation_reason="GDPR vs US retention conflict detected in retrieved policy.",
+        escalation_reason="Conflicting jurisdiction signals.",
     )
-    assert output.escalate_to_human
-    assert output.escalation_reason is not None
+    assert verdict.escalate_to_human
+    assert verdict.escalation_reason is not None
 
 
-def test_policy_gate_output_escalate_to_human_without_reason_is_accepted():
-    # The model does not enforce escalation_reason when escalate_to_human=True.
-    # The enforcement layer is responsible for handling this case.
-    output = PolicyGateOutput(
-        permitted_actions=[DecisionAction.HOLD],
-        required_controls=[],
-        rationale="Uncertain.",
-        citations=[],
-        confidence=0.40,
-        escalate_to_human=True,
-        escalation_reason=None,
-    )
-    assert output.escalate_to_human
-    assert output.escalation_reason is None
-
-
-def test_policy_gate_output_is_immutable(policy_gate_output):
+def test_gate_verdict_is_immutable():
+    verdict = _make_verdict()
     with pytest.raises(ValidationError):
-        policy_gate_output.confidence = 0.5
+        verdict.confidence = 0.5
+
+
+# ---------------------------------------------------------------------------
+# GateOutput universal wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_gate_output_with_verdict():
+    verdict = _make_verdict()
+    output = GateOutput(gate_id="policy", verdict=verdict)
+    assert output.verdict is verdict
+    assert output.gate_id == "policy"
+
+
+def test_gate_output_verdict_may_be_none():
+    # Schema-failure shape from the universal layer's perspective.
+    output = GateOutput(gate_id="policy", verdict=None)
+    assert output.verdict is None
+
+
+def test_gate_output_is_immutable():
+    output = GateOutput(gate_id="policy", verdict=None)
+    with pytest.raises(ValidationError):
+        output.verdict = _make_verdict()

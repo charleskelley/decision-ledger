@@ -1,33 +1,39 @@
-"""Gate layer — contracts for all policy gate types in DecisionLedger.
+"""Gate layer — universal contracts for any gate kind in DecisionLedger.
 
-Defines the routing enum, gate output schema, prompt registry contracts, and
-policy corpus metadata. Any gate implementation (policy gate, LLM-as-judge,
-etc.) must produce output conforming to these contracts.
+Top-level module defines the universal contracts every gate kind
+satisfies: ``GateInput``, ``GateOutput``, ``GateVerdict``. Plus framework
+corpus metadata (``DocumentType``, ``PolicyDocument``) used by retrieving
+gates of any kind.
 
-Public API:
-    GateRouting:      Routing decision from the domain reasoner to the gate.
-    Citation:         A single policy citation with policy_id, snippet, and relevance.
-    PolicyGateOutput: Structured LLM gate output (Pydantic-validated).
-    PromptSnapshot:   Point-in-time snapshot of the prompt template at gate invocation.
-    PromptTemplate:   Immutable versioned prompt template contract.
-    PromptRegistry:   Protocol for template registries the gate depends on.
-    DocumentType:     Document type enum (REGULATION, GUIDANCE, INTERNAL_POLICY,
-                      STANDARD).
-    PolicyDocument:   Metadata schema for a versioned policy corpus document.
+Per DR-20, gate-implementation-specific types live under
+``core.gate.<kind>/`` subpackages — concrete subclasses, kind-specific
+sub-records, and per-kind protocols. The reference LLM-backed policy gate
+lives at ``core.gate.policy``. Concrete-type imports go through the
+relevant subpackage explicitly: ``from core.gate.policy import
+PolicyGateInput`` (not via this module's surface).
+
+``GateRoute`` is at the framework root in ``core.routes`` — the routing
+concept is produced upstream of the gate by the domain reasoner and
+consumed downstream by the gate, so it lives where both can import it
+without crossing subpackage boundaries.
+
+Public API at this level — universal contracts only:
+    GateInput:       Universal input contract — base for per-kind subclasses.
+    GateOutput:      Universal output contract — base for per-kind subclasses.
+    GateVerdict:     Universal verdict — what enforcement consumes.
+    DocumentType:    Document type enum (used by retrieval corpus metadata).
+    PolicyDocument:  Metadata schema for a versioned corpus document.
 """
 
-from core.gate.corpus import DocumentType, PolicyDocument
-from core.gate.output import Citation, PolicyGateOutput
-from core.gate.prompt import PromptRegistry, PromptSnapshot, PromptTemplate
-from core.routing import GateRouting
+from core.gate.input import GateInput
+from core.gate.output import GateOutput
+from core.gate.policy.corpus import DocumentType, PolicyDocument
+from core.gate.verdict import GateVerdict
 
 __all__ = [
-    "Citation",
     "DocumentType",
-    "GateRouting",
+    "GateInput",
+    "GateOutput",
+    "GateVerdict",
     "PolicyDocument",
-    "PolicyGateOutput",
-    "PromptRegistry",
-    "PromptSnapshot",
-    "PromptTemplate",
 ]

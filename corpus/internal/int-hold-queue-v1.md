@@ -1,6 +1,6 @@
 ---
 policy_id: INT-HOLD-QUEUE-V1
-title: Review Queue and HOLD Processing Policy
+title: Non-Terminal Action Resolution Policy
 version: "1.0"
 jurisdiction: INTERNAL
 effective_date: 2024-03-01
@@ -9,40 +9,40 @@ risk_tier: null
 document_type: INTERNAL_POLICY
 ---
 
-# Review Queue and HOLD Processing Policy
+# Non-Terminal Action Resolution Policy
 Version 1.0 | Effective: 2024-03-01
 
 *SYNTHETIC REFERENCE DOCUMENT — For the DecisionLedger reference implementation only. Not legal compliance guidance.*
 
 ## 1. Purpose and Scope
 
-This policy governs the human review process for events routed to HOLD by the
-enforcement layer. A HOLD decision suspends the subject request pending asynchronous
-human review. This policy defines the SLA for review completion, the criteria for
-review resolution, and the actions available to reviewers.
+This policy governs the post-decision lifecycle for events whose enforcement
+`decision_action` is non-terminal — `CHALLENGE` or `HOLD`. A non-terminal
+decision suspends or applies friction to the subject request and requires a
+resolution to reach a realized terminal action (`ALLOW` or `BLOCK`). This
+policy defines the SLA for resolution completion, the resolver vocabulary,
+and the actions available to resolvers.
 
-HOLD is a time-bounded state. Every HOLD decision has a defined SLA after which the
-default resolution is applied. The HOLD mechanism exists because the pipeline's
-confidence is insufficient to take an automated ALLOW or BLOCK decision — human
-judgment is required.
+`HOLD` and `CHALLENGE` are time-bounded states. Every non-terminal decision
+has a defined SLA after which the default resolution is applied. Both kinds
+exist because the pipeline's decision-time confidence is insufficient for an
+automated terminal outcome — additional human or system input is required.
 
-## 2. ReviewPacket Contents
+## 2. Resolution Audit Surface
 
-Every HOLD decision produces a `ReviewPacket` attached to the `DecisionBundle`. The
-ReviewPacket SHALL contain:
+The `DecisionBundle` is the authoritative source of truth for the
+decision-time context. It carries the entity identifier, scorer signals,
+retrieved policy snippets, gate output (when invoked), enforcement rule, and
+override log. Resolvers SHALL read context directly from the bundle; no
+secondary "review packet" is maintained.
 
-- The entity identifier and account metadata.
-- The enforcement rule that triggered HOLD and the specific signals that fired it.
-- The risk score, scorer confidence, and top SHAP signals.
-- The policy gate output (if the gate was invoked), including rationale and citations.
-- The account's recent event history summary.
-- A recommended action from the policy gate, if produced.
+Resolution outcomes are recorded in the append-only
+`decision_resolution_attempts` table as one or more `ResolutionAttempt`
+rows per `decision_id`. The realized action of a decision is computed at
+read time by folding the attempt chain. See DR-18 for the framework
+rationale.
 
-The ReviewPacket is the complete context for the reviewer. Reviewers SHALL NOT access
-raw infrastructure state (Redis, database) to supplement the ReviewPacket. The bundle
-is the authoritative source of truth for every decision.
-
-## 3. Review SLA by Account Tier and Priority
+## 3. Resolution SLA by Account Tier and Priority
 
 | Tier | Priority | SLA |
 |---|---|---|
@@ -55,55 +55,78 @@ is the authoritative source of truth for every decision.
 
 Priority elevation is triggered when:
 
-- The HOLD is related to a confirmed credential stuffing campaign
-  (INT-CRED-STUFF-V2 §8).
-- Multiple HOLD decisions for accounts with shared signals (coordinated attack pattern).
-- The account holder has contacted support to report the suspension.
+- The non-terminal decision is related to a confirmed credential stuffing
+  campaign (INT-CRED-STUFF-V2 §8).
+- Multiple non-terminal decisions for accounts with shared signals
+  (coordinated attack pattern).
+- The account holder has contacted support to report the suspension or
+  challenge.
 
-SLA expiry triggers the default resolution defined in §5.
+Priority is a queue/operations concern computed by the review queue from
+bundle and decision-context fields; it is not stored in the framework
+record. SLA expiry triggers the default resolution defined in §5.
 
-## 4. Review Resolution Actions
+## 4. Resolution Actions
 
-A reviewer resolving a HOLD decision SHALL select one of the following actions:
+A resolver completing a non-terminal decision SHALL record a
+`ResolutionAttempt` whose `resolver_kind`, `status`, and `resolution_action`
+encode one of the following outcomes:
 
-- **ALLOW**: The reviewer confirms the access is legitimate. The session is released.
-  The reviewer SHALL document the basis for ALLOW in the resolution note.
-- **BLOCK**: The reviewer confirms the access is suspicious. The session is blocked.
-  Account compromise response procedures (INT-INCIDENT-ATO-V1) are triggered.
-- **ESCALATE**: The reviewer requires additional information or a second opinion. The
-  SLA is extended by 50% of the original SLA. Only one escalation is permitted per
-  HOLD — second escalation converts to BLOCK.
-- **CONTACT_REQUIRED**: The reviewer attempts to contact the account holder to verify
-  identity. SLA is suspended until contact is made or 48 hours elapse (whichever is
+- **ALLOW**: The resolver confirms the access is legitimate. The session
+  is released. Recorded as `status=COMPLETED`, `resolution_action=ALLOW`.
+  The resolver SHALL document the basis for ALLOW in the attempt's `note`.
+- **BLOCK**: The resolver confirms the access is suspicious. The session
+  is blocked and account compromise response procedures
+  (INT-INCIDENT-ATO-V1) are triggered. Recorded as `status=COMPLETED`,
+  `resolution_action=BLOCK`.
+- **ESCALATE**: The resolver requires additional information or a second
+  opinion. Recorded as `status=ESCALATED`, `resolution_action=null`. The
+  SLA is extended by 50% of the original SLA. Only one escalation is
+  permitted per decision; a second escalation converts to BLOCK at the
+  next review.
+- **CONTACT_REQUIRED**: The resolver attempts to contact the account
+  holder to verify identity. Typically recorded as a `PENDING` attempt
+  with `resolver_kind=AUTOMATED_OUTREACH` (or `HUMAN` for manual
+  contact); the eventual outcome is recorded as a subsequent attempt.
+  SLA is suspended until contact is made or 48 hours elapse (whichever is
   shorter), after which the default resolution applies.
 
-Reviewers SHALL NOT resolve HOLD decisions without recording a resolution note. Empty
-resolution notes are rejected by the review queue system.
+Resolvers SHALL NOT record `COMPLETED` attempts without a `note`. Empty
+notes are rejected.
 
 ## 5. SLA Expiry Default Resolution
 
-When a HOLD decision exceeds its SLA without reviewer action:
+When a non-terminal decision exceeds its SLA without a `COMPLETED` resolution
+attempt, the system records a final `ResolutionAttempt` with
+`resolver_kind=SLA_DEFAULT`, `resolver_id="system:sla_timer"`, and an
+outcome determined by the account tier:
 
-- **STANDARD tier**: Default to BLOCK. An expired review without resolution is treated
-  as a failure to confirm legitimacy.
+- **STANDARD tier**: Default to BLOCK. An expired resolution without
+  completion is treated as a failure to confirm legitimacy.
 - **HIGH_VALUE tier**: Default to BLOCK with priority incident notification.
-- **ENTERPRISE tier**: Default to CHALLENGE (not BLOCK), given the elevated cost of
-  blocking a legitimate enterprise service. The CHALLENGE is applied to the next
-  authentication event from the account.
+- **ENTERPRISE tier**: Default to CHALLENGE applied to the next
+  authentication event from the account, given the elevated cost of
+  blocking a legitimate enterprise service. Recorded as a CHALLENGE
+  resolution_action; the next event opens its own resolution lifecycle.
 
-The default resolution is logged as an automated action in the `override_log` with the
-reason "SLA_EXPIRY_DEFAULT".
+The default resolution is logged as an automated attempt with
+`note="SLA_EXPIRY_DEFAULT"`.
 
 ## 6. Audit Requirements
 
-Every HOLD resolution SHALL produce an audit record containing:
+Every resolution attempt is itself the audit record. A `ResolutionAttempt`
+row in `decision_resolution_attempts` SHALL contain:
 
-- The original `decision_id` of the HOLD bundle.
-- The reviewer identifier and timestamp.
-- The resolution action selected.
-- The resolution note.
-- Any additional signals observed by the reviewer.
+- The original `decision_id` of the non-terminal decision.
+- The resolver identifier (`resolver_kind` + `resolver_id`) and timestamps
+  (`started_at`, `completed_at` when applicable).
+- The status (`PENDING` / `COMPLETED` / `ESCALATED` / `EXPIRED`) and
+  resolution_action (`ALLOW` / `CHALLENGE` / `HOLD` / `BLOCK`, or null
+  while still in flight).
+- The `note` capturing the resolver's reasoning.
+- Any kind-specific evidence in the `evidence` payload (ticket reference,
+  challenge id, contact channel, etc.).
 
-Audit records for HOLD resolutions are retained for the period specified in
-INT-DATA-MIN-GDPR-V1 §4. They are the primary evidence for any regulatory inquiry
-into the handling of a specific account access event.
+Resolution attempt rows are retained for the period specified in
+INT-DATA-MIN-GDPR-V1 §4. They are the primary evidence for any regulatory
+inquiry into the handling of a specific account access event.

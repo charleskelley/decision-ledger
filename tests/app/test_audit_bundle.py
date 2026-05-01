@@ -14,18 +14,24 @@ import pytest
 from app.audit.bundle import build_bundle
 from app.enforcement.resolver import resolve
 from core.actions import DecisionAction
-from core.bundle import PolicySnippet, TokenCost
-from core.gate import GateRouting, PromptSnapshot
+from core.gate.policy import (
+    PolicyGateInput,
+    PolicyGateOutput,
+    PromptSnapshot,
+    TokenCost,
+)
+from core.routes import GateRoute
+from core.snippet import RetrievedSnippet
 
 # ---------------------------------------------------------------------------
 # Helpers / local fixtures
 # ---------------------------------------------------------------------------
 
 
-def _snippet(policy_id: str = "DOC-001") -> PolicySnippet:
-    return PolicySnippet(
-        policy_id=policy_id,
-        title=f"Policy {policy_id}",
+def _snippet(document_id: str = "DOC-001") -> RetrievedSnippet:
+    return RetrievedSnippet(
+        document_id=document_id,
+        title=f"Policy {document_id}",
         version="1.0",
         jurisdiction="US_FEDERAL",
         section_path="Section 1",
@@ -50,12 +56,39 @@ _IDEMPOTENCY_KEY = "sha256-abc123"
 _INGESTION_TS = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
 
 
+def _gate_input(
+    prompt_snapshot: PromptSnapshot,
+    *,
+    rendered: str,
+    corpus_version: str = "corpus-2024-Q1",
+) -> PolicyGateInput:
+    return PolicyGateInput(
+        model_version="gpt-4o-2024-08-06",
+        prompt_template_id=prompt_snapshot.template_id,
+        prompt_template_version=prompt_snapshot.version,
+        corpus_version=corpus_version,
+        rendered_prompt=rendered,
+        prompt_snapshot=prompt_snapshot,
+        template_vars={},
+    )
+
+
+def _gate_output(
+    verdict, *, raw: str | None, with_tokens: bool = True
+) -> PolicyGateOutput:
+    return PolicyGateOutput(
+        verdict=verdict,
+        response_text=raw,
+        token_cost=_token_cost() if with_tokens else None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fast-path bundle assembly
 # ---------------------------------------------------------------------------
 
 
-def test_build_bundle_fast_path_gate_fields_are_empty(login_event, gate_output):
+def test_build_bundle_fast_path_gate_artifacts_are_none(login_event):
     enf = resolve(login_event, None, snippets=[], decision_id=_DECISION_ID)
     bundle = build_bundle(
         decision_id=_DECISION_ID,
@@ -64,16 +97,12 @@ def test_build_bundle_fast_path_gate_fields_are_empty(login_event, gate_output):
         ingestion_timestamp=_INGESTION_TS,
         enforcement_decision=enf,
     )
-    # Fast path — gate never invoked
-    assert bundle.rendered_prompt == ""
-    assert bundle.raw_llm_response == ""
+    # Fast path — gate never invoked: gate_input and gate_output are both None.
+    assert bundle.gate_input is None
     assert bundle.gate_output is None
-    assert bundle.gate_input_snapshot is None
-    assert bundle.gate_model_version is None
-    assert bundle.llm_token_cost is None
 
 
-def test_build_bundle_fast_path_retrieval_defaults(login_event, gate_output):
+def test_build_bundle_fast_path_retrieval_defaults(login_event):
     enf = resolve(login_event, None, snippets=[], decision_id=_DECISION_ID)
     bundle = build_bundle(
         decision_id=_DECISION_ID,
@@ -88,7 +117,7 @@ def test_build_bundle_fast_path_retrieval_defaults(login_event, gate_output):
     assert bundle.index_version == "unknown"
 
 
-def test_build_bundle_fast_path_identity_fields(login_event, gate_output):
+def test_build_bundle_fast_path_identity_fields(login_event):
     enf = resolve(login_event, None, snippets=[], decision_id=_DECISION_ID)
     bundle = build_bundle(
         decision_id=_DECISION_ID,
@@ -105,8 +134,8 @@ def test_build_bundle_fast_path_identity_fields(login_event, gate_output):
     assert bundle.raw_event is login_event
 
 
-def test_build_bundle_fast_path_final_action_is_allow(login_event):
-    # login_event routing=FAST_PATH_ALLOW → enforcement returns ALLOW
+def test_build_bundle_fast_path_decision_action_is_allow(login_event):
+    # login_event route=FAST_PATH_ALLOW → enforcement returns ALLOW
     enf = resolve(login_event, None, snippets=[], decision_id=_DECISION_ID)
     bundle = build_bundle(
         decision_id=_DECISION_ID,
@@ -115,9 +144,8 @@ def test_build_bundle_fast_path_final_action_is_allow(login_event):
         ingestion_timestamp=_INGESTION_TS,
         enforcement_decision=enf,
     )
-    assert bundle.final_action == DecisionAction.ALLOW
+    assert bundle.decision_action == DecisionAction.ALLOW
     assert bundle.enforcement_rule_applied is None
-    assert bundle.review_packet is None
 
 
 def test_build_bundle_created_at_is_utc_and_recent(login_event):
@@ -145,7 +173,7 @@ def prompt_snapshot() -> PromptSnapshot:
     return PromptSnapshot(
         template_id="ato-v1",
         version="1.0.0",
-        template_str="Risk: {risk_score}\n{policy_snippets}",
+        template_text="Risk: {risk_score}\n{policy_snippets}",
     )
 
 
@@ -154,28 +182,29 @@ def gate_route_event(login_event):
     """LoginEvent routed to policy gate (ROUTE_TO_GATE)."""
     return login_event.model_copy(
         update={
-            "routing": GateRouting.ROUTE_TO_GATE,
+            "route": GateRoute.ROUTE_TO_GATE,
             "fast_path_rationale": None,
         }
     )
 
 
-def _make_gate_result(gate_output, prompt_snapshot):
-    """Minimal GateResult-like object using a simple namespace for testing."""
-    from app.policy_gate.gate import GateResult
+def _make_gate_result(gate_output, prompt_snapshot, *, raw_response: str = ""):
+    """Construct a GateResult carrying populated PolicyGateInput / PolicyGateOutput."""
+    from app.gate.policy.gate import GateResult
 
+    rendered = "Risk: 0.55\nSection 1: All verifiers SHALL require MFA."
     return GateResult(
-        rendered_prompt="Risk: 0.55\nSection 1: All verifiers SHALL require MFA.",
-        raw_llm_response='{"permitted_actions": ["ALLOW"]}',
-        policy_gate_output=gate_output,
-        token_cost=_token_cost(),
-        prompt_snapshot=prompt_snapshot,
-        model_version="gpt-4o-2024-08-06",
+        gate_input=_gate_input(prompt_snapshot, rendered=rendered),
+        gate_output=_gate_output(
+            gate_output,
+            raw=raw_response or '{"permitted_actions": ["ALLOW"]}',
+            with_tokens=True,
+        ),
         latency_ms=1234.5,
     )
 
 
-def test_build_bundle_gate_path_populates_gate_fields(
+def test_build_bundle_gate_path_populates_gate_artifacts(
     gate_route_event, gate_output, prompt_snapshot
 ):
     snippets = [_snippet("NIST-800-63B")]
@@ -194,15 +223,17 @@ def test_build_bundle_gate_path_populates_gate_fields(
         index_version="v2.1",
         gate_result=gr,
         enforcement_decision=enf,
-        policy_corpus_version="corpus-2024-Q1",
     )
-    assert bundle.rendered_prompt == gr.rendered_prompt
-    assert bundle.raw_llm_response == gr.raw_llm_response
-    assert bundle.gate_output == gate_output
-    assert bundle.gate_input_snapshot == prompt_snapshot
-    assert bundle.gate_model_version == "gpt-4o-2024-08-06"
-    assert bundle.llm_token_cost is not None
-    assert bundle.llm_token_cost.total_tokens == 620
+    assert bundle.gate_input is gr.gate_input
+    assert bundle.gate_output is gr.gate_output
+    assert isinstance(bundle.gate_input, PolicyGateInput)
+    assert bundle.gate_input.gate_id == "policy"
+    assert bundle.gate_input.model_version == "gpt-4o-2024-08-06"
+    assert bundle.gate_input.corpus_version == "corpus-2024-Q1"
+    assert isinstance(bundle.gate_output, PolicyGateOutput)
+    assert bundle.gate_output.verdict is gate_output
+    assert bundle.gate_output.token_cost is not None
+    assert bundle.gate_output.token_cost.total_tokens == 620
 
 
 def test_build_bundle_gate_path_retrieval_fields(
@@ -232,18 +263,14 @@ def test_build_bundle_gate_path_retrieval_fields(
 
 
 def test_build_bundle_schema_failure_routes_to_hold(gate_route_event, prompt_snapshot):
-    """Gate output None → enforcement tier1_schema_failure → HOLD."""
-    snippets: list[PolicySnippet] = []
+    """Gate verdict None → enforcement tier1_schema_failure → HOLD."""
+    snippets: list[RetrievedSnippet] = []
     enf = resolve(gate_route_event, None, snippets=snippets, decision_id=_DECISION_ID)
-    from app.policy_gate.gate import GateResult
+    from app.gate.policy.gate import GateResult
 
     gr = GateResult(
-        rendered_prompt="Risk: 0.55",
-        raw_llm_response="not valid json",
-        policy_gate_output=None,
-        token_cost=None,
-        prompt_snapshot=prompt_snapshot,
-        model_version="gpt-4o-2024-08-06",
+        gate_input=_gate_input(prompt_snapshot, rendered="Risk: 0.55"),
+        gate_output=_gate_output(None, raw="not valid json", with_tokens=False),
         latency_ms=500.0,
     )
     bundle = build_bundle(
@@ -254,10 +281,15 @@ def test_build_bundle_schema_failure_routes_to_hold(gate_route_event, prompt_sna
         gate_result=gr,
         enforcement_decision=enf,
     )
-    assert bundle.final_action == DecisionAction.HOLD
+    assert bundle.decision_action == DecisionAction.HOLD
     assert bundle.enforcement_rule_applied == "tier1_schema_failure"
-    assert bundle.gate_output is None
-    assert bundle.review_packet is not None
+    # Schema-failure invariant: gate_output is non-None but verdict is None;
+    # response_text carries the gate's emitted text for HOLD review.
+    assert isinstance(bundle.gate_output, PolicyGateOutput)
+    assert bundle.gate_output.verdict is None
+    assert bundle.gate_output.response_text == "not valid json"
+    assert isinstance(bundle.gate_input, PolicyGateInput)
+    assert bundle.gate_input.rendered_prompt == "Risk: 0.55"
 
 
 def test_build_bundle_latency_breakdown_stored(login_event):
@@ -273,19 +305,6 @@ def test_build_bundle_latency_breakdown_stored(login_event):
     )
     assert bundle.latency_breakdown["ingestion_ms"] == pytest.approx(5.2)
     assert bundle.latency_breakdown["scorer_ms"] == pytest.approx(1.8)
-
-
-def test_build_bundle_policy_corpus_version(login_event):
-    enf = resolve(login_event, None, snippets=[], decision_id=_DECISION_ID)
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=login_event,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-        policy_corpus_version="corpus-2024-Q4",
-    )
-    assert bundle.policy_corpus_version == "corpus-2024-Q4"
 
 
 def test_build_bundle_override_log_from_enforcement(login_event):
