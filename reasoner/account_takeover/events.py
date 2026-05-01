@@ -6,7 +6,7 @@ deterministically from account_id using UUID5 so that any caller can
 reproduce the framework identity from the domain business key without a
 registry lookup.
 
-Framework fields (routing, reasoner_context, fast_path_rationale, gate_context)
+Framework fields (route, reasoner_context, fast_path_rationale, gate_context)
 default to unassembled values. The domain assembler (assembler.py) populates
 them from scorer output and computed features before framework submission.
 Submitting an event with default framework fields to the DecisionLedger
@@ -23,8 +23,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, computed_field
 
-from core.gate import GateRouting
 from core.observation import GateContext, ReasonerContext
+from core.routes import GateRoute
 
 # Stable UUID5 namespace for ATO Reasoner account entity identifiers.
 # UUID5(_ATO_ACCOUNT_NS, account_id) produces a reproducible, opaque
@@ -120,14 +120,14 @@ class LoginEvent(BaseModel):
         user_agent: HTTP User-Agent string.
         auth_method: Authentication method used.
         outcome: Result of the authentication attempt.
-        routing: Routing decision produced by the ATO domain pipeline after
+        route: Routing decision produced by the ATO domain pipeline after
             feature computation and scoring. Set by the domain assembler
             before the event is submitted to the DecisionLedger framework.
         reasoner_context: Generic reasoner evidence record populated by the
             domain assembler from ScorerOutput and AtoFeatureVector. None
             in intermediate pipeline stages before assembly. The framework
             raises if None at submission time.
-        fast_path_rationale: Required when ``routing`` is ``FAST_PATH_ALLOW``
+        fast_path_rationale: Required when ``route`` is ``FAST_PATH_ALLOW``
             or ``FAST_PATH_BLOCK``. Human-readable explanation of the
             confidence-band rule that fired (e.g., ``"risk_score=0.93 >
             0.85 → FAST_PATH_BLOCK"``). ``None`` when routing to the policy
@@ -166,14 +166,10 @@ class LoginEvent(BaseModel):
 
     # Framework Observation fields — set by domain assembler after
     # feature computation and scoring, before framework submission.
-    routing: GateRouting = GateRouting.ROUTE_TO_GATE
+    route: GateRoute = GateRoute.ROUTE_TO_GATE
     reasoner_context: ReasonerContext | None = None
     fast_path_rationale: str | None = None
-    gate_context: GateContext = GateContext(
-        prompt_template_id="ato-v1",
-        template_vars={},
-        jurisdictions=[],
-    )
+    gate_context: GateContext = GateContext(gate_id="policy")
 
     # Generator only — stripped before scoring
     scenario_tag: str | None = None

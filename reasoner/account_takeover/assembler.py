@@ -36,8 +36,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from core.gate import GateRouting
 from core.observation import AttributionSummary, GateContext, LabelType, ReasonerContext
+from core.routes import GateRoute
 from reasoner.account_takeover.policy import Jurisdiction, RiskTier
 
 if TYPE_CHECKING:
@@ -118,20 +118,20 @@ def _resolve_jurisdictions(event: LoginEvent) -> list[str]:
     return [str(j) for j in jurisdictions]
 
 
-def _fast_path_rationale(routing: GateRouting, risk_score: float) -> str:
-    """Build the fast_path_rationale string for a fast-path routing decision.
+def _fast_path_rationale(route: GateRoute, risk_score: float) -> str:
+    """Build the fast_path_rationale string for a fast-path route.
 
     Records the confidence-band rule that fired in a human-readable form.
-    This is the audit trail for why the policy gate was bypassed.
+    This is the audit trail for why the gate was bypassed.
 
     Args:
-        routing: The fast-path routing decision.
+        route: The fast-path gate route.
         risk_score: The risk score that crossed the threshold.
 
     Returns:
         Descriptive rationale string set on the outbound Observation.
     """
-    if routing == GateRouting.FAST_PATH_ALLOW:
+    if route == GateRoute.FAST_PATH_ALLOW:
         return (
             f"risk_score={risk_score:.3f} < {_FAST_PATH_ALLOW_THRESHOLD}"
             " → FAST_PATH_ALLOW"
@@ -159,13 +159,14 @@ def _build_reasoner_context(
         reasoner_id=_REASONER_ID,
         reasoner_name=_REASONER_NAME,
         model_version=scorer.scorer_version,
+        model_artifact_sha256=scorer.scorer_artifact_sha256,
         inference_latency_ms=scorer.inference_latency_ms,
         label_type=LabelType.NUMERICAL,
         label_name="risk_score",
         label_value=scorer.risk_score,
         feature_set=fs,
         attribution=AttributionSummary(
-            observation_signals=scorer.top_signals or None,
+            feature_contributions=scorer.top_signals or None,
         ),
     )
 
@@ -190,30 +191,33 @@ def _build_gate_context(
         Populated ``GateContext`` ready for the framework.
     """
     top_signal_strs = [
-        f"{s.feature_name}={s.raw_value:.3g} (SHAP {s.shap_value:+.3f})"
+        f"{s.feature_name}={s.feature_value:.3g} (SHAP {s.value:+.3f})"
         for s in scorer.top_signals[:3]
     ]
     top_signals_rendered = ", ".join(top_signal_strs) if top_signal_strs else "none"
 
     return GateContext(
-        prompt_template_id="ato-v1",
-        jurisdictions=_resolve_jurisdictions(event),
-        risk_tier=_resolve_risk_tier(scorer.risk_score),
-        template_vars={
-            "risk_score": f"{scorer.risk_score:.3f}",
+        gate_id="policy",
+        gate_config={
+            "template_id": "ato-v1",
+            "template_vars": {
+                "risk_score": f"{scorer.risk_score:.3f}",
+                "risk_tier": _resolve_risk_tier(scorer.risk_score),
+                "auth_method": event.auth_method.value,
+                "outcome": event.outcome.value,
+                "jurisdiction": event.geolocation.country,
+                "top_signals": top_signals_rendered,
+                "impossible_travel": str(features.impossible_travel),
+                "velocity_1min": str(features.velocity_1min),
+                "velocity_5min": str(features.velocity_5min),
+                "velocity_60min": str(features.velocity_60min),
+                "device_novelty": f"{features.device_novelty:.2f}",
+                "ip_novelty": f"{features.ip_novelty:.2f}",
+                "geo_novelty": f"{features.geo_novelty:.2f}",
+                "sparse_history": str(features.sparse_history),
+            },
+            "jurisdictions": _resolve_jurisdictions(event),
             "risk_tier": _resolve_risk_tier(scorer.risk_score),
-            "auth_method": event.auth_method.value,
-            "outcome": event.outcome.value,
-            "jurisdiction": event.geolocation.country,
-            "top_signals": top_signals_rendered,
-            "impossible_travel": str(features.impossible_travel),
-            "velocity_1min": str(features.velocity_1min),
-            "velocity_5min": str(features.velocity_5min),
-            "velocity_60min": str(features.velocity_60min),
-            "device_novelty": f"{features.device_novelty:.2f}",
-            "ip_novelty": f"{features.ip_novelty:.2f}",
-            "geo_novelty": f"{features.geo_novelty:.2f}",
-            "sparse_history": str(features.sparse_history),
         },
     )
 
@@ -248,14 +252,14 @@ def build_observation(
     gate_context = _build_gate_context(event, features, scorer)
 
     rationale = (
-        _fast_path_rationale(scorer.routing, scorer.risk_score)
-        if scorer.routing != GateRouting.ROUTE_TO_GATE
+        _fast_path_rationale(scorer.route, scorer.risk_score)
+        if scorer.route != GateRoute.ROUTE_TO_GATE
         else None
     )
 
     return event.model_copy(
         update={
-            "routing": scorer.routing,
+            "route": scorer.route,
             "reasoner_context": reasoner_context,
             "fast_path_rationale": rationale,
             "gate_context": gate_context,

@@ -25,6 +25,7 @@ FRAMEWORK_TOP_LEVEL = [
     REPO_ROOT / "core" / "actions.py",
     REPO_ROOT / "core" / "bundle.py",
     REPO_ROOT / "core" / "exceptions.py",
+    # core/routing.py removed — GateRoute now lives in core/gate/routes.py
 ]
 
 DOMAIN_PREFIXES = [
@@ -82,18 +83,22 @@ def test_gate_subpackage_does_not_import_from_observation_subpackage():
     )
 
 
-def test_observation_subpackage_does_not_import_from_gate_subpackage():
-    # core/observation/ must not import from core/gate/ — gate types are
-    # assembled by bundle.py, not by the intake contract layer.
+def test_observation_subpackage_does_not_import_gate_implementation_types():
+    # core/observation/ may import from the core.gate public API (e.g.,
+    # GateRoute), but must not import gate implementation types from
+    # core.gate.output or core.gate.prompt — those are consumed by
+    # bundle.py, not by the intake contract layer.
+    banned_prefixes = ["core.gate.output", "core.gate.prompt"]
     violations = []
     obs_dir = REPO_ROOT / "core" / "observation"
     for py_file in sorted(obs_dir.glob("*.py")):
         for imported in _collect_imports(py_file):
-            if imported.startswith("core.gate"):
+            if any(imported.startswith(p) for p in banned_prefixes):
                 relative = py_file.relative_to(REPO_ROOT)
                 violations.append(f"  {relative}: imports {imported}")
 
     assert not violations, (
-        "DR-11 violation — core/observation/ must not import from core/gate/:\n"
+        "DR-11 violation — core/observation/ must not import gate "
+        "implementation types (core.gate.output, core.gate.prompt):\n"
         + "\n".join(violations)
     )

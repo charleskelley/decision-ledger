@@ -13,8 +13,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.gate import GateRouting
-from core.observation import Signal
+from core.observation import Contribution
+from core.routes import GateRoute
 
 
 class ScorerOutput(BaseModel):
@@ -30,15 +30,18 @@ class ScorerOutput(BaseModel):
         risk_score: Risk probability estimate in [0.0, 1.0].
         top_signals: Top-k signals ranked by absolute SHAP value.
         scorer_version: Loaded model artifact version (e.g., ``"xgb-v1.2.0"``).
+        scorer_artifact_sha256: SHA-256 hex digest of the model binary.
+            None for API-based models with no local artifact.
         inference_latency_ms: Wall-clock inference time in milliseconds.
-        routing: Routing decision produced by the confidence-band threshold.
+        route: Gate route produced by the confidence-band threshold.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     entity_id: UUID
     risk_score: float = Field(ge=0.0, le=1.0)
-    top_signals: list[Signal]
+    top_signals: list[Contribution]
     scorer_version: str
+    scorer_artifact_sha256: str | None = None
     inference_latency_ms: float = Field(ge=0.0)
-    routing: GateRouting
+    route: GateRoute

@@ -36,7 +36,7 @@ import structlog
 from psycopg.rows import dict_row
 
 from app.retrieval.corpus_loader import parse_document
-from core.bundle import PolicySnippet
+from core.snippet import RetrievedSnippet
 from reasoner.account_takeover.events import AuthOutcome
 
 if TYPE_CHECKING:
@@ -92,8 +92,8 @@ _SnippetKey = tuple[str, str, str]
 # ---------------------------------------------------------------------------
 
 
-def _snippet_key(s: PolicySnippet) -> _SnippetKey:
-    return (s.policy_id, s.version, s.section_path)
+def _snippet_key(s: RetrievedSnippet) -> _SnippetKey:
+    return (s.document_id, s.version, s.section_path)
 
 
 def _load_title_map(corpus_dir: Path) -> dict[str, str]:
@@ -203,7 +203,7 @@ class PolicyRetriever:
         *,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
-    ) -> list[PolicySnippet]:
+    ) -> list[RetrievedSnippet]:
         """Pgvector cosine similarity search via HNSW index.
 
         Applies jurisdiction and risk-tier metadata filters before the
@@ -217,7 +217,7 @@ class PolicyRetriever:
             risk_tier: If provided, include chunks for this tier or all tiers.
 
         Returns:
-            Ranked list of PolicySnippet objects with cosine similarity scores.
+            Ranked list of RetrievedSnippet objects with cosine similarity scores.
         """
         embedding = self._model.encode([query])[0]
 
@@ -256,7 +256,7 @@ class PolicyRetriever:
         k: int,
         *,
         jurisdictions: list[str] | None = None,
-    ) -> list[PolicySnippet]:
+    ) -> list[RetrievedSnippet]:
         """Elasticsearch BM25 search with dual-analyzer query.
 
         Queries both ``text`` (English analyser — stemming, stopwords) and
@@ -269,7 +269,7 @@ class PolicyRetriever:
             jurisdictions: If provided, restrict to these jurisdiction codes.
 
         Returns:
-            Ranked list of PolicySnippet objects. Scores are raw BM25 values
+            Ranked list of RetrievedSnippet objects. Scores are raw BM25 values
             (not normalised) — used only for ranking, not as final relevance.
         """
         es_query: dict[str, Any] = {
@@ -298,10 +298,10 @@ class PolicyRetriever:
 
     def rrf_fuse(
         self,
-        dense: list[PolicySnippet],
-        sparse: list[PolicySnippet],
+        dense: list[RetrievedSnippet],
+        sparse: list[RetrievedSnippet],
         k: int,
-    ) -> list[PolicySnippet]:
+    ) -> list[RetrievedSnippet]:
         """Reciprocal Rank Fusion of dense and sparse result lists.
 
         Deduplication key is ``(policy_id, version, section_path)``. When the
@@ -318,7 +318,7 @@ class PolicyRetriever:
             Fused and re-ranked list with RRF scores as ``relevance_score``.
         """
         scores: dict[_SnippetKey, float] = {}
-        chunks: dict[_SnippetKey, PolicySnippet] = {}
+        chunks: dict[_SnippetKey, RetrievedSnippet] = {}
 
         for rank, snippet in enumerate(dense, 1):
             key = _snippet_key(snippet)
@@ -340,9 +340,9 @@ class PolicyRetriever:
     def rerank(
         self,
         query: str,
-        candidates: list[PolicySnippet],
+        candidates: list[RetrievedSnippet],
         k: int,
-    ) -> tuple[list[PolicySnippet], str]:
+    ) -> tuple[list[RetrievedSnippet], str]:
         """Rerank candidates with a cross-encoder, with a latency-budget bypass.
 
         Scores each (query, snippet.text) pair using the cross-encoder and
@@ -400,7 +400,7 @@ class PolicyRetriever:
         *,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
-    ) -> tuple[list[PolicySnippet], str]:
+    ) -> tuple[list[RetrievedSnippet], str]:
         """Run the full hybrid retrieval pipeline.
 
         Calls dense → sparse → RRF → rerank in sequence. Returns the top-k
@@ -413,7 +413,7 @@ class PolicyRetriever:
             risk_tier: Risk-tier filter forwarded to the dense store.
 
         Returns:
-            Tuple of (top-k PolicySnippet list, retrieval_path string).
+            Tuple of (top-k RetrievedSnippet list, retrieval_path string).
         """
         # Retrieve k*2 candidates from each source to give RRF enough to work with
         candidate_k = k * 2
@@ -443,11 +443,17 @@ class PolicyRetriever:
 
     def _row_to_snippet(
         self, row: dict[str, Any], *, retrieval_path: str
-    ) -> PolicySnippet:
-        """Convert a psycopg dict row to a PolicySnippet."""
-        return PolicySnippet(
-            policy_id=row["policy_id"],
-            title=self._titles.get(str(row["policy_id"]), str(row["policy_id"])),
+    ) -> RetrievedSnippet:
+        """Convert a psycopg dict row to a RetrievedSnippet.
+
+        The DB column ``policy_id`` (in the ``policy_chunks`` table) maps
+        to ``RetrievedSnippet.document_id`` — the column lives in a
+        policy-corpus-specific schema; the snippet type is domain-neutral.
+        """
+        doc_id = str(row["policy_id"])
+        return RetrievedSnippet(
+            document_id=doc_id,
+            title=self._titles.get(doc_id, doc_id),
             version=row["version"],
             jurisdiction=row["jurisdiction"],
             section_path=row["section_path"],
@@ -458,14 +464,12 @@ class PolicyRetriever:
 
     def _source_to_snippet(
         self, source: dict[str, Any], *, retrieval_path: str
-    ) -> PolicySnippet:
-        """Convert an ES ``_source`` dict to a PolicySnippet."""
-        return PolicySnippet(
-            policy_id=source["policy_id"],
-            title=source.get(
-                "title",
-                self._titles.get(str(source["policy_id"]), str(source["policy_id"])),
-            ),
+    ) -> RetrievedSnippet:
+        """Convert an ES ``_source`` dict to a RetrievedSnippet."""
+        doc_id = str(source["policy_id"])
+        return RetrievedSnippet(
+            document_id=doc_id,
+            title=source.get("title", self._titles.get(doc_id, doc_id)),
             version=source["version"],
             jurisdiction=source["jurisdiction"],
             section_path=source["section_path"],
