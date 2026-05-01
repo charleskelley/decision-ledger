@@ -44,23 +44,18 @@ classifiers = [
 dependencies = [
     # --- Core (schema, contracts, pure logic) ---
     "pydantic>=2.7,<3",
-
     # --- API layer ---
     "fastapi>=0.111,<1",
     "uvicorn[standard]>=0.30,<1",
-
     # --- Event queue ---
     "redis>=5.0,<6",
-
     # --- Database ---
     "psycopg[binary]>=3.1,<4",
     "pgvector>=0.3,<1",
     "sqlalchemy>=2.0,<3",
     "alembic>=1.13,<2",
-
     # --- Search ---
     "elasticsearch>=8.13,<9",
-
     # --- ML scorer ---
     # shap removed: XGBoost >= 2.0 computes TreeSHAP natively via
     # model.predict(data, pred_contribs=True) — identical numerical output,
@@ -68,20 +63,17 @@ dependencies = [
     "xgboost>=2.0,<3",
     "numpy>=1.26,<3",
     "pandas>=2.2,<3",
-
     # --- Embeddings & retrieval ---
     "sentence-transformers>=3.0,<4",
     "torch>=2.3",
-
     # --- LLM policy gate ---
     "openai>=1.30,<2",
-
     # --- Serialization & config ---
     "pyyaml>=6.0,<7",
     "orjson>=3.10,<4",
-
     # --- Observability ---
     "structlog>=24.1,<25",
+    "pydantic-settings>=2.13.1",
 ]
 
 [dependency-groups]
