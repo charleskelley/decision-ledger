@@ -268,7 +268,7 @@ def _persist_dataset(x: np.ndarray, y: np.ndarray, *, path: Path) -> None:
 
     Columns are ``FEATURE_NAMES`` followed by ``label``.
     """
-    df = pd.DataFrame(x, columns=FEATURE_NAMES)
+    df = pd.DataFrame(x, columns=FEATURE_NAMES)  # type: ignore[arg-type]
     df["label"] = y
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
