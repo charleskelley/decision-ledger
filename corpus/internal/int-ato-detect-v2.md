@@ -47,16 +47,16 @@ Post-breach account takeover is characterised by the simultaneous presence of:
    baseline by a factor of ≥ 2.5.
 
 **The combination of signals (1) + (2) + (3) is the definitive post-breach ATO
-signature.** When all three are present, HOLD with a populated ReviewPacket is the
-minimum required action. BLOCK is required when impossible travel is also detected
-(INT-GEO-RISK-V1 §3).
+signature.** When all three are present, HOLD is the minimum required action and
+the resolution lifecycle defined by INT-HOLD-QUEUE-V1 governs the realized outcome.
+BLOCK is required when impossible travel is also detected (INT-GEO-RISK-V1 §3).
 
 ## 4. Response Matrix
 
 | Signals present | Minimum action | Notes |
 |---|---|---|
 | (1) + (2) + (3) + impossible travel | BLOCK | Mandatory per INT-GEO-RISK-V1 §3 |
-| (1) + (2) + (3) | HOLD | ReviewPacket required |
+| (1) + (2) + (3) | HOLD | Resolution per INT-HOLD-QUEUE-V1 |
 | (1) + (2) only | HOLD | Possible ATO without geo confirmation |
 | (1) + (3) only | CHALLENGE | High success + geo anomaly, established device |
 | (2) + (3) only | CHALLENGE | New device + geo, normal success rate |

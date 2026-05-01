@@ -8,10 +8,10 @@ import pytest
 
 from app.scorer.scorer import (
     FEATURE_NAMES,
-    _routing,
+    _route,
     _to_feature_row,
 )
-from core.gate import GateRouting
+from core.routes import GateRoute
 from reasoner.account_takeover.features import AtoFeatureVector, WindowSpec
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def test_score_is_in_unit_interval(scorer):
 # ---------------------------------------------------------------------------
 
 
-def test_routing_fast_path_allow_for_low_risk(scorer):
+def test_route_fast_path_allow_for_low_risk(scorer):
     fv = _make_fv(
         velocity_1min=0,
         velocity_5min=0,
@@ -101,10 +101,10 @@ def test_routing_fast_path_allow_for_low_risk(scorer):
         sparse_history=False,
     )
     result = scorer.score(fv)
-    assert result.routing == GateRouting.FAST_PATH_ALLOW
+    assert result.route == GateRoute.FAST_PATH_ALLOW
 
 
-def test_routing_fast_path_block_for_high_risk(scorer):
+def test_route_fast_path_block_for_high_risk(scorer):
     fv = _make_fv(
         velocity_1min=10,
         velocity_5min=20,
@@ -118,13 +118,13 @@ def test_routing_fast_path_block_for_high_risk(scorer):
     )
     result = scorer.score(fv)
     assert result.risk_score > 0.5
-    assert isinstance(result.routing, GateRouting)
+    assert isinstance(result.route, GateRoute)
 
 
-def test_routing_route_to_gate_for_mid_risk():
-    assert _routing(0.5) == GateRouting.ROUTE_TO_GATE
-    assert _routing(0.15) == GateRouting.FAST_PATH_ALLOW
-    assert _routing(0.90) == GateRouting.FAST_PATH_BLOCK
+def test_route_route_to_gate_for_mid_risk():
+    assert _route(0.5) == GateRoute.ROUTE_TO_GATE
+    assert _route(0.15) == GateRoute.FAST_PATH_ALLOW
+    assert _route(0.90) == GateRoute.FAST_PATH_BLOCK
 
 
 # ---------------------------------------------------------------------------

@@ -111,7 +111,8 @@ that fails schema validation. The fallback behaviour is:
 2. Set `policy_gate_output = None` in the DecisionBundle.
 3. Route the event to **HOLD** via the enforcement layer's schema validation failure
    rule (INT-AUTH-RISK-V2 §8, rule 1).
-4. Include the failure reason in the ReviewPacket for human review.
+4. Capture the failure reason in the bundle's `override_log` for the
+   subsequent resolution attempt to consume.
 
 ALLOW is never a permissible fallback action. An unknown gate response is always treated
 as insufficient evidence to permit the request.

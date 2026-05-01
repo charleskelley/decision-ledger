@@ -67,7 +67,7 @@ are not subject to GDPR minimisation and follow standard retention per §4.
 | DecisionBundle (full record) | 3 years | GLBA compliance obligation |
 | Personal data fields in DecisionBundle | 90 days (then anonymise in-place) | GDPR minimisation |
 | Anonymised DecisionBundle | 3 years | GLBA compliance |
-| ReviewPacket personal data | 1 year from resolution | Accountability obligation |
+| ResolutionAttempt personal data | 1 year from resolution | Accountability obligation |
 
 Anonymisation of personal data fields after 90 days means replacing the field value
 with a cryptographic hash that preserves uniqueness for deduplication but prevents
@@ -82,7 +82,7 @@ to their authentication events:
 - **Right of access**: The data subject is entitled to a summary of enforcement
   decisions made about their account, the signals used, and the actions taken.
   Full `DecisionBundle` contents are not disclosed; the `policy_gate_output.rationale`
-  and `final_action` are disclosed.
+  and `decision_action` are disclosed.
 - **Right to erasure**: Personal data fields in `LoginEvent` records may be erased
   after 90 days consistent with §4. The `DecisionBundle` structure is retained for
   GLBA compliance with personal fields anonymised.

@@ -126,8 +126,9 @@ The following controls MUST be applied alongside the enforcement action:
 
 - **CHALLENGE**: Log the step-up reason code. Notify the account owner if the challenge
   fails three consecutive times within a 10-minute window.
-- **HOLD**: Construct and store a ReviewPacket. Record the triggering enforcement rule
-  in the `override_log`. Set review SLA per INT-HOLD-QUEUE-V1 §3.
+- **HOLD**: Record the triggering enforcement rule in the `override_log`. The
+  resolution lifecycle (review SLA, default actions, audit) is governed by
+  INT-HOLD-QUEUE-V1.
 - **BLOCK**: Log the BLOCK reason code. Increment per-IP and per-account BLOCK counters.
   Evaluate notification obligation under INT-INCIDENT-ATO-V1 §5.
 

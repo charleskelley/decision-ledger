@@ -73,7 +73,7 @@ corroborating signals are present:
 - Velocity spike: events arriving faster than 10 req/min for a novel entity.
 - Any signal that would independently trigger HOLD for an established entity.
 
-HOLD for a novel entity requires a ReviewPacket as specified in INT-HOLD-QUEUE-V1.
+HOLD for a novel entity follows the resolution lifecycle defined in INT-HOLD-QUEUE-V1.
 
 ### 4.2 Novel Entity → CHALLENGE
 
