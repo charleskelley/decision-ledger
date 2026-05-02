@@ -94,6 +94,26 @@ def test_main_does_not_write_report_when_no_dimensions(
     assert not output_path.exists()
 
 
+def test_main_exits_2_when_build_dimensions_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ValueError from _build_default_dimensions (e.g., missing OPENAI_API_KEY)
+    surfaces as exit 2 with a clean stderr message — not an unhandled traceback.
+    """
+
+    def _raise() -> list:
+        msg = "OPENAI_API_KEY is required"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(harness, "_build_default_dimensions", _raise)
+    output_path = tmp_path / "report.json"
+
+    rc = harness.main(["--output", str(output_path)])
+
+    assert rc == 2
+    assert not output_path.exists()
+
+
 def test_main_exits_0_when_all_dimensions_pass(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

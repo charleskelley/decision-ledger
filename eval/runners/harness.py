@@ -28,15 +28,36 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from openai import AsyncOpenAI
 
+from app.settings import Settings
 from core.eval.metrics import (
     CitationMetrics,
     ConsistencyMetrics,
+    EvalDimension,
     EvalReport,
     FaithfulnessMetrics,
     RetrievalMetrics,
     RobustnessMetrics,
 )
+from eval.clients.openai import OpenAIJudgeClient
+from eval.clients.pipeline import PipelineDriver
+from eval.clients.ragas import RagasFaithfulnessAdapter
+from eval.dimensions.citation import CitationDimension, load_citation_cases
+from eval.dimensions.consistency import ConsistencyDimension, load_scenarios
+from eval.dimensions.faithfulness import (
+    FaithfulnessDimension,
+    load_faithfulness_cases,
+)
+from eval.dimensions.retrieval import RetrievalDimension, load_golden_queries
+from eval.dimensions.robustness import (
+    RobustnessDimension,
+    load_fallback_cases,
+    load_injection_cases,
+    load_novel_pattern_cases,
+    load_schema_violation_cases,
+)
+from eval.dimensions.skipped import SkippedDimension
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -138,14 +159,178 @@ async def run_eval(
     return report
 
 
-def _build_default_dimensions() -> list[Dimension]:
-    """Construct the MVP dimension set.
+_DEFAULT_DATASET_ROOT = Path("eval/datasets")
 
-    Returns an empty list while concrete dimensions are still being
-    implemented — the harness shell is callable end-to-end with stubs.
-    Real implementations replace this as each dimension lands.
+
+def _build_default_dimensions(
+    *,
+    settings: Settings | None = None,
+    dataset_root: Path | None = None,
+) -> list[Dimension]:
+    """Construct the MVP dimension set against live infrastructure.
+
+    Each dimension's golden dataset is loaded from
+    ``dataset_root/<dimension>/...``. When a dataset file is missing
+    (typically because curation happens in MVP plan Step 4), the slot
+    is filled with a ``SkippedDimension`` so the ``EvalReport`` still
+    lists all five dimensions and the missing one surfaces as a
+    threshold violation instead of disappearing silently.
+
+    Args:
+        settings: Optional ``Settings`` override. Defaults to a fresh
+            ``Settings()`` reading from the environment. Tests pass a
+            stub Settings to drive the API-key fail-fast path.
+        dataset_root: Optional override for the dataset directory.
+            Defaults to ``eval/datasets/`` relative to the working
+            directory.
+
+    Returns:
+        Five dimensions in canonical order: retrieval, faithfulness,
+        consistency, citation, robustness. Each is either a real
+        dimension (dataset present) or a ``SkippedDimension`` (dataset
+        missing).
+
+    Raises:
+        ValueError: ``OPENAI_API_KEY`` is not set in ``settings``.
     """
-    return []
+    settings = settings if settings is not None else Settings()
+    if not settings.openai_api_key:
+        msg = (
+            "OPENAI_API_KEY is required to construct the eval harness. "
+            "Set OPENAI_API_KEY in the environment or in .env."
+        )
+        raise ValueError(msg)
+
+    dataset_root = dataset_root if dataset_root is not None else _DEFAULT_DATASET_ROOT
+
+    # Heavy clients — opened once, shared across dimensions.
+    driver = PipelineDriver(settings=settings)
+    judge_client = OpenAIJudgeClient(client=AsyncOpenAI())
+    ragas_scorer = RagasFaithfulnessAdapter()
+
+    dimensions: list[Dimension] = []
+
+    # --- Retrieval ---
+    queries_path = dataset_root / "retrieval" / "golden_queries.yaml"
+    if queries_path.exists():
+        dimensions.append(
+            RetrievalDimension(
+                retriever=driver.retriever,
+                golden_queries=load_golden_queries(queries_path),
+            )
+        )
+    else:
+        dimensions.append(
+            SkippedDimension(
+                kind=EvalDimension.RETRIEVAL,
+                reason=f"dataset missing: {queries_path}",
+            )
+        )
+
+    # --- Faithfulness ---
+    faithfulness_path = dataset_root / "faithfulness" / "golden_outputs.yaml"
+    if faithfulness_path.exists():
+        dimensions.append(
+            FaithfulnessDimension(
+                ragas_scorer=ragas_scorer,
+                judge_client=judge_client,
+                cases=load_faithfulness_cases(faithfulness_path),
+            )
+        )
+    else:
+        dimensions.append(
+            SkippedDimension(
+                kind=EvalDimension.FAITHFULNESS,
+                reason=f"dataset missing: {faithfulness_path}",
+            )
+        )
+
+    # --- Consistency ---
+    scenarios_dir = dataset_root / "scenarios"
+    scenario_files = (
+        sorted(scenarios_dir.glob("*.yaml")) if scenarios_dir.exists() else []
+    )
+    if scenario_files:
+        scenarios = []
+        for f in scenario_files:
+            scenarios.extend(load_scenarios(f))
+        dimensions.append(ConsistencyDimension(driver=driver, scenarios=scenarios))
+    else:
+        dimensions.append(
+            SkippedDimension(
+                kind=EvalDimension.CONSISTENCY,
+                reason=f"no scenario files in {scenarios_dir}/",
+            )
+        )
+
+    # --- Citation ---
+    citation_path = dataset_root / "citations" / "golden_outputs.yaml"
+    if citation_path.exists():
+        dimensions.append(
+            CitationDimension(
+                client=judge_client,
+                cases=load_citation_cases(citation_path),
+            )
+        )
+    else:
+        dimensions.append(
+            SkippedDimension(
+                kind=EvalDimension.CITATION,
+                reason=f"dataset missing: {citation_path}",
+            )
+        )
+
+    # --- Robustness ---
+    # Each sub-check has its own dataset file. RobustnessDimension accepts
+    # any subset; we pass each list only when its file exists. If all four
+    # are missing, fall back to SkippedDimension.
+    robustness_dir = dataset_root / "robustness"
+    injection_path = robustness_dir / "injection.yaml"
+    schema_path = robustness_dir / "malformed.yaml"
+    novel_path = robustness_dir / "novel.yaml"
+    fallback_path = robustness_dir / "fallback.yaml"
+    sub_paths = [injection_path, schema_path, novel_path, fallback_path]
+    if any(p.exists() for p in sub_paths):
+        dimensions.append(
+            RobustnessDimension(
+                driver=driver,
+                injection_cases=(
+                    load_injection_cases(injection_path)
+                    if injection_path.exists()
+                    else None
+                ),
+                schema_cases=(
+                    load_schema_violation_cases(schema_path)
+                    if schema_path.exists()
+                    else None
+                ),
+                novel_cases=(
+                    load_novel_pattern_cases(novel_path)
+                    if novel_path.exists()
+                    else None
+                ),
+                fallback_cases=(
+                    load_fallback_cases(fallback_path)
+                    if fallback_path.exists()
+                    else None
+                ),
+            )
+        )
+    else:
+        dimensions.append(
+            SkippedDimension(
+                kind=EvalDimension.ROBUSTNESS,
+                reason=f"all sub-check datasets missing in {robustness_dir}/",
+            )
+        )
+
+    log.info(
+        "eval.harness.dimensions_built",
+        component="eval_harness",
+        num_dimensions=len(dimensions),
+        skipped=[d.kind.value for d in dimensions if isinstance(d, SkippedDimension)],
+    )
+    return dimensions
 
 
 _DEFAULT_OUTPUT_PATH = Path("outputs/stage/eval/eval-report.json")
@@ -189,7 +374,15 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get("EVAL_OUTPUT_PATH", str(_DEFAULT_OUTPUT_PATH))
     )
 
-    dimensions = _build_default_dimensions()
+    try:
+        dimensions = _build_default_dimensions()
+    except ValueError as exc:
+        # Configuration errors (missing env vars, etc.) — print clean
+        # message; exit 2 distinguishes config failure from threshold
+        # failure (exit 1).
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     if not dimensions:
         print(
             "error: no dimensions registered; eval harness has nothing to "

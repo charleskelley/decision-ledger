@@ -137,6 +137,15 @@ class PipelineDriver:
         """Release infrastructure connections on context-manager exit."""
         self.close()
 
+    @property
+    def retriever(self) -> PolicyRetriever:
+        """Expose the internal retriever for direct dimension consumption.
+
+        Lets the harness's ``RetrievalDimension`` reuse the same open
+        connections instead of opening a parallel set.
+        """
+        return self._retriever
+
     # ------------------------------------------------------------------
     # PipelineDriver protocol (consumed by ConsistencyDimension)
     # ------------------------------------------------------------------
