@@ -837,12 +837,13 @@ few components — and its native GitHub rendering does not extend to C4 notatio
 
 ### Decision
 
-Replace all diagram tooling with D2. Maintain four diagrams:
+Replace all diagram tooling with D2. Maintain five diagrams:
 
 - `docs/design/diagrams/system-context.d2` — C4 Level 1: system context
 - `docs/design/diagrams/containers.d2` — C4 Level 2: containers
 - `docs/design/diagrams/components.d2` — C4 Level 3: pipeline components
 - `docs/design/diagrams/reasoner-handoff.d2` — domain ↔ framework handoff (detail view)
+- `docs/design/diagrams/eval-harness.d2` — 5D evaluation gate (detail view)
 
 Commit rendered SVGs to `docs/assets/diagrams/`. Render with `just diagrams`,
 which loops over `docs/design/diagrams/*.d2`. The ELK layout engine is used for

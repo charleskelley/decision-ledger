@@ -2,6 +2,8 @@
 
 The 5D evaluation framework that governs every release candidate. All dimensions run in CI on every PR to `main`. A failing dimension blocks the merge.
 
+![Evaluation Harness — 5D Governance Gate](../assets/diagrams/eval-harness.svg)
+
 ---
 
 ## Why This Framework Exists

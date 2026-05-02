@@ -1,203 +1,226 @@
 ###############################################################################
-# DecisionLedger — C4 Level 3: Pipeline Components
+# DecisionLedger — C4 Level 3: Decision Pipeline Components
 #
-# Zooms into the Decision Pipeline container (see containers.d2).
-# Each box is a component: a grouping of related functionality behind a
-# well-defined interface. The Domain Layer / Framework Layer boundary marks
-# the single handoff point — build_observation() in the Reasoner Assembler.
+# Zooms into the Decision API container (app/main.py + app/decide.py).
+# Shows execute_pipeline(): domain assembly → routing → retrieval + gate
+# (or fast path) → enforcement → audit. The Reasoner Assembler is the
+# single handoff point between the domain and framework layers (the
+# left/right halves of the diagram, distinguished by indigo vs teal).
 #
-# Render:  d2 --theme 0 --layout elk components.d2 ../../assets/diagrams/components.svg
-# Ref:     docs/design/architecture.md, docs/design/reasoner-handoff.md
+# Render:  d2 --theme 0 components.d2 ../../assets/diagrams/components.svg
+#          (uses dagre — see justfile for the special-case)
+# Ref:     docs/design/architecture.md, docs/design/pipeline.md, docs/design/reasoner-handoff.md
 ###############################################################################
 
 title: |md
-  # DecisionLedger — Pipeline Components
+  # Components — Decision Pipeline (`app/decide.py`)
 | {near: top-center}
 
 direction: down
 
 ###############################################################################
-# External actors
+# Palette
+#   Domain layer       fill #e8eef9 / stroke #5b6abf  (indigo)
+#   Framework layer    fill #e8f5f3 / stroke #0d9488  (teal)
+#   Routing diamond    filled teal / white text
+#   Fast-path branch   fill #fef3e8 / stroke #c9622e  (burnt orange)
+#   Datastore          fill #fbf3e6 / stroke #8c6d3f  (ochre)
+#   Streaming state    fill #e8f5f5 / stroke #2e8b8b  (cyan)
+#   LLM provider       fill #f5e8f5 / stroke #b45dc9  (violet)
 ###############################################################################
 
-ingestion: Ingestion Consumer {
-  style.fill: "#dae8fc"
-  style.stroke: "#6c8ebf"
-  tooltip: "Upstream container: reads Redis Streams, validates LoginEvent schema, enforces bounded lateness, deduplicates. Delivers a clean LoginEvent to the pipeline."
+###############################################################################
+# Inputs
+###############################################################################
+
+input: LoginEvent {
+  shape: rectangle
+  style.fill: "#f0f0f0"
+  style.stroke: "#1c2024"
+  tooltip: "Validated LoginEvent — entered via POST /api/v1/decisions or the in-process eval PipelineDriver."
 }
 
-decision_analyst: Decision Analyst {
-  shape: person
-  style.fill: "#dae8fc"
-  style.stroke: "#6c8ebf"
-  tooltip: "Inspects Decision Bundles persisted in PostgreSQL. Reads bundle records directly to review decisions, citations, and enforcement outcomes."
-}
-
 ###############################################################################
-# Decision Pipeline container
+# Domain layer (indigo) — pre-handoff
 ###############################################################################
 
-pipeline: Decision Pipeline {
-  style.fill: "#f9f9f9"
-  style.stroke: "#82b366"
+features: Feature Engine {
+  style.fill: "#e8eef9"
+  style.stroke: "#5b6abf"
   style.stroke-width: 2
-
-  ###########################################################################
-  # Domain Layer — ATO Reasoner (reasoner/)
-  # Pure Python: no infra dependencies. Owns observation and feature types.
-  ###########################################################################
-
-  domain: Domain Layer (ATO Reasoner) {
-    style.fill: "#eaf3fb"
-    style.stroke: "#6c8ebf"
-    style.stroke-width: 1
-
-    feature_engine: Feature Engine {
-      style.fill: "#dae8fc"
-      style.stroke: "#6c8ebf"
-      tooltip: "Computes AtoFeatureVector via sliding-window aggregations over per-user event history (velocity, geo-shift, device novelty, credential failure rate). Reads and writes window state in Redis. app/features/"
-    }
-
-    redis: Redis {
-      shape: cylinder
-      style.fill: "#fff2cc"
-      style.stroke: "#d6b656"
-      tooltip: "Sliding-window feature state: per-user hashes and sorted sets. TTL-managed. Scoped to the domain layer — simulates real-time event stream state for the Feature Engine; not shared with the framework layer."
-    }
-
-    scorer: ATO Scorer {
-      style.fill: "#dae8fc"
-      style.stroke: "#6c8ebf"
-      tooltip: "XGBoost classifier: consumes AtoFeatureVector, produces ScorerOutput (risk_score ∈ [0,1], GateRouting decision, top-k SHAP signals). Trained on heuristic labels — triages into confidence bands, not fraud detection. app/scorer/"
-    }
-
-    assembler: Reasoner Assembler {
-      style.fill: "#6c8ebf"
-      style.stroke: "#6c8ebf"
-      style.font-color: "#ffffff"
-      tooltip: "build_observation(): the only function crossing the domain → framework boundary. Translates (LoginEvent, AtoFeatureVector, ScorerOutput) into (ReasonerContext + GateContext + FastPathRecord). reasoner/account_takeover/assembler.py"
-    }
-
-    feature_engine -> redis: "reads/writes\nsliding-window state" {
-      style.stroke: "#d6b656"
-    }
-    feature_engine -> scorer: "AtoFeatureVector"
-    scorer -> assembler: "ScorerOutput"
-  }
-
-  ###########################################################################
-  # Framework Layer — DecisionLedger (core/ + app/)
-  ###########################################################################
-
-  routing: Route? {
-    shape: diamond
-    style.fill: "#82b366"
-    style.stroke: "#82b366"
-    style.font-color: "#ffffff"
-    tooltip: "Inspects observation.routing (GateRouting enum). FAST_PATH_ALLOW if risk_score < 0.20; FAST_PATH_BLOCK if risk_score > 0.85; ROUTE_TO_GATE otherwise."
-  }
-
-  retrieval: Retrieval Engine {
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Three-stage hybrid RAG over the policy corpus. dense_search (pgvector HNSW cosine) + sparse_search (ES BM25) → rrf_fuse (Reciprocal Rank Fusion k=60) → rerank (cross-encoder; latency-budget bypass falls back to RRF-only). Filters: jurisdictions applied to both stores; risk_tier to pgvector only. app/retrieval/"
-  }
-
-  fast_path: Fast Path {
-    style.fill: "#fff2cc"
-    style.stroke: "#d6b656"
-    tooltip: "Bypasses live LLM invocation. Enforces ALLOW or BLOCK directly from the scorer's routing decision. GateContext preserved in the bundle for retrospective shadow evaluation. No retrieval cost."
-  }
-
-  policy_gate: Policy Gate {
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Resolves prompt template from YamlPromptRegistry via GateContext.prompt_template_id (immutable — never modified after creation). Renders template with domain-supplied template_vars and retrieved snippets. Invokes OpenAI GPT-4o with structured output schema. Produces PolicyGateOutput (action + citations). app/policy_gate/"
-  }
-
-  enforcement: Enforcement Engine {
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Deterministic, rule-based action resolution. Priority: HOLD > BLOCK > CHALLENGE > ALLOW. Schema-validation failure always routes to HOLD. Re-executable against cached PolicyGateOutput for replay — no LLM re-invocation. app/enforcement/"
-  }
-
-  audit: Audit Engine {
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Assembles DecisionBundle from all pipeline intermediates: raw event, ReasonerContext, GateContext, rendered prompt, LLM response, enforcement decision, retrieval_path. Persists to PostgreSQL. Replay re-executes enforcement against the cached bundle state. app/audit/"
-  }
-
-  ###########################################################################
-  # Internal flows
-  ###########################################################################
-
-  domain.assembler -> routing: "Observation\n(ReasonerContext + GateContext + FastPathRecord)"
-
-  routing -> retrieval: "ROUTE_TO_GATE" {
-    style.stroke: "#82b366"
-  }
-  routing -> fast_path: "FAST_PATH_ALLOW\nFAST_PATH_BLOCK" {
-    style.stroke: "#d6b656"
-  }
-
-  retrieval -> policy_gate: "list[PolicySnippet]"
-  policy_gate -> enforcement: "PolicyGateOutput"
-  fast_path -> enforcement: "fast-path action"
-  enforcement -> audit: "EnforcementDecision"
+  tooltip: "FeatureService.compute() — sliding-window velocity + novelty + impossible-travel features over Redis state. app/features/."
 }
 
-###############################################################################
-# External datastores (framework layer)
-###############################################################################
-
-postgres: PostgreSQL {
+redis_state: Redis  ·  feature state {
   shape: cylinder
-  style.fill: "#fff2cc"
-  style.stroke: "#d6b656"
-  tooltip: "pgvector HNSW index for dense policy retrieval (384-dim, all-MiniLM-L6-v2). Audit store for persisted Decision Bundles."
+  style.fill: "#e8f5f5"
+  style.stroke: "#2e8b8b"
+  style.stroke-width: 2
+  tooltip: "Per-account hashes + sorted sets for sliding windows. TTL-managed."
 }
 
-elasticsearch: Elasticsearch {
+scorer: ATO Scorer {
+  style.fill: "#e8eef9"
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
+  tooltip: "AtoScorer.score() — XGBoost over AtoFeatureVector → ScorerOutput (risk_score, top SHAP signals, GateRoute). app/scorer/."
+}
+
+assembler: Reasoner Assembler {
+  style.fill: "#5b6abf"
+  style.stroke: "#5b6abf"
+  style.font-color: "#ffffff"
+  style.bold: true
+  style.stroke-width: 2
+  tooltip: "build_observation() — the only function crossing the domain → framework boundary. Translates (LoginEvent, AtoFeatureVector, ScorerOutput) into an Observation with ReasonerContext + GateContext + (fast_path_rationale on fast path)."
+}
+
+###############################################################################
+# Routing diamond
+###############################################################################
+
+route: Route? {
+  shape: diamond
+  style.fill: "#0d9488"
+  style.stroke: "#0d9488"
+  style.font-color: "#ffffff"
+  style.bold: true
+  style.stroke-width: 2
+  tooltip: "Inspects observation.route. FAST_PATH_ALLOW < 0.20; FAST_PATH_BLOCK > 0.85; otherwise ROUTE_TO_GATE."
+}
+
+###############################################################################
+# Framework layer (teal) — post-handoff
+###############################################################################
+
+retrieval: Hybrid Retrieval {
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "PolicyRetriever.retrieve() — pgvector HNSW (dense) + Elasticsearch BM25 (sparse) → RRF fusion → cross-encoder rerank (latency-budget bypass falls back to RRF-only). Filters: jurisdictions on both stores; risk_tier on pgvector only. app/retrieval/."
+}
+
+gate: Policy Gate {
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "PolicyGate.evaluate() — resolves the YAML prompt template via prompt_template_id, renders with template_vars + retrieved snippets, calls the LLM with a structured-output schema, returns PolicyGateOutput (verdict + rationale + citations) or None on validation failure. app/gate/policy/."
+}
+
+fast_path: Fast Path {
+  style.fill: "#fef3e8"
+  style.stroke: "#c9622e"
+  style.stroke-width: 2
+  tooltip: "Bypasses retrieval + LLM. fast_path_rationale records why. GateContext is still preserved on the bundle for retrospective shadow evaluation."
+}
+
+enforcement: Enforcement Resolver {
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "resolve(obs, verdict, snippets, decision_id) — pure deterministic rule application. Schema-failure / novel-entity / adversarial-flag / jurisdiction-conflict → HOLD. Severity ladder ALLOW < CHALLENGE < HOLD < BLOCK. Re-runnable byte-identically for replay. app/enforcement/."
+}
+
+audit: Audit Builder + Store {
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "build_bundle() composes the immutable DecisionBundle (raw_event Observation, retrieval results, gate_input/gate_output, enforcement decision, latency breakdown). BundleStore.write() persists JSONB to Postgres. app/audit/."
+}
+
+###############################################################################
+# External datastores + LLM
+###############################################################################
+
+pg_vec: PostgreSQL  ·  pgvector HNSW {
   shape: cylinder
-  style.fill: "#fff2cc"
-  style.stroke: "#d6b656"
-  tooltip: "BM25 sparse index over the policy corpus. Jurisdiction and version filters applied at query time."
+  style.fill: "#fbf3e6"
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
+  tooltip: "Dense policy embeddings (384-dim, cosine, HNSW)."
 }
 
-openai: OpenAI API {
-  style.fill: "#f5f5f5"
-  style.stroke: "#666666"
-  tooltip: "GPT-4o LLM inference. Receives structured prompt; returns JSON conforming to PolicyGateOutput schema."
+es: Elasticsearch  ·  BM25 {
+  shape: cylinder
+  style.fill: "#fbf3e6"
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
+  tooltip: "Sparse policy index with jurisdiction + version filters."
+}
+
+llm: LLM Provider {
+  shape: cloud
+  style.fill: "#f5e8f5"
+  style.stroke: "#b45dc9"
+  style.stroke-width: 2
+  tooltip: "OpenAI / Anthropic — structured-output policy-gate calls."
+}
+
+pg_audit: PostgreSQL  ·  decision_bundles {
+  shape: cylinder
+  style.fill: "#fbf3e6"
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
+  tooltip: "Append-only audit store: decision_bundles JSONB + replay_logs."
 }
 
 ###############################################################################
-# External relationships
-# Edges attach at the domain subgroup boundary to avoid ELK using external
-# targets as placement anchors for internal nodes.
+# Flow — domain side (indigo)
 ###############################################################################
 
-ingestion -> pipeline.domain: "validated LoginEvent" {
-  style.stroke: "#6c8ebf"
+input -> features: "validated event" {
+  style.stroke: "#1c2024"
+}
+features -> redis_state: "R/W window state" {
+  style.stroke: "#2e8b8b"
+}
+features -> scorer: "AtoFeatureVector" {
+  style.stroke: "#5b6abf"
+}
+scorer -> assembler: "ScorerOutput" {
+  style.stroke: "#5b6abf"
+}
+assembler -> route: "Observation" {
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
 }
 
-decision_analyst -> postgres: "reads Decision Bundles\n(inspection + replay)" {
-  style.stroke: "#6c8ebf"
+###############################################################################
+# Flow — framework side (teal / orange)
+###############################################################################
+
+route -> retrieval: "ROUTE_TO_GATE" {
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+}
+route -> fast_path: "FAST_PATH_ALLOW\n/ FAST_PATH_BLOCK" {
+  style.stroke: "#c9622e"
+  style.stroke-width: 2
+}
+
+retrieval -> gate: "RetrievedSnippet[]" {
+  style.stroke: "#0d9488"
+}
+gate -> enforcement: "PolicyGateOutput.verdict\n(or None → HOLD)" {
+  style.stroke: "#0d9488"
+}
+fast_path -> enforcement: "fast-path action" {
+  style.stroke: "#c9622e"
+}
+enforcement -> audit: "EnforcementDecision" {
+  style.stroke: "#0d9488"
+}
+
+retrieval -> pg_vec: "HNSW cosine\n+ jurisdiction / risk_tier" {
+  style.stroke: "#8c6d3f"
+}
+retrieval -> es: "BM25\n+ jurisdiction" {
+  style.stroke: "#8c6d3f"
+}
+gate -> llm: "rendered prompt\n→ JSON verdict" {
+  style.stroke: "#b45dc9"
   style.stroke-dash: 4
 }
-
-pipeline.retrieval -> postgres: "HNSW cosine search\n(jurisdictions + risk_tier)" {
-  style.stroke: "#d6b656"
-}
-
-pipeline.retrieval -> elasticsearch: "BM25 search\n(jurisdictions)" {
-  style.stroke: "#d6b656"
-}
-
-pipeline.policy_gate -> openai: "structured policy gate prompt\nreceives JSON output" {
-  style.stroke: "#666666"
-  style.stroke-dash: 4
-}
-
-pipeline.audit -> postgres: "persists DecisionBundle\nreads bundle for replay" {
-  style.stroke: "#d6b656"
+audit -> pg_audit: "INSERT bundle JSONB\n(append-only)" {
+  style.stroke: "#8c6d3f"
 }

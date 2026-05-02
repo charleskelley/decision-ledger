@@ -1,183 +1,224 @@
 ###############################################################################
 # DecisionLedger — C4 Level 2: Containers
 #
-# Two system groups are shown:
-#   - ATO Reasoner (account_takeover): external to DecisionLedger; submits
-#     Observations (ReasonerContext + GateContext) via the handoff contract.
-#   - DecisionLedger: the governed decision framework that receives Observations
-#     and produces enforced decisions with full audit.
+# Inside the DecisionLedger system boundary: the runtime API, the offline
+# tools, the datastores. The Domain Reasoner stays outside as the upstream
+# producer of Observations.
 #
 # Render:  d2 --theme 0 --layout elk containers.d2 ../../assets/diagrams/containers.svg
-# Ref:     docs/design/architecture.md, docs/design/reasoner-handoff.md
+# Ref:     docs/design/architecture.md, docs/design/infrastructure.md
 ###############################################################################
 
 title: |md
-  # DecisionLedger — Container Diagram
+  # Containers — DecisionLedger
 | {near: top-center}
 
 direction: down
 
 ###############################################################################
-# External actors
+# Palette
+#   Domain reasoner  fill #e8eef9 / stroke #5b6abf  (indigo)
+#   Framework svc    fill #e8f5f3 / stroke #0d9488  (teal)
+#   Offline tool     fill #fef3e8 / stroke #c9622e  (burnt orange)
+#   Datastore        fill #fbf3e6 / stroke #8c6d3f  (ochre)
+#   Streaming        fill #e8f5f5 / stroke #2e8b8b  (cyan)
+#   LLM external     fill #f5e8f5 / stroke #b45dc9  (violet)
+#   Person           fill #f0f0f0 / stroke #1c2024
 ###############################################################################
 
-security_analyst: Decision Analyst {
+###############################################################################
+# External row — actors and providers
+###############################################################################
+
+reasoner: Domain Reasoner  ·  ATO reference {
+  style.fill: "#e8eef9"
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
+  tooltip: "reasoner/account_takeover/ — LoginEvent → AtoFeatureVector → ScorerOutput → build_observation(). The only domain-specific package; everything else is framework. Submits Observations and consumes EnforcementDecisions."
+}
+
+analyst: Decision Analyst {
   shape: person
-  style.fill: "#dae8fc"
-  style.stroke: "#6c8ebf"
-  tooltip: "Inspects persisted Decision Bundles in PostgreSQL; runs the eval suite to review retrieval quality, faithfulness, and decision consistency."
-}
-
-openai: OpenAI API {
-  style.fill: "#f5f5f5"
-  style.stroke: "#666666"
-  tooltip: "LLM inference for the policy gate."
-}
-
-###############################################################################
-# ATO Reasoner — external; uses DecisionLedger via the Observation contract
-###############################################################################
-
-ato_reasoner: ATO Reasoner (Account Takeover) {
-  style.fill: "#eff4fb"
-  style.stroke: "#6c8ebf"
+  style.fill: "#f0f0f0"
+  style.stroke: "#1c2024"
   style.stroke-width: 2
-
-  scenario_generator: Scenario Generator {
-    shape: hexagon
-    style.fill: "#dae8fc"
-    style.stroke: "#6c8ebf"
-    tooltip: "Generates synthetic LoginEvent streams across 8 attack and benign scenarios; publishes to Redis Streams. Python 3.11 CLI, generator/."
-  }
-
-  ingestion: Ingestion Consumer {
-    style.fill: "#dae8fc"
-    style.stroke: "#6c8ebf"
-    tooltip: "Reads Redis Streams; validates LoginEvent schema, enforces bounded lateness, deduplicates. Routes failures to DLQ. Async event path. app/ingestion/."
-  }
-
-  decision_api: Decision API {
-    style.fill: "#dae8fc"
-    style.stroke: "#6c8ebf"
-    tooltip: "HTTP entry point: accepts LoginEvent, runs Feature Engine → Scorer → Assembler, submits Observation to DecisionLedger pipeline, returns DecisionResponse. FastAPI, app/."
-  }
-
-  scenario_generator -> ingestion: "Publishes LoginEvents\n(Redis Streams)"
+  tooltip: "Inspects bundles, replays decisions, runs the eval gate."
 }
 
-###############################################################################
-# DecisionLedger — governed decision framework
-###############################################################################
-
-decision_ledger: DecisionLedger {
-  style.fill: "#f9f9f9"
-  style.stroke: "#82b366"
+llm: LLM Provider {
+  shape: cloud
+  style.fill: "#f5e8f5"
+  style.stroke: "#b45dc9"
   style.stroke-width: 2
+  tooltip: "OpenAI / Anthropic — policy-gate structured-output calls + LLM-as-judge calls."
+}
+
+# Hidden ranking edges — force elk to place externals above DL
+reasoner -> dl: "" {style.opacity: 0; style.stroke-width: 0}
+analyst -> dl: "" {style.opacity: 0; style.stroke-width: 0}
+
+###############################################################################
+# DecisionLedger system
+###############################################################################
+
+dl: DecisionLedger {
+  style.fill: "#f3faf8"
+  style.stroke: "#0d9488"
+  style.stroke-width: 3
 
   ###########################################################################
-  # Runtime
+  # Runtime row
   ###########################################################################
 
-  pipeline: Decision Pipeline {
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Receives Observation (ReasonerContext + GateContext). Three-stage hybrid RAG → LLM policy gate → deterministic enforcement → audit bundle. app/retrieval + app/policy_gate + app/enforcement + app/audit."
+  api: Decision API  ·  FastAPI {
+    shape: rectangle
+    style.fill: "#e8f5f3"
+    style.stroke: "#0d9488"
+    style.stroke-width: 2
+    tooltip: "POST /api/v1/decisions, GET /api/v1/decisions/{id}, POST .../replay. Hosts the in-process pipeline (app/decide.py) and shares connections via lifespan. app/main.py."
   }
 
   ###########################################################################
-  # Datastores
+  # Offline tooling row
   ###########################################################################
 
-  postgres: PostgreSQL {
-    shape: cylinder
-    style.fill: "#fff2cc"
-    style.stroke: "#d6b656"
-    tooltip: "pgvector HNSW index for dense policy retrieval (384-dim, all-MiniLM-L6-v2). Audit store for Decision Bundles. PostgreSQL 16 + pgvector."
-  }
-
-  elasticsearch: Elasticsearch {
-    shape: cylinder
-    style.fill: "#fff2cc"
-    style.stroke: "#d6b656"
-    tooltip: "BM25 sparse index over the policy corpus with jurisdiction and version filters. Elasticsearch 8.13."
-  }
-
-  ###########################################################################
-  # Offline tooling
-  ###########################################################################
-
-  corpus_builder: Policy Corpus Builder {
+  generator: Scenario Generator  ·  CLI {
     shape: hexagon
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "Offline CLI: chunks policy documents, embeds with all-MiniLM-L6-v2, bulk-inserts into pgvector and Elasticsearch. app/retrieval/."
+    style.fill: "#fef3e8"
+    style.stroke: "#c9622e"
+    style.stroke-width: 2
+    tooltip: "Generates synthetic LoginEvents across 8 scenarios (baseline_normal, credential_stuffing_burst, geo_impossible, post_breach_ato, …). generator/."
   }
 
-  eval_harness: Evaluation Harness {
+  scorer_trainer: Scorer Trainer  ·  CLI {
     shape: hexagon
-    style.fill: "#d5e8d4"
-    style.stroke: "#82b366"
-    tooltip: "5-dimension eval: retrieval quality, faithfulness, decision consistency, citation accuracy, adversarial robustness. eval/."
+    style.fill: "#fef3e8"
+    style.stroke: "#c9622e"
+    style.stroke-width: 2
+    tooltip: "Trains the XGBoost scorer on heuristic-labelled archetypes; writes ato-v1.{ubj,json,train.csv,test.csv} into app/scorer/models/. app/scorer/trainer.py."
+  }
+
+  corpus_loader: Corpus Loader  ·  CLI {
+    shape: hexagon
+    style.fill: "#fef3e8"
+    style.stroke: "#c9622e"
+    style.stroke-width: 2
+    tooltip: "Reads corpus/**/*.md (frontmatter + body), chunks at ## boundaries, embeds with all-MiniLM-L6-v2, indexes into pgvector + Elasticsearch. app/retrieval/corpus_loader.py."
+  }
+
+  eval_harness: Eval Harness  ·  CLI {
+    shape: hexagon
+    style.fill: "#fef3e8"
+    style.stroke: "#c9622e"
+    style.stroke-width: 2
+    tooltip: "5-dimension governance gate (retrieval, faithfulness, consistency, citation, robustness). Runs in-process against the same pipeline the API uses. eval/runners/harness.py."
+  }
+
+  ###########################################################################
+  # Datastore row
+  ###########################################################################
+
+  redis: Redis  ·  feature state + dedup {
+    shape: cylinder
+    style.fill: "#e8f5f5"
+    style.stroke: "#2e8b8b"
+    style.stroke-width: 2
+    tooltip: "Sliding-window feature state (per-account hashes / sorted sets) and SHA-256 idempotency dedup keys. Redis 7."
+  }
+
+  pg: PostgreSQL + pgvector  ·  vectors + audit {
+    shape: cylinder
+    style.fill: "#fbf3e6"
+    style.stroke: "#8c6d3f"
+    style.stroke-width: 2
+    tooltip: "Two roles in one cluster: HNSW vector store for the policy corpus (384-dim all-MiniLM-L6-v2) and append-only audit store for DecisionBundle JSONB. Postgres 16 + pgvector."
+  }
+
+  es: Elasticsearch  ·  BM25 corpus {
+    shape: cylinder
+    style.fill: "#fbf3e6"
+    style.stroke: "#8c6d3f"
+    style.stroke-width: 2
+    tooltip: "BM25 sparse index over policy chunks with dual-analyzer mapping for natural-language and exact regulatory identifiers. Elasticsearch 8.13."
   }
 }
 
 ###############################################################################
-# Relationships — ATO Reasoner → DecisionLedger
+# Domain ↔ framework
 ###############################################################################
 
-ato_reasoner.ingestion -> decision_ledger.pipeline: "Observation\n(ReasonerContext + GateContext)" {
-  style.stroke: "#6c8ebf"
+reasoner -> dl.api: "submits Observation\n(in-process or HTTP)" {
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
 }
 
-ato_reasoner.decision_api -> decision_ledger.pipeline: "Observation\n(ReasonerContext + GateContext)" {
-  style.stroke: "#6c8ebf"
-}
-
-decision_ledger.pipeline -> ato_reasoner.decision_api: "EnforcementDecision" {
-  style.stroke: "#82b366"
+dl.api -> reasoner: "EnforcementDecision\n+ decision_id" {
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
 }
 
 ###############################################################################
-# Relationships — DecisionLedger internal
+# Decision API ↔ infrastructure
 ###############################################################################
 
-decision_ledger.pipeline -> decision_ledger.postgres: "Dense HNSW vector search\nwrites/reads DecisionBundle" {
-  style.stroke: "#d6b656"
+dl.api -> dl.redis: "feature-state R/W" {
+  style.stroke: "#2e8b8b"
+  style.stroke-width: 2
 }
-
-decision_ledger.pipeline -> decision_ledger.elasticsearch: "BM25 policy search\nwith jurisdiction filters" {
-  style.stroke: "#d6b656"
+dl.api -> dl.pg: "HNSW dense search\nbundle write / read" {
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
 }
-
-decision_ledger.pipeline -> openai: "Structured policy gate prompt\nreceives JSON output" {
-  style.stroke: "#666666"
-  style.stroke-dash: 4
+dl.api -> dl.es: "BM25 sparse search" {
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
 }
-
-decision_ledger.corpus_builder -> decision_ledger.postgres: "Bulk-inserts 384-dim embeddings\ninto pgvector HNSW" {
-  style.stroke: "#82b366"
-  style.stroke-dash: 4
-}
-
-decision_ledger.corpus_builder -> decision_ledger.elasticsearch: "Bulk-indexes policy chunks\nwith metadata" {
-  style.stroke: "#82b366"
-  style.stroke-dash: 4
-}
-
-decision_ledger.eval_harness -> decision_ledger.postgres: "Reads Decision Bundles\nfor consistency and citation checks" {
-  style.stroke: "#82b366"
+dl.api -> llm: "policy-gate prompt\n→ JSON verdict" {
+  style.stroke: "#b45dc9"
+  style.stroke-width: 2
   style.stroke-dash: 4
 }
 
 ###############################################################################
-# Relationships — Decision Analyst (passive)
+# Offline tooling
 ###############################################################################
 
-security_analyst -> decision_ledger.postgres: "Reads Decision Bundles\n(passive inspection)" {
-  style.stroke: "#6c8ebf"
+dl.generator -> reasoner: "synthetic\nLoginEvents" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.scorer_trainer -> dl.api: "produces model\nartifact + card" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.corpus_loader -> dl.pg: "bulk-insert\nembeddings" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.corpus_loader -> dl.es: "bulk-index\nchunks" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.eval_harness -> dl.api: "drives in-process\npipeline runs" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.eval_harness -> dl.pg: "reads bundles\nfor consistency" {
+  style.stroke: "#c9622e"
+  style.stroke-dash: 4
+}
+dl.eval_harness -> llm: "LLM-as-judge\ncalls" {
+  style.stroke: "#b45dc9"
   style.stroke-dash: 4
 }
 
-security_analyst -> decision_ledger.eval_harness: "Runs eval suite\nreviews EvalReport" {
-  style.stroke: "#6c8ebf"
+###############################################################################
+# Analyst
+###############################################################################
+
+analyst -> dl.api: "GET /decisions/{id}\nPOST .../replay" {
+  style.stroke: "#1c2024"
+}
+analyst -> dl.eval_harness: "runs `make eval`" {
+  style.stroke: "#1c2024"
 }

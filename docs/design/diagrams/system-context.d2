@@ -1,67 +1,95 @@
 ###############################################################################
 # DecisionLedger — C4 Level 1: System Context
 #
-# Render:  d2 --theme 0 system-context.d2 ../../assets/diagrams/system-context.svg
+# The widest view: who and what interacts with DecisionLedger.
+#
+# - Domain reasoner (e.g., the ATO Reasoner) submits Observations and
+#   receives back a typed EnforcementDecision plus a persisted bundle ID.
+# - LLM provider serves the policy gate's structured-output calls.
+# - Decision analyst inspects bundles and runs the eval harness.
+#
+# Render:  d2 --theme 0 --layout elk system-context.d2 ../../assets/diagrams/system-context.svg
 # Ref:     docs/design/architecture.md
 ###############################################################################
 
 title: |md
-  # DecisionLedger — System Context
+  # System Context — DecisionLedger
 | {near: top-center}
 
 direction: right
 
 ###############################################################################
-# External systems and actors
+# Palette (kept consistent across the diagram set)
+#   Domain        indigo  fill #e8eef9 / stroke #5b6abf
+#   Framework     teal    fill #e8f5f3 / stroke #0d9488
+#   LLM provider  violet  fill #f5e8f5 / stroke #b45dc9
+#   Person        neutral fill #f0f0f0 / stroke #1c2024
 ###############################################################################
 
-ai_ml_reasoner: AI/ML Reasoner {
-  style.fill: "#dae8fc"
-  style.stroke: "#6c8ebf"
-  tooltip: "Domain-specific ML/AI system (e.g. ATO Reasoner) that assembles Observations from raw events via Feature Engine → Scorer → Assembler and submits them to DecisionLedger via the ReasonerContext + GateContext contracts."
+###############################################################################
+# Actors and external systems
+###############################################################################
+
+reasoner: Domain Reasoner {
+  shape: rectangle
+  style.fill: "#e8eef9"
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
+  style.font-size: 14
+  tooltip: "Any domain-specific reasoner that ingests raw events, computes features, scores risk, and assembles a typed Observation. The ATO Reasoner is the reference implementation."
 }
 
-security_analyst: Decision Analyst {
+analyst: Decision Analyst {
   shape: person
-  style.fill: "#dae8fc"
-  style.stroke: "#6c8ebf"
-  tooltip: "Inspects persisted Decision Bundles in PostgreSQL; runs the eval suite to review retrieval quality, faithfulness, and decision consistency."
+  style.fill: "#f0f0f0"
+  style.stroke: "#1c2024"
+  style.stroke-width: 2
+  tooltip: "Inspects persisted Decision Bundles, replays decisions, and runs the 5-dimension evaluation harness."
+}
+
+llm: LLM Provider {
+  shape: cloud
+  style.fill: "#f5e8f5"
+  style.stroke: "#b45dc9"
+  style.stroke-width: 2
+  tooltip: "OpenAI or Anthropic API. Serves the policy gate's structured-output calls and the eval harness's LLM-as-judge calls."
 }
 
 ###############################################################################
-# Systems
+# The system under design
 ###############################################################################
 
-decision_ledger: DecisionLedger {
-  style.fill: "#d5e8d4"
-  style.stroke: "#82b366"
+dl: DecisionLedger {
+  shape: rectangle
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 3
   style.font-size: 16
-  tooltip: "Governed decision framework: ML + LLM policy gate with deterministic enforcement and full audit replay."
-}
-
-openai: OpenAI API {
-  style.fill: "#f5f5f5"
-  style.stroke: "#666666"
-  tooltip: "LLM inference for the policy gate."
+  style.bold: true
+  tooltip: "Governed decision framework: hybrid policy retrieval + LLM policy gate + deterministic enforcement, with append-only Decision Bundles for full audit replay."
 }
 
 ###############################################################################
 # Relationships
 ###############################################################################
 
-ai_ml_reasoner -> decision_ledger: "Submits Observation\n(ReasonerContext + GateContext)" {
-  style.stroke: "#6c8ebf"
+reasoner -> dl: "submits Observation\n(ReasonerContext + GateContext)" {
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
 }
 
-decision_ledger -> ai_ml_reasoner: "EnforcementDecision" {
-  style.stroke: "#82b366"
+dl -> reasoner: "EnforcementDecision\n+ decision_id" {
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
 }
 
-security_analyst -> decision_ledger: "Inspects bundles\nruns eval suite" {
-  style.stroke: "#6c8ebf"
-}
-
-decision_ledger -> openai: "Policy gate prompt\nreceives structured JSON output" {
-  style.stroke: "#666666"
+dl -> llm: "policy gate prompt\n→ structured JSON verdict" {
+  style.stroke: "#b45dc9"
+  style.stroke-width: 2
   style.stroke-dash: 4
+}
+
+analyst -> dl: "inspects bundles, replays\ndecisions, runs eval gate" {
+  style.stroke: "#1c2024"
+  style.stroke-width: 2
 }

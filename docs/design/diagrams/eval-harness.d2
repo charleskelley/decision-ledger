@@ -1,0 +1,246 @@
+###############################################################################
+# DecisionLedger — Evaluation Harness (5D Framework)
+#
+# The governance gate. Five dimensions run concurrently against curated
+# datasets, drive the live in-process pipeline (or read persisted bundles),
+# call the LLM-as-judge where required, and aggregate into one EvalReport
+# whose pass/fail determines whether the change can merge.
+#
+# Render:  d2 --theme 0 --layout elk eval-harness.d2 ../../assets/diagrams/eval-harness.svg
+# Ref:     docs/design/evaluation.md, eval/runners/harness.py
+###############################################################################
+
+title: |md
+  # Evaluation Harness — 5D Governance Gate
+| {near: top-center}
+
+direction: down
+
+###############################################################################
+# Palette
+#   Eval / harness   fill #fef3e8 / stroke #c9622e  (burnt orange)
+#   Dimension        fill #fbe6d6 / stroke #c9622e  (deeper orange)
+#   Pipeline driver  fill #e8f5f3 / stroke #0d9488  (teal)
+#   Judge LLM        fill #f5e8f5 / stroke #b45dc9  (violet)
+#   Datastore        fill #fbf3e6 / stroke #8c6d3f  (ochre)
+#   Dataset (input)  fill #f0f0f0 / stroke #1c2024
+#   Result outputs   pass #d6f0e2 / fail #f8d7d3
+###############################################################################
+
+###############################################################################
+# Inputs — golden datasets (curated; under eval/datasets/)
+###############################################################################
+
+datasets: Golden Datasets  ·  eval/datasets/ {
+  style.fill: "#fbfbfb"
+  style.stroke: "#1c2024"
+  style.stroke-width: 1
+
+  ds_retr: retrieval/golden_queries.yaml {
+    shape: rectangle
+    style.fill: "#f0f0f0"
+    style.stroke: "#1c2024"
+    tooltip: "30 curated queries with annotated relevant policy chunks; covers regulatory, version-ambiguous, jurisdiction-scoped, and risk-tier queries."
+  }
+  ds_faith: faithfulness/golden_outputs.yaml {
+    shape: rectangle
+    style.fill: "#f0f0f0"
+    style.stroke: "#1c2024"
+    tooltip: "Reference policy-gate outputs with retrieved-snippet ground truth. Inputs to RAGAS faithfulness + judge grounding."
+  }
+  ds_cons: scenarios/*.yaml {
+    shape: rectangle
+    style.fill: "#f0f0f0"
+    style.stroke: "#1c2024"
+    tooltip: "8 scenarios × 3 orderings (canonical / reversed / shuffled) — same risk signals, different event order."
+  }
+  ds_cite: citations/golden_outputs.yaml {
+    shape: rectangle
+    style.fill: "#f0f0f0"
+    style.stroke: "#1c2024"
+    tooltip: "Reviewed citations from canonical scenarios; judge rates each citation 1–5 for claim support."
+  }
+  ds_rob: "robustness/  ·  injection · malformed · novel · fallback" {
+    shape: rectangle
+    style.fill: "#f0f0f0"
+    style.stroke: "#1c2024"
+    tooltip: "Injection attempts, schema violations, novel patterns, fallback triggers — adversarial pressure tests."
+  }
+}
+
+###############################################################################
+# Harness — runs all five dimensions concurrently
+###############################################################################
+
+harness: Eval Harness  ·  eval/runners/harness.py {
+  style.fill: "#fef3e8"
+  style.stroke: "#c9622e"
+  style.stroke-width: 3
+
+  d_retr: Retrieval Quality {
+    style.fill: "#fbe6d6"
+    style.stroke: "#c9622e"
+    tooltip: "Context Precision/Recall @k, MRR, version-resolution accuracy, jurisdiction-filter accuracy. Last two are zero-tolerance."
+  }
+  d_faith: Generation Faithfulness {
+    style.fill: "#fbe6d6"
+    style.stroke: "#c9622e"
+    tooltip: "RAGAS atomic-claim grounding + LLM-as-judge grounding score. Hallucination rate must be 0 on the golden set."
+  }
+  d_cons: Decision Consistency {
+    style.fill: "#fbe6d6"
+    style.stroke: "#c9622e"
+    tooltip: "Same risk signals × 3 orderings → must produce identical action 24/24 (zero-tolerance). Confidence variance is informational."
+  }
+  d_cite: Citation Accuracy {
+    style.fill: "#fbe6d6"
+    style.stroke: "#c9622e"
+    tooltip: "Per-citation judge rating (1–5) on claim support. Mean ≥ 0.80, superficial-citation rate ≤ 0.05."
+  }
+  d_rob: Adversarial Robustness {
+    style.fill: "#fbe6d6"
+    style.stroke: "#c9622e"
+    tooltip: "Injection resistance / schema-violation handling / novel-pattern action / fallback correctness. Three of four are zero-tolerance."
+  }
+}
+
+###############################################################################
+# Things the dimensions consume / call
+###############################################################################
+
+driver: PipelineDriver  ·  eval/clients/pipeline.py {
+  shape: rectangle
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "Constructs the same Redis / Postgres / Elasticsearch / OpenAI clients as app/main.py:lifespan and runs execute_pipeline() in-process. Single source of truth for pipeline behavior — eval cannot drift from runtime."
+}
+
+retriever: PolicyRetriever {
+  shape: rectangle
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+  tooltip: "Hybrid pgvector + ES + cross-encoder. Used directly by the retrieval dimension; embedded in the driver for the others."
+}
+
+ragas: RAGAS Adapter {
+  shape: rectangle
+  style.fill: "#e8f5f3"
+  style.stroke: "#0d9488"
+  tooltip: "RagasFaithfulnessAdapter — atomic-claim decomposition + grounding check."
+}
+
+judge: LLM-as-Judge {
+  shape: cloud
+  style.fill: "#f5e8f5"
+  style.stroke: "#b45dc9"
+  style.stroke-width: 2
+  tooltip: "OpenAI/Anthropic LLM used as scoring judge. Use a different model family from the gate where possible, to reduce in-family bias."
+}
+
+bundles: Postgres  ·  decision_bundles {
+  shape: cylinder
+  style.fill: "#fbf3e6"
+  style.stroke: "#8c6d3f"
+  style.stroke-width: 2
+  tooltip: "Persisted DecisionBundles. Read by consistency / citation dimensions for offline analysis."
+}
+
+###############################################################################
+# Output — single EvalReport, becomes the CI verdict
+###############################################################################
+
+report: EvalReport  ·  outputs/stage/eval/eval-report.json {
+  shape: page
+  style.fill: "#fbfbfb"
+  style.stroke: "#1c2024"
+  style.stroke-width: 2
+  tooltip: "Aggregate report: per-dimension metrics + threshold pass/fail + overall_passed. JSON sidecar drives the CI gate."
+}
+
+ci: CI Gate {
+  shape: hexagon
+  style.fill: "#0d9488"
+  style.stroke: "#0d9488"
+  style.font-color: "#ffffff"
+  style.bold: true
+  style.stroke-width: 2
+  tooltip: "make eval exit code = 0 (overall_passed) or 1 (any threshold violation). Required for merge to main."
+}
+
+###############################################################################
+# Edges — datasets → dimensions
+###############################################################################
+
+datasets.ds_retr -> harness.d_retr {
+  style.stroke: "#1c2024"
+}
+datasets.ds_faith -> harness.d_faith {
+  style.stroke: "#1c2024"
+}
+datasets.ds_cons -> harness.d_cons {
+  style.stroke: "#1c2024"
+}
+datasets.ds_cite -> harness.d_cite {
+  style.stroke: "#1c2024"
+}
+datasets.ds_rob -> harness.d_rob {
+  style.stroke: "#1c2024"
+}
+
+###############################################################################
+# Edges — what each dimension calls
+###############################################################################
+
+harness.d_retr -> retriever: "queries\n+ goldens" {
+  style.stroke: "#0d9488"
+}
+
+harness.d_faith -> ragas: "claim grounding" {
+  style.stroke: "#0d9488"
+}
+harness.d_faith -> judge: "judge grounding" {
+  style.stroke: "#b45dc9"
+  style.stroke-dash: 4
+}
+
+harness.d_cons -> driver: "scenarios × orderings" {
+  style.stroke: "#0d9488"
+}
+
+harness.d_cite -> judge: "rate citations 1–5" {
+  style.stroke: "#b45dc9"
+  style.stroke-dash: 4
+}
+harness.d_cite -> bundles: "loads persisted\noutputs" {
+  style.stroke: "#8c6d3f"
+  style.stroke-dash: 4
+}
+
+harness.d_rob -> driver: "adversarial events" {
+  style.stroke: "#0d9488"
+}
+
+###############################################################################
+# Edges — driver wraps the pipeline + reaches the gate LLM
+###############################################################################
+
+driver -> retriever: "embeds the\nlive retriever" {
+  style.stroke: "#0d9488"
+  style.stroke-dash: 4
+}
+
+###############################################################################
+# Edges — aggregation → CI verdict
+###############################################################################
+
+harness -> report: "5 DimensionRuns →\nassemble_report()" {
+  style.stroke: "#c9622e"
+  style.stroke-width: 2
+}
+
+report -> ci: "exit 0 / exit 1" {
+  style.stroke: "#0d9488"
+  style.stroke-width: 2
+}
