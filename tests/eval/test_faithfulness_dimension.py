@@ -1,7 +1,7 @@
 """Unit tests for the faithfulness dimension.
 
 Stubs both the RAGAS scorer (the live RAGAS adapter is exercised in the
-@pytest.mark.evaluation harness) and the JudgeClient. Exercises:
+@pytest.mark.evaluation harness) and the LLMClient. Exercises:
 
 - citation_rationale_overlap (pure)
 - hallucination_rate (pure)
@@ -18,6 +18,7 @@ import pytest
 from pydantic import BaseModel
 
 from core.eval.metrics import EvalDimension, FaithfulnessMetrics
+from core.llm import CompletionResult, TokenUsage
 from eval.dimensions.faithfulness import (
     HALLUCINATION_BOUNDARY,
     FaithfulnessCase,
@@ -54,8 +55,8 @@ class _StubRagasScorer:
         return 0.0
 
 
-class _StubJudgeClient:
-    """Returns canned judge scores keyed by a marker substring in `user`."""
+class _StubLLMClient:
+    """Returns canned ``CompletionResult[JudgeOutput]`` keyed by a marker in `user`."""
 
     def __init__(self, scores_by_marker: dict[str, float]) -> None:
         self._scores = scores_by_marker
@@ -67,7 +68,7 @@ class _StubJudgeClient:
         system: str,
         user: str,
         response_format: type[T],
-    ) -> T:
+    ) -> CompletionResult[T]:
         del system  # judge type discriminated by template, not used in stub
         self.calls.append(user)
         score = 0.0
@@ -75,7 +76,17 @@ class _StubJudgeClient:
             if marker in user:
                 score = s
                 break
-        return response_format.model_validate({"score": score, "reasoning": "stub"})
+        parsed = response_format.model_validate({"score": score, "reasoning": "stub"})
+        return CompletionResult(
+            parsed=parsed,
+            usage=TokenUsage(
+                prompt_tokens=len(user),
+                completion_tokens=10,
+                total_tokens=len(user) + 10,
+                model="stub",
+            ),
+            latency_ms=0.0,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +178,7 @@ class TestFaithfulnessDimension:
     async def test_high_quality_run_passes(self) -> None:
         cases = [_case("c1"), _case("c2")]
         ragas = _StubRagasScorer({"[c1]": 0.9, "[c2]": 0.92})
-        judge = _StubJudgeClient({"[c1]": 0.85, "[c2]": 0.9})
+        judge = _StubLLMClient({"[c1]": 0.85, "[c2]": 0.9})
         dim = FaithfulnessDimension(
             ragas_scorer=ragas,
             judge_client=judge,
@@ -191,7 +202,7 @@ class TestFaithfulnessDimension:
         cases = [_case("c1"), _case("c2")]
         ragas = _StubRagasScorer({"[c1]": 0.9, "[c2]": 0.92})
         # c2 is below the hallucination boundary.
-        judge = _StubJudgeClient({"[c1]": 0.85, "[c2]": 0.3})
+        judge = _StubLLMClient({"[c1]": 0.85, "[c2]": 0.3})
         dim = FaithfulnessDimension(ragas_scorer=ragas, judge_client=judge, cases=cases)
         run = await dim.evaluate()
 
@@ -204,7 +215,7 @@ class TestFaithfulnessDimension:
     async def test_low_ragas_fails(self) -> None:
         cases = [_case("c1")]
         ragas = _StubRagasScorer({"[c1]": 0.4})  # below 0.85 threshold
-        judge = _StubJudgeClient({"[c1]": 0.9})
+        judge = _StubLLMClient({"[c1]": 0.9})
         dim = FaithfulnessDimension(ragas_scorer=ragas, judge_client=judge, cases=cases)
         run = await dim.evaluate()
 
@@ -214,7 +225,7 @@ class TestFaithfulnessDimension:
     @pytest.mark.asyncio
     async def test_empty_cases_does_not_pass(self) -> None:
         ragas = _StubRagasScorer({})
-        judge = _StubJudgeClient({})
+        judge = _StubLLMClient({})
         dim = FaithfulnessDimension(ragas_scorer=ragas, judge_client=judge, cases=[])
         run = await dim.evaluate()
 

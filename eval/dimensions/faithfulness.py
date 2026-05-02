@@ -7,7 +7,7 @@ to. The dimension scores:
   rationale into atomic claims and checks each against the contexts. The
   ``RagasFaithfulnessScorer`` protocol abstracts the call so eval/ stays
   SDK-agnostic; the concrete adapter lives in ``eval.clients.ragas``.
-- ``llm_judge_grounding`` — independent secondary judge via ``JudgeClient``
+- ``llm_judge_grounding`` — independent secondary judge via ``LLMClient``
   + ``faithfulness_grounding`` prompt. Cross-validates RAGAS with a
   different prompt formulation.
 - ``citation_rationale_overlap`` — simple word-level Jaccard between the
@@ -38,7 +38,7 @@ from eval.judge import JudgePromptRegistry, llm_judge
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from eval.judge import JudgeClient
+    from core.llm import LLMClient
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds (mirror core/eval/metrics.py:FaithfulnessMetrics docstring)
@@ -178,7 +178,7 @@ class FaithfulnessDimension:
 
     Args:
         ragas_scorer: ``RagasFaithfulnessScorer`` implementation.
-        judge_client: SDK-agnostic ``JudgeClient`` for the secondary judge.
+        judge_client: SDK-agnostic ``LLMClient`` for the secondary judge.
         cases: Loaded faithfulness cases.
         prompt_registry: Optional override (for tests).
         max_concurrency: Cap on in-flight calls.
@@ -190,7 +190,7 @@ class FaithfulnessDimension:
         self,
         *,
         ragas_scorer: RagasFaithfulnessScorer,
-        judge_client: JudgeClient,
+        judge_client: LLMClient,
         cases: list[FaithfulnessCase],
         prompt_registry: JudgePromptRegistry | None = None,
         max_concurrency: int = 2,

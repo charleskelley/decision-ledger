@@ -13,15 +13,13 @@ Anthropic SDK.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TypeVar, cast
 
+from anthropic import AsyncAnthropic
 from pydantic import BaseModel
 
 from app.llm._pricing import compute_cost_usd
 from core.llm.client import CompletionResult, TokenUsage
-
-if TYPE_CHECKING:
-    from anthropic import AsyncAnthropic
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -32,7 +30,9 @@ class AnthropicLLMClient:
     """``LLMClient`` implementation backed by ``AsyncAnthropic``.
 
     Args:
-        client: Authenticated ``AsyncAnthropic`` instance.
+        client: Optional ``AsyncAnthropic`` instance. Defaults to a
+            fresh ``AsyncAnthropic()`` reading auth from the environment
+            (``ANTHROPIC_API_KEY``). Tests override with a mocked client.
         model: Concrete model id (e.g., ``"claude-sonnet-4-6"``).
         timeout_secs: Per-request timeout forwarded to the SDK.
         max_tokens: Maximum output tokens — Anthropic requires this
@@ -42,13 +42,13 @@ class AnthropicLLMClient:
     def __init__(
         self,
         *,
-        client: AsyncAnthropic,
+        client: AsyncAnthropic | None = None,
         model: str = "claude-sonnet-4-6",
         timeout_secs: float = 30.0,
         max_tokens: int = 4096,
     ) -> None:
-        """Initialize with an AsyncAnthropic client and model id."""
-        self._client = client
+        """Initialize with an optional AsyncAnthropic client and model id."""
+        self._client = client if client is not None else AsyncAnthropic()
         self._model = model
         self._timeout = timeout_secs
         self._max_tokens = max_tokens

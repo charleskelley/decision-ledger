@@ -1,9 +1,13 @@
-"""Concrete ``JudgeClient`` implementations.
+"""Eval-specific clients.
 
-Each module in this package adapts a specific LLM SDK to the SDK-agnostic
-``JudgeClient`` protocol defined in ``eval.judge``. Adding a new backend
-(Anthropic, DeepSeek, local endpoint) means writing one file here — nothing
-in ``eval/judge.py``, ``eval/dimensions/``, or ``eval/runners/`` changes.
+Currently holds:
 
-This is the only subpackage in ``eval/`` permitted to import LLM SDK classes.
+- ``ragas.py`` — ``RagasFaithfulnessScorer`` adapter (encapsulates the
+  RAGAS↔LangChain coupling per DR-22; not routed through ``LLMClient``).
+- ``pipeline.py`` — ``PipelineDriver`` for the consistency and robustness
+  dimensions.
+
+LLM-call adapters (formerly ``eval/clients/openai.py:OpenAIJudgeClient``)
+moved to ``app/llm/`` per DR-23. The judge consumes ``OpenAILLMClient``
+directly from there.
 """

@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, TypeVar
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from core.llm import CompletionResult, LLMClient, TokenUsage
 from eval.judge import (
-    JudgeClient,
     JudgeOutput,
     JudgePromptRegistry,
     JudgePromptTemplate,
@@ -140,12 +140,12 @@ class TestRenderUser:
 
 
 # ---------------------------------------------------------------------------
-# llm_judge — exercises a stub JudgeClient (SDK-agnostic boundary check)
+# llm_judge — exercises a stub LLMClient (SDK-agnostic boundary check)
 # ---------------------------------------------------------------------------
 
 
-class _StubJudgeClient:
-    """Records inputs; returns a canned JudgeOutput.
+class _StubLLMClient:
+    """Records inputs; returns a canned ``CompletionResult[JudgeOutput]``.
 
     If anything inside ``llm_judge`` (or future eval/dimensions) requires the
     client to be a specific SDK class, this stub will fail to drive it — that
@@ -163,22 +163,29 @@ class _StubJudgeClient:
         system: str,
         user: str,
         response_format: type[T],
-    ) -> T:
+    ) -> CompletionResult[T]:
         self.calls.append(
             {"system": system, "user": user, "response_format": response_format}
         )
-        # Build an instance of the requested response_format. JudgeOutput is
-        # the only schema currently used; for any other type the stub
-        # delegates to model_validate with the canned payload.
         payload = {"score": self._score, "reasoning": self._reasoning}
-        return response_format.model_validate(payload)
+        parsed = response_format.model_validate(payload)
+        return CompletionResult(
+            parsed=parsed,
+            usage=TokenUsage(
+                prompt_tokens=len(system) + len(user),
+                completion_tokens=10,
+                total_tokens=len(system) + len(user) + 10,
+                model="stub",
+            ),
+            latency_ms=0.0,
+        )
 
 
 class TestLlmJudge:
     def test_stub_satisfies_protocol(self) -> None:
         # Static-typing assertion via runtime structural check — if eval ever
         # depends on a concrete SDK type the stub will stop satisfying this.
-        stub: JudgeClient = _StubJudgeClient()
+        stub: LLMClient = _StubLLMClient()
         assert callable(stub.complete_structured)
 
     @pytest.mark.asyncio
@@ -191,7 +198,7 @@ class TestLlmJudge:
             user_template="claim={claim} evidence={evidence}",
             required_vars=frozenset({"claim", "evidence"}),
         )
-        stub = _StubJudgeClient(score=0.42, reasoning="ok")
+        stub = _StubLLMClient(score=0.42, reasoning="ok")
         out = await llm_judge(
             template=tmpl,
             template_vars={"claim": "C", "evidence": "E"},
@@ -215,7 +222,7 @@ class TestLlmJudge:
             user_template="hello {name}",
             required_vars=frozenset({"name"}),
         )
-        stub = _StubJudgeClient()
+        stub = _StubLLMClient()
         with pytest.raises(ValueError, match="requires variables"):
             await llm_judge(template=tmpl, template_vars={}, client=stub)
         assert stub.calls == []  # no call made

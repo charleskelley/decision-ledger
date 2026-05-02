@@ -23,7 +23,6 @@ import psycopg
 import redis
 import structlog
 from elasticsearch import Elasticsearch
-from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
@@ -106,7 +105,7 @@ class PipelineDriver:
             cross_encoder=cross_encoder,
         )
         prompt_registry = YamlPromptRegistry()
-        llm_client = OpenAILLMClient(client=AsyncOpenAI())
+        llm_client = OpenAILLMClient()
         self._gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
         self._store = BundleStore(conn=self._pg_conn)
         self._store.ensure_schema()

@@ -1,22 +1,23 @@
 """LLM-as-judge primitive for the eval harness.
 
-The harness depends on the SDK-agnostic ``JudgeClient`` protocol — never on a
-specific LLM SDK class. Concrete clients live in ``eval.clients.*`` and adapt
-their underlying SDK (OpenAI, Anthropic, local endpoint) to this protocol.
+The judge consumes the universal ``core.llm.LLMClient`` (DR-23) — same
+adapter the policy gate uses. Swapping models means swapping the
+``LLMClient`` instance at the wiring edge; nothing inside ``eval/judge.py``,
+``eval/dimensions/``, or ``eval/runners/`` changes.
 
-Swapping models means writing one new client file under ``eval/clients/`` and
-flipping a config; nothing inside ``eval/judge.py``, ``eval/dimensions/``, or
-``eval/runners/`` needs to change.
+Judge-domain types (``JudgeOutput``, ``JudgePromptRegistry``,
+``JudgePromptTemplate``) live here. They wrap the universal LLM call
+with the judge's score-and-reasoning rubric.
 
 Usage::
 
     from openai import AsyncOpenAI
-    from eval.clients.openai import OpenAIJudgeClient
+    from app.llm.openai import OpenAILLMClient
     from eval.judge import JudgePromptRegistry, llm_judge
 
     registry = JudgePromptRegistry()
     template = registry.get("faithfulness_grounding")
-    client = OpenAIJudgeClient(client=AsyncOpenAI(), model="gpt-4o-2024-08-06")
+    client = OpenAILLMClient(client=AsyncOpenAI(), model="gpt-4o-2024-08-06")
     output = await llm_judge(
         template=template,
         template_vars={"rationale": "...", "context": "..."},
@@ -29,17 +30,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from core.llm import LLMClient
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts" / "judges"
 
 # Variable placeholder regex — same convention as app/gate/policy/prompt_registry.py.
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
-
-T = TypeVar("T", bound=BaseModel)
 
 
 class JudgeOutput(BaseModel):
@@ -161,40 +163,6 @@ class JudgePromptRegistry:
         return sorted(self._templates)
 
 
-class JudgeClient(Protocol):
-    """SDK-agnostic structured-completion contract.
-
-    Concrete implementations live in ``eval.clients.*``. The eval harness
-    (``eval/judge.py``, ``eval/dimensions/``, ``eval/runners/``) never imports
-    an SDK class directly — it operates against this protocol.
-
-    Swapping the underlying LLM is a new file under ``eval/clients/`` plus a
-    single dependency-injection swap at the runner edge.
-    """
-
-    async def complete_structured(
-        self,
-        *,
-        system: str,
-        user: str,
-        response_format: type[T],
-    ) -> T:
-        """Return a Pydantic-validated structured completion.
-
-        Args:
-            system: System message setting the model's role.
-            user: User message containing the actual judging task.
-            response_format: Pydantic model class the response must validate
-                against. The implementation instructs the underlying LLM to
-                produce a conformant JSON object and parses it.
-
-        Returns:
-            An instance of ``response_format`` populated from the model's
-            response.
-        """
-        ...
-
-
 def _render_user(template: JudgePromptTemplate, template_vars: dict[str, str]) -> str:
     """Render the user template with the provided variables.
 
@@ -216,28 +184,31 @@ async def llm_judge(
     *,
     template: JudgePromptTemplate,
     template_vars: dict[str, str],
-    client: JudgeClient,
+    client: LLMClient,
 ) -> JudgeOutput:
-    """Run a judge invocation against the provided client.
+    """Run a judge invocation against the provided LLM client.
 
     The client is opaque — judges work the same against OpenAI, Anthropic,
-    or any other backing model as long as the implementation satisfies the
-    ``JudgeClient`` protocol.
+    or any other backing model as long as the adapter satisfies the
+    ``LLMClient`` protocol.
 
     Args:
         template: The judge prompt template to use.
         template_vars: Variable values to fill the user template.
-        client: SDK-agnostic ``JudgeClient`` implementation.
+        client: SDK-agnostic ``LLMClient`` implementation.
 
     Returns:
-        Validated ``JudgeOutput`` from the LLM.
+        Validated ``JudgeOutput`` from the LLM. The underlying
+        ``CompletionResult.usage`` is discarded here — judge-side cost
+        tracking can pull it directly from the client when needed.
 
     Raises:
         ValueError: If required template variables are missing.
     """
     user = _render_user(template, template_vars)
-    return await client.complete_structured(
+    result = await client.complete_structured(
         system=template.system_prompt,
         user=user,
         response_format=JudgeOutput,
     )
+    return result.parsed

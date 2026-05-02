@@ -17,6 +17,7 @@ import pytest
 from pydantic import BaseModel
 
 from core.eval.metrics import CitationMetrics, EvalDimension
+from core.llm import CompletionResult, LLMClient, TokenUsage
 from eval.dimensions.citation import (
     SUPERFICIAL_BOUNDARY,
     CitationCase,
@@ -24,7 +25,7 @@ from eval.dimensions.citation import (
     load_citation_cases,
     superficial_rate,
 )
-from eval.judge import JudgeClient, JudgePromptRegistry
+from eval.judge import JudgePromptRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,17 +34,17 @@ T = TypeVar("T", bound=BaseModel)
 
 
 # ---------------------------------------------------------------------------
-# Stub JudgeClient
+# Stub LLMClient
 # ---------------------------------------------------------------------------
 
 
-class _StubJudgeClient:
-    """Returns canned JudgeOutputs based on the user prompt content.
+class _StubLLMClient:
+    """Returns canned ``CompletionResult[JudgeOutput]`` based on prompt content.
 
-    Two judges (relevance + entailment) share one client; the stub disambiguates
-    by inspecting the system prompt text — relevance uses 1-5 rubric, entailment
-    is binary. The test fixtures key each (claim, snippet) pair to canned
-    scores.
+    Two judges (relevance + entailment) share one client; the stub
+    disambiguates by inspecting the system prompt text — relevance uses 1-5
+    rubric, entailment is binary. The test fixtures key each (claim, snippet)
+    pair to canned scores.
     """
 
     def __init__(
@@ -61,17 +62,25 @@ class _StubJudgeClient:
         system: str,
         user: str,
         response_format: type[T],
-    ) -> T:
+    ) -> CompletionResult[T]:
         # Identify which judge by looking at the system prompt's rubric word.
         is_entailment = "entailment" in system.lower()
-        # Extract the claim from the user prompt — it's the line right after
-        # "## Claim from the Rationale" or "## Claim".
         claim = self._extract_claim(user)
         self.calls.append(("entailment" if is_entailment else "relevance", claim))
         score_map = self._ent if is_entailment else self._rel
         score = score_map.get(claim, 0.0)
         payload = {"score": score, "reasoning": f"stub-{score}"}
-        return response_format.model_validate(payload)
+        parsed = response_format.model_validate(payload)
+        return CompletionResult(
+            parsed=parsed,
+            usage=TokenUsage(
+                prompt_tokens=len(system) + len(user),
+                completion_tokens=10,
+                total_tokens=len(system) + len(user) + 10,
+                model="stub",
+            ),
+            latency_ms=0.0,
+        )
 
     @staticmethod
     def _extract_claim(user: str) -> str:
@@ -168,12 +177,12 @@ class TestCitationDimension:
     @pytest.mark.asyncio
     async def test_high_quality_passes(self) -> None:
         cases = [_case("c1", claim="A"), _case("c2", claim="B")]
-        client = _StubJudgeClient(
+        client = _StubLLMClient(
             relevance_by_claim={"A": 0.9, "B": 0.85},
             entailment_by_claim={"A": 1.0, "B": 1.0},
         )
-        # Confirm stub satisfies the JudgeClient protocol structurally.
-        _: JudgeClient = client
+        # Confirm stub satisfies the LLMClient protocol structurally.
+        _: LLMClient = client
         dim = CitationDimension(
             client=client,
             cases=cases,
@@ -195,7 +204,7 @@ class TestCitationDimension:
     @pytest.mark.asyncio
     async def test_low_relevance_fails(self) -> None:
         cases = [_case("c1", claim="A"), _case("c2", claim="B")]
-        client = _StubJudgeClient(
+        client = _StubLLMClient(
             relevance_by_claim={"A": 0.3, "B": 0.4},
             entailment_by_claim={"A": 0.0, "B": 0.0},
         )
@@ -211,7 +220,7 @@ class TestCitationDimension:
     @pytest.mark.asyncio
     async def test_judge_called_with_case_vars(self) -> None:
         cases = [_case("c1", claim="My specific claim")]
-        client = _StubJudgeClient(
+        client = _StubLLMClient(
             relevance_by_claim={"My specific claim": 0.95},
             entailment_by_claim={"My specific claim": 1.0},
         )
@@ -224,7 +233,7 @@ class TestCitationDimension:
 
     @pytest.mark.asyncio
     async def test_empty_cases_passes_vacuously(self) -> None:
-        client = _StubJudgeClient({}, {})
+        client = _StubLLMClient({}, {})
         dim = CitationDimension(client=client, cases=[])
         run = await dim.evaluate()
 
@@ -240,7 +249,7 @@ class TestCitationDimension:
     async def test_concurrency_bound(self) -> None:
         # Many cases, max_concurrency=2 → semaphore limits in-flight calls.
         cases = [_case(f"c{i}", claim=f"claim{i}") for i in range(8)]
-        client = _StubJudgeClient(
+        client = _StubLLMClient(
             relevance_by_claim={f"claim{i}": 0.9 for i in range(8)},
             entailment_by_claim={f"claim{i}": 1.0 for i in range(8)},
         )

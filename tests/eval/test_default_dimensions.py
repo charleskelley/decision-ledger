@@ -45,15 +45,15 @@ def test_raises_when_openai_api_key_missing():
 
 @pytest.fixture
 def patch_heavy_clients(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub PipelineDriver, AsyncOpenAI, OpenAIJudgeClient, RagasFaithfulnessAdapter.
+    """Stub PipelineDriver, OpenAILLMClient, RagasFaithfulnessAdapter.
 
     Lets ``_build_default_dimensions`` run end-to-end without opening any
     Redis/PG/ES connections, instantiating an OpenAI client, or
-    initializing RAGAS.
+    initializing RAGAS. (OpenAILLMClient default-constructs AsyncOpenAI
+    internally — mocking the client class itself is sufficient.)
     """
     monkeypatch.setattr(harness, "PipelineDriver", MagicMock())
-    monkeypatch.setattr(harness, "AsyncOpenAI", MagicMock())
-    monkeypatch.setattr(harness, "OpenAIJudgeClient", MagicMock())
+    monkeypatch.setattr(harness, "OpenAILLMClient", MagicMock())
     monkeypatch.setattr(harness, "RagasFaithfulnessAdapter", MagicMock())
 
 

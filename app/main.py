@@ -20,7 +20,6 @@ import redis
 import structlog
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Request
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -111,7 +110,7 @@ async def lifespan(application: FastAPI):
         cross_encoder=cross_encoder,
     )
     prompt_registry = YamlPromptRegistry()
-    llm_client = OpenAILLMClient(client=AsyncOpenAI())
+    llm_client = OpenAILLMClient()
     gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
     store = BundleStore(conn=pg_conn)
     store.ensure_schema()

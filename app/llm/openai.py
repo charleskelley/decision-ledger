@@ -6,22 +6,22 @@ a validated instance. This is the strict-structured-output path; legacy
 ``response_format={"type": "json_object"}`` (loose JSON mode) is not
 used.
 
-This module is the only place under ``app/`` permitted to import the
-OpenAI SDK.
+This module is the only place in the project permitted to import the
+OpenAI SDK. Callers construct ``OpenAILLMClient()`` without needing to
+import ``AsyncOpenAI`` themselves — the adapter default-constructs the
+SDK client (which reads ``OPENAI_API_KEY`` from the environment).
 """
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, TypeVar
+from typing import TypeVar
 
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from app.llm._pricing import compute_cost_usd
 from core.llm.client import CompletionResult, TokenUsage
-
-if TYPE_CHECKING:
-    from openai import AsyncOpenAI
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -30,7 +30,9 @@ class OpenAILLMClient:
     """``LLMClient`` implementation backed by ``AsyncOpenAI``.
 
     Args:
-        client: Authenticated ``AsyncOpenAI`` instance.
+        client: Optional ``AsyncOpenAI`` instance. Defaults to a
+            fresh ``AsyncOpenAI()`` reading auth from the environment
+            (``OPENAI_API_KEY``). Tests override with a mocked client.
         model: Concrete model id (e.g., ``"gpt-4o-2024-08-06"``).
         timeout_secs: Per-request timeout forwarded to the SDK.
     """
@@ -38,12 +40,12 @@ class OpenAILLMClient:
     def __init__(
         self,
         *,
-        client: AsyncOpenAI,
+        client: AsyncOpenAI | None = None,
         model: str = "gpt-4o-2024-08-06",
         timeout_secs: float = 30.0,
     ) -> None:
-        """Initialize with an AsyncOpenAI client and model id."""
-        self._client = client
+        """Initialize with an optional AsyncOpenAI client and model id."""
+        self._client = client if client is not None else AsyncOpenAI()
         self._model = model
         self._timeout = timeout_secs
 

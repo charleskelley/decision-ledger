@@ -9,8 +9,8 @@ For each (claim, cited_snippet) pair in the golden output set:
 - ``superficial_citation_rate`` — fraction of citations with relevance
   score ≤ 0.4 (≤ 2/5 on the original scale).
 
-Both judges go through the SDK-agnostic ``JudgeClient`` protocol from
-``eval.judge``.
+Both judges go through the SDK-agnostic ``LLMClient`` protocol from
+``core.llm`` (DR-23).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from eval.judge import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from eval.judge import JudgeClient
+    from core.llm import LLMClient
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds (mirror core/eval/metrics.py:CitationMetrics docstring)
@@ -132,7 +132,7 @@ class CitationDimension:
     """Drives the citation judges over a golden output set.
 
     Args:
-        client: SDK-agnostic ``JudgeClient`` implementation.
+        client: SDK-agnostic ``LLMClient`` implementation.
         cases: Loaded ``CitationCase`` set.
         prompt_registry: Optional prompt registry override (for tests).
         max_concurrency: Maximum number of concurrent judge calls. Bounded
@@ -144,7 +144,7 @@ class CitationDimension:
     def __init__(
         self,
         *,
-        client: JudgeClient,
+        client: LLMClient,
         cases: list[CitationCase],
         prompt_registry: JudgePromptRegistry | None = None,
         max_concurrency: int = 4,
@@ -159,7 +159,7 @@ class CitationDimension:
     def from_default_dataset(
         cls,
         *,
-        client: JudgeClient,
+        client: LLMClient,
         max_concurrency: int = 4,
     ) -> CitationDimension:
         """Construct using the bundled ``golden_outputs.yaml`` dataset."""

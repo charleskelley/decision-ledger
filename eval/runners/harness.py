@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
-from openai import AsyncOpenAI
 
+from app.llm.openai import OpenAILLMClient
 from app.settings import Settings
 from core.eval.metrics import (
     CitationMetrics,
@@ -40,7 +40,6 @@ from core.eval.metrics import (
     RetrievalMetrics,
     RobustnessMetrics,
 )
-from eval.clients.openai import OpenAIJudgeClient
 from eval.clients.pipeline import PipelineDriver
 from eval.clients.ragas import RagasFaithfulnessAdapter
 from eval.dimensions.citation import CitationDimension, load_citation_cases
@@ -203,9 +202,11 @@ def _build_default_dimensions(
 
     dataset_root = dataset_root if dataset_root is not None else _DEFAULT_DATASET_ROOT
 
-    # Heavy clients — opened once, shared across dimensions.
+    # Heavy clients — opened once, shared across dimensions. Both gate
+    # (inside the driver) and judge use OpenAILLMClient by default; swap
+    # the judge to a different provider here to reduce in-family bias.
     driver = PipelineDriver(settings=settings)
-    judge_client = OpenAIJudgeClient(client=AsyncOpenAI())
+    judge_client = OpenAILLMClient()
     ragas_scorer = RagasFaithfulnessAdapter()
 
     dimensions: list[Dimension] = []
