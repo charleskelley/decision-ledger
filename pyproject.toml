@@ -74,6 +74,7 @@ dependencies = [
     # --- Observability ---
     "structlog>=24.1,<25",
     "pydantic-settings>=2.13.1",
+    "anthropic>=0.97.0",
 ]
 
 [dependency-groups]

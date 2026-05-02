@@ -1637,3 +1637,122 @@ how heavy it is.
   Couples the dimensions to `AsyncOpenAI` directly. Loses the
   multi-model swap property — and the cleanest boundary the protocol
   provides — for nothing in return.
+
+
+## DR-23: Unified `LLMClient` adapter — one provider boundary for gate and judge
+
+**Status:** Accepted (supersedes DR-22's `JudgeClient`)
+**Category:** Architecture / Provider Abstraction
+
+### Context
+
+DR-22 introduced the `JudgeClient` Protocol so the eval harness could
+swap LLM providers (OpenAI, Anthropic, local) by writing one new
+`eval/clients/<provider>.py` file. The policy gate (`app/gate/policy/
+gate.py`) — built earlier — was never given an analogous abstraction:
+its constructor took a concrete `OpenAI` SDK client and called
+`client.chat.completions.create(...)` inline.
+
+The asymmetry was indefensible. The gate is the *production critical
+path*: provider outages or pricing changes block the decision pipeline,
+not the offline eval. Model capability is shifting rapidly enough
+(Sonnet 4.6 → Opus 4.7; Gemini 2.0 Flash matching 4o-quality at 1/30th
+the price) that A/B-testing gate models cannot require an architectural
+rewrite. A senior reviewer would (correctly) ask why the lower-stakes
+component had the abstraction and the higher-stakes one didn't.
+
+Reading the existing code surfaced a sharper observation: the
+`JudgeClient` Protocol —
+`complete_structured(*, system, user, response_format) -> response_format`
+— is **not judge-specific.** It's a generic LLM-call primitive that
+happened to be named for its first use site. The right architectural
+move is unification, not a parallel `LLMClient`-for-the-gate beside the
+existing `JudgeClient`-for-the-judge.
+
+### Decision
+
+**One adapter, two domain facades.** Introduce `core/llm/client.py:
+LLMClient` as the single SDK-agnostic LLM-call primitive. Both
+`PolicyGate` (decision path) and the eval harness's `llm_judge`
+function (offline) compose it. Concrete adapters live in `app/llm/`
+— one per provider:
+
+- `core/llm/client.py` — `LLMClient` Protocol (async),
+  `CompletionResult[T]` (parsed + usage + latency),
+  `TokenUsage` (neutral primitive).
+- `app/llm/openai.py` — `OpenAILLMClient` using
+  `client.beta.chat.completions.parse(...)` (strict JSON Schema).
+- `app/llm/anthropic.py` — `AnthropicLLMClient` using forced tool use
+  for structured output.
+- `app/llm/_pricing.py` — model→price lookup; adapters populate
+  `TokenUsage.cost_usd` from it.
+
+`JudgeClient` is retired. `eval/judge.py:llm_judge` consumes
+`LLMClient` directly. `eval/clients/openai.py` is deleted —
+`OpenAIJudgeClient`'s body lives in `app/llm/openai.py:OpenAILLMClient`.
+Two concrete adapters (OpenAI + Anthropic) ship together to prove the
+protocol generalizes across provider response shapes (OpenAI's strict
+parse vs Anthropic's tool-use translation).
+
+**Async cascade.** `LLMClient.complete_structured` is async-only.
+`PolicyGate.evaluate`, `app.decide.execute_pipeline`, and the FastAPI
+`create_decision` route all become async. `PipelineDriver` drops the
+`asyncio.to_thread` wrapping around `execute_pipeline`. FastAPI is
+async-native; LLM calls are I/O-bound; the previous mixed sync/async
+boundary was a build-order artifact.
+
+**RAGAS adapter unchanged.** `eval/clients/ragas.py` uses LangChain
+wrappers internally, not our `LLMClient`. DR-22 explicitly accepted
+that asymmetry to encapsulate the RAGAS↔LangChain coupling. Routing
+RAGAS through `LLMClient` is larger separate work and is not part of
+this decision.
+
+### Implementation
+
+- **Universal contract** in `core/llm/`. Zero infrastructure imports;
+  preserves the `core/` boundary rule.
+- **Concrete adapters** in `app/llm/`. The only modules in the project
+  permitted to import an LLM SDK class. Verified by grep at the
+  boundary — `app/gate/`, `eval/`, `core/` contain zero `import
+  openai` or `import anthropic` references.
+- **Cost computation** centralized in `app/llm/_pricing.py` — adapters
+  populate `TokenUsage.cost_usd` from the table; `cost_usd is None`
+  for unknown model ids.
+- **`PolicyGate.evaluate`** translates the `CompletionResult.usage`
+  into the existing `core.gate.policy.output.TokenCost` for
+  `PolicyGateOutput`. Audit-side semantics unchanged.
+
+### Consequences
+
+- **Symmetry restored.** Gate and judge consume the same primitive. A
+  reviewer cannot ask "why one and not the other" because the answer
+  is "both, through one adapter."
+- **Multi-provider testing is now a constructor swap.** Instantiate
+  `OpenAILLMClient` for one and `AnthropicLLMClient` for the other to
+  reduce in-family bias between gated decisions and their LLM-as-judge
+  receipts.
+- **Strict structured output upgrade for the gate.** The legacy
+  `response_format={"type": "json_object"}` path is replaced by
+  SDK-enforced JSON Schema conformance via
+  `client.beta.chat.completions.parse(...)`. Schema-validation
+  failures surface at the SDK boundary instead of as silent
+  deserialization errors at the gate's manual `_parse_verdict()` step.
+- **Async cascade through the decision path.** Lower latency under
+  concurrent load and aligns with FastAPI's native model. The
+  `PipelineDriver` no longer needs `asyncio.to_thread` for the gate
+  call.
+- **DR-22's `JudgeClient` is retired.** `JudgePromptRegistry`,
+  `JudgeOutput`, and `JudgePromptTemplate` remain — those are
+  judge-domain abstractions distinct from the LLM-call primitive.
+- **Alternatives rejected.**
+  (a) *Add a parallel `GateLLMClient` Protocol beside the existing
+  `JudgeClient`.* Two interfaces for the same call shape — fails the
+  "one LLM-call abstraction in the codebase, not two" test that DR-22
+  itself invoked.
+  (b) *Defer to a polish item.* Closing the asymmetry before Step 4's
+  baseline capture means the committed receipts reflect the
+  architecture we ship. Capturing baselines on the old plumbing then
+  refactoring later would require re-capture.
+  (c) *Ship OpenAI adapter only; defer Anthropic.* Single concrete is
+  not a proof of generalization. The protocol claim is more credible
+  with two adapters than with the design alone.
