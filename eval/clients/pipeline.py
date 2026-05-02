@@ -16,7 +16,6 @@ HTTP route handler. Single source of truth for the pipeline behavior.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,13 +23,14 @@ import psycopg
 import redis
 import structlog
 from elasticsearch import Elasticsearch
-from openai import OpenAI
+from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
 from app.decide import execute_pipeline
 from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
+from app.llm.openai import OpenAILLMClient
 from app.retrieval.retriever import PolicyRetriever
 from app.scorer import AtoScorer
 from app.settings import Settings
@@ -106,7 +106,8 @@ class PipelineDriver:
             cross_encoder=cross_encoder,
         )
         prompt_registry = YamlPromptRegistry()
-        self._gate = PolicyGate(client=OpenAI(), prompt_registry=prompt_registry)
+        llm_client = OpenAILLMClient(client=AsyncOpenAI())
+        self._gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
         self._store = BundleStore(conn=self._pg_conn)
         self._store.ensure_schema()
 
@@ -168,8 +169,7 @@ class PipelineDriver:
         """
         last_bundle = None
         for event in events:
-            last_bundle = await asyncio.to_thread(
-                execute_pipeline,
+            last_bundle = await execute_pipeline(
                 event=event,
                 feature_svc=self._feature_svc,
                 scorer=self._scorer,
@@ -204,8 +204,7 @@ class PipelineDriver:
 
     async def run_event(self, event: LoginEvent) -> DecisionAction:
         """Run a single event through the normal pipeline."""
-        bundle = await asyncio.to_thread(
-            execute_pipeline,
+        bundle = await execute_pipeline(
             event=event,
             feature_svc=self._feature_svc,
             scorer=self._scorer,

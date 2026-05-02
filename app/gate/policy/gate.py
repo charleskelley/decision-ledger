@@ -1,35 +1,38 @@
 """LLM-backed policy gate orchestrator — prompt rendering, LLM invocation, validation.
 
-PolicyGate renders the prompt template, calls the OpenAI API, validates
-the structured JSON response against ``PolicyGateVerdict``, and returns
-a ``GateResult`` carrying typed ``PolicyGateInput`` and
-``PolicyGateOutput``.
+PolicyGate renders the prompt template, calls the LLM through the
+SDK-agnostic ``LLMClient`` (DR-23), and returns a ``GateResult``
+carrying typed ``PolicyGateInput`` and ``PolicyGateOutput``.
 
-Any failure (template render error, API error, JSON parse failure,
-schema validation failure) produces a ``GateResult`` whose
-``gate_output.verdict`` is ``None``. The enforcement layer handles that
-via Tier 1 (schema failure → HOLD).
+Strict structured output is enforced at the SDK layer — the LLMClient
+returns a Pydantic-validated ``PolicyGateVerdict`` directly. The gate
+does no manual JSON parsing on success.
+
+Any failure (template render error, LLMClient error, schema-validation
+refusal at the SDK boundary) produces a ``GateResult`` whose
+``gate_output.verdict`` is ``None``. Enforcement Tier 1 routes
+schema-failure decisions to HOLD deterministically.
 
 Usage::
 
-    from openai import OpenAI
+    from openai import AsyncOpenAI
+    from app.llm.openai import OpenAILLMClient
     from app.gate.policy import PolicyGate, YamlPromptRegistry
 
-    gate = PolicyGate(OpenAI(), YamlPromptRegistry())
-    result = gate.evaluate(
+    client = OpenAILLMClient(client=AsyncOpenAI())
+    gate = PolicyGate(client=client, prompt_registry=YamlPromptRegistry())
+    result = await gate.evaluate(
         obs, snippets, decision_id="dec-abc123", corpus_version="corpus-v1"
     )
 """
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
-from pydantic import ValidationError
 
 from core.gate.policy import (
     PolicyGateInput,
@@ -40,21 +43,22 @@ from core.gate.policy import (
 )
 
 if TYPE_CHECKING:
-    from openai import OpenAI
-
     from core.gate.policy import PromptRegistry, PromptTemplate
+    from core.llm import LLMClient
     from core.observation import Observation
     from core.snippet import RetrievedSnippet
 
 log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Approximate GPT-4o pricing (USD per 1M tokens, as of 2025-04).
-# Used for cost estimation in TokenCost — not billing.
+# Gate-level system prompt — minimal framing for the policy-evaluation task.
+# Per-domain rubric and event context flow in via the user-message template.
 # ---------------------------------------------------------------------------
 
-_INPUT_COST_PER_1M_USD: float = 2.50
-_OUTPUT_COST_PER_1M_USD: float = 10.00
+_GATE_SYSTEM_PROMPT = (
+    "You evaluate authentication risk for the policy gate. "
+    "Respond with a PolicyGateVerdict that conforms strictly to the schema."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +76,12 @@ class GateResult:
     Args:
         gate_input: Concrete input artifacts (typed ``PolicyGateInput``).
         gate_output: Concrete output artifacts.
-            ``gate_output.verdict`` is ``None`` when the LLM response
-            could not be parsed or failed schema validation;
-            ``gate_output.response_text`` carries forensic evidence in
-            that case.
+            ``gate_output.verdict`` is ``None`` when the LLM call or
+            schema validation failed; ``gate_output.response_text`` is
+            ``None`` in that case (the SDK's strict parser does not
+            surface unparseable text).
         latency_ms: Wall-clock time for the full ``evaluate()`` call in
-            milliseconds.
+            milliseconds (including render + LLM call + bookkeeping).
     """
 
     gate_input: PolicyGateInput
@@ -127,54 +131,13 @@ def _render_prompt(
     return interim.format(**template_vars)
 
 
-def _parse_verdict(
-    raw_response: str,
-    *,
-    decision_id: str,
-) -> PolicyGateVerdict | None:
-    """Parse and validate a raw LLM response string as PolicyGateVerdict.
-
-    Returns ``None`` on any parse or validation error without raising.
-    The caller logs the raw response; enforcement routes to HOLD via
-    Tier 1.
-    """
-    try:
-        data = json.loads(raw_response)
-    except (json.JSONDecodeError, ValueError) as exc:
-        log.warning(
-            "policy_gate.json_parse_error",
-            component="policy_gate",
-            decision_id=decision_id,
-            error=str(exc),
-        )
-        return None
-
-    try:
-        return PolicyGateVerdict.model_validate(data, strict=False)
-    except ValidationError as exc:
-        log.warning(
-            "policy_gate.schema_validation_error",
-            component="policy_gate",
-            decision_id=decision_id,
-            error_count=exc.error_count(),
-        )
-        return None
-
-
-def _compute_token_cost(usage: object, model: str) -> TokenCost:
-    """Build a TokenCost from an OpenAI CompletionUsage object."""
-    prompt_tokens: int = usage.prompt_tokens  # type: ignore[attr-defined]
-    completion_tokens: int = usage.completion_tokens  # type: ignore[attr-defined]
-    total_tokens: int = usage.total_tokens  # type: ignore[attr-defined]
-    cost = (
-        prompt_tokens / 1_000_000 * _INPUT_COST_PER_1M_USD
-        + completion_tokens / 1_000_000 * _OUTPUT_COST_PER_1M_USD
-    )
+def _build_token_cost(usage, model: str) -> TokenCost:
+    """Translate a neutral ``TokenUsage`` into the audit-side ``TokenCost``."""
     return TokenCost(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-        cost_usd=round(cost, 6),
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        cost_usd=round(usage.cost_usd if usage.cost_usd is not None else 0.0, 6),
         model=model,
     )
 
@@ -203,13 +166,12 @@ def _build_gate_input(
 def _build_gate_output(
     *,
     verdict: PolicyGateVerdict | None,
-    raw_response: str,
     token_cost: TokenCost | None,
 ) -> PolicyGateOutput:
     """Construct the typed PolicyGateOutput record."""
     return PolicyGateOutput(
         verdict=verdict,
-        response_text=raw_response if raw_response else None,
+        response_text=None,
         token_cost=token_cost,
     )
 
@@ -222,34 +184,40 @@ def _build_gate_output(
 class PolicyGate:
     """LLM-backed policy gate orchestrator.
 
-    Wraps the OpenAI API call in a structured evaluation loop. Any
-    failure (network error, timeout, JSON parse failure, schema
-    validation failure) produces a ``GateResult`` whose
+    Wraps an ``LLMClient`` (DR-23) in a structured evaluation loop. Any
+    failure (network error, timeout, refusal, schema-validation failure
+    at the SDK boundary) produces a ``GateResult`` whose
     ``gate_output.verdict`` is ``None`` so enforcement can apply Tier 1
     (schema failure → HOLD) deterministically.
 
     Args:
-        client: Authenticated OpenAI client instance.
-        prompt_registry: Registry for resolving versioned prompt templates.
-        model: OpenAI model to use for gate evaluations.
-        timeout_secs: Per-request timeout forwarded to the OpenAI client.
+        client: SDK-agnostic ``LLMClient`` adapter. Decouples gate
+            behavior from the underlying LLM provider — see DR-23.
+        prompt_registry: Registry for resolving versioned prompt
+            templates.
+        model_version_label: Free-form label recorded into
+            ``PolicyGateInput.model_version``. Defaults to
+            ``client.model`` when the client exposes a ``model``
+            property; otherwise an opaque ``"<llm-client>"`` placeholder.
     """
 
     def __init__(
         self,
-        client: OpenAI,
-        prompt_registry: PromptRegistry,
         *,
-        model: str = "gpt-4o-2024-08-06",
-        timeout_secs: float = 30.0,
+        client: LLMClient,
+        prompt_registry: PromptRegistry,
+        model_version_label: str | None = None,
     ) -> None:
-        """Initialize the policy gate with an OpenAI client and prompt registry."""
+        """Initialize the policy gate with an LLMClient and prompt registry."""
         self._client = client
         self._registry = prompt_registry
-        self._model = model
-        self._timeout = timeout_secs
+        self._model_version_label = (
+            model_version_label
+            if model_version_label is not None
+            else getattr(client, "model", "<llm-client>")
+        )
 
-    def evaluate(
+    async def evaluate(
         self,
         obs: Observation,
         snippets: list[RetrievedSnippet],
@@ -259,9 +227,9 @@ class PolicyGate:
     ) -> GateResult:
         """Evaluate an observation against retrieved policy evidence.
 
-        Renders the prompt template, calls the LLM, validates the
-        response as ``PolicyGateVerdict``, and returns a ``GateResult``
-        carrying typed ``PolicyGateInput`` / ``PolicyGateOutput``.
+        Renders the prompt template, invokes the LLM through ``LLMClient``,
+        and returns a ``GateResult`` carrying typed
+        ``PolicyGateInput`` / ``PolicyGateOutput``.
 
         Args:
             obs: Assembled observation with ``gate_context`` populated.
@@ -280,7 +248,7 @@ class PolicyGate:
             "component": "policy_gate",
             "decision_id": decision_id,
             "event_id": obs.event_id,
-            "model": self._model,
+            "model": self._model_version_label,
         }
 
         config = obs.gate_context.gate_config or {}
@@ -294,6 +262,7 @@ class PolicyGate:
             template_text=template.template_text,
         )
 
+        # --- Render prompt ---
         try:
             rendered = _render_prompt(
                 template.template_text,
@@ -303,84 +272,67 @@ class PolicyGate:
         except KeyError as exc:
             log.error("policy_gate.render_error", error=str(exc), **log_ctx)
             gate_input = _build_gate_input(
-                model_version=self._model,
+                model_version=self._model_version_label,
                 template=template,
                 template_vars=template_vars,
                 corpus_version=corpus_version,
                 rendered_prompt="",
                 prompt_snapshot=prompt_snapshot,
             )
-            gate_output = _build_gate_output(
-                verdict=None, raw_response="", token_cost=None
-            )
+            gate_output = _build_gate_output(verdict=None, token_cost=None)
             return GateResult(
                 gate_input=gate_input,
                 gate_output=gate_output,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 1),
             )
 
-        raw_response = ""
-        token_cost_obj: TokenCost | None = None
+        # --- LLM invocation via SDK-agnostic client ---
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": rendered}],
-                response_format={"type": "json_object"},
-                timeout=self._timeout,
-            )
-            raw_response = response.choices[0].message.content or ""
-            if response.usage:
-                token_cost_obj = _compute_token_cost(response.usage, self._model)
-            log.debug(
-                "policy_gate.llm_response",
-                raw_length=len(raw_response),
-                **log_ctx,
+            result = await self._client.complete_structured(
+                system=_GATE_SYSTEM_PROMPT,
+                user=rendered,
+                response_format=PolicyGateVerdict,
             )
         except Exception as exc:
-            log.error("policy_gate.api_error", error=str(exc), **log_ctx)
+            # Network errors, refusals, schema-validation failures all
+            # surface here. Produce the verdict=None record enforcement
+            # Tier 1 routes to HOLD.
+            log.error("policy_gate.llm_error", error=str(exc), **log_ctx)
             gate_input = _build_gate_input(
-                model_version=self._model,
+                model_version=self._model_version_label,
                 template=template,
                 template_vars=template_vars,
                 corpus_version=corpus_version,
                 rendered_prompt=rendered,
                 prompt_snapshot=prompt_snapshot,
             )
-            gate_output = _build_gate_output(
-                verdict=None, raw_response="", token_cost=None
-            )
+            gate_output = _build_gate_output(verdict=None, token_cost=None)
             return GateResult(
                 gate_input=gate_input,
                 gate_output=gate_output,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 1),
             )
 
-        verdict = _parse_verdict(raw_response, decision_id=decision_id)
+        verdict = result.parsed
+        token_cost = _build_token_cost(result.usage, self._model_version_label)
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-        if verdict is None:
-            log.warning("policy_gate.output_invalid", **log_ctx)
-        else:
-            log.info(
-                "policy_gate.evaluated",
-                permitted_actions=[a.value for a in verdict.permitted_actions],
-                confidence=verdict.confidence,
-                **log_ctx,
-            )
+        log.info(
+            "policy_gate.evaluated",
+            permitted_actions=[a.value for a in verdict.permitted_actions],
+            confidence=verdict.confidence,
+            **log_ctx,
+        )
 
         gate_input = _build_gate_input(
-            model_version=self._model,
+            model_version=self._model_version_label,
             template=template,
             template_vars=template_vars,
             corpus_version=corpus_version,
             rendered_prompt=rendered,
             prompt_snapshot=prompt_snapshot,
         )
-        gate_output = _build_gate_output(
-            verdict=verdict,
-            raw_response=raw_response,
-            token_cost=token_cost_obj,
-        )
+        gate_output = _build_gate_output(verdict=verdict, token_cost=token_cost)
         return GateResult(
             gate_input=gate_input,
             gate_output=gate_output,

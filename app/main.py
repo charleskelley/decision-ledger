@@ -20,6 +20,7 @@ import redis
 import structlog
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Request
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -27,6 +28,7 @@ from app.audit import BundleStore
 from app.decide import execute_pipeline
 from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
+from app.llm.openai import OpenAILLMClient
 from app.monitoring import configure_logging
 from app.retrieval.retriever import PolicyRetriever
 from app.scorer import AtoScorer
@@ -109,9 +111,8 @@ async def lifespan(application: FastAPI):
         cross_encoder=cross_encoder,
     )
     prompt_registry = YamlPromptRegistry()
-    from openai import OpenAI
-
-    gate = PolicyGate(client=OpenAI(), prompt_registry=prompt_registry)
+    llm_client = OpenAILLMClient(client=AsyncOpenAI())
+    gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
     store = BundleStore(conn=pg_conn)
     store.ensure_schema()
 
@@ -161,7 +162,7 @@ def health() -> dict[str, str]:
     status_code=200,
     responses={422: {"model": ErrorResponse}},
 )
-def create_decision(event: LoginEvent, request: Request) -> DecisionResponse:
+async def create_decision(event: LoginEvent, request: Request) -> DecisionResponse:
     """Run the full decision pipeline on a LoginEvent.
 
     Scores the event, retrieves relevant policies if needed, invokes
@@ -176,7 +177,7 @@ def create_decision(event: LoginEvent, request: Request) -> DecisionResponse:
     Returns:
         DecisionResponse summary with decision_id and decision_action.
     """
-    bundle = execute_pipeline(
+    bundle = await execute_pipeline(
         event=event,
         feature_svc=request.app.state.feature_svc,
         scorer=request.app.state.scorer,

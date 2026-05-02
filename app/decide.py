@@ -10,9 +10,11 @@ Used by:
 - ``eval/clients/pipeline.py:PipelineDriver`` — the eval harness's
   in-process driver for consistency / robustness dimensions.
 
-Synchronous. Callers in async contexts wrap with ``asyncio.to_thread``.
-The pipeline itself does not log structured per-step events — callers
-log what makes sense for their context (HTTP request, eval run, etc.).
+Async (DR-23). The single ``await`` point is the policy-gate call;
+all other services (features, scorer, retriever, store) are sync and
+run inline. The pipeline itself does not log structured per-step
+events — callers log what makes sense for their context (HTTP request,
+eval run, etc.).
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
     from reasoner.account_takeover.events import LoginEvent
 
 
-def execute_pipeline(
+async def execute_pipeline(
     *,
     event: LoginEvent,
     feature_svc: FeatureService,
@@ -109,7 +111,7 @@ def execute_pipeline(
         latency["retrieval_ms"] = duration_ms(t0)
 
         t0 = time.perf_counter()
-        gate_result = gate.evaluate(
+        gate_result = await gate.evaluate(
             obs,  # type: ignore[arg-type]
             snippets,
             decision_id=decision_id,

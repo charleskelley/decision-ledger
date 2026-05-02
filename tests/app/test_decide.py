@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -118,7 +118,9 @@ def stub_services() -> dict[str, MagicMock]:
     retriever = MagicMock()
     retriever.build_query.return_value = "test query"
 
+    # gate.evaluate is async (DR-23) — use AsyncMock so awaits work
     gate = MagicMock()
+    gate.evaluate = AsyncMock()
     store = MagicMock()
 
     return {
@@ -130,7 +132,7 @@ def stub_services() -> dict[str, MagicMock]:
     }
 
 
-def _run(
+async def _run(
     stub_services: dict[str, MagicMock],
     *,
     event: LoginEvent | None = None,
@@ -138,7 +140,7 @@ def _run(
     idempotency_key: str | None = None,
 ) -> Callable:
     """Invoke execute_pipeline with the stub services and an event."""
-    return execute_pipeline(
+    return await execute_pipeline(
         event=event or _make_event(),
         feature_svc=stub_services["feature_svc"],
         scorer=stub_services["scorer"],
@@ -156,68 +158,76 @@ def _run(
 # ---------------------------------------------------------------------------
 
 
-def test_fast_path_does_not_invoke_retriever_or_gate(stub_services):
+@pytest.mark.asyncio
+async def test_fast_path_does_not_invoke_retriever_or_gate(stub_services):
     """ROUTE != ROUTE_TO_GATE → retriever.retrieve and gate.evaluate untouched."""
-    _run(stub_services)
+    await _run(stub_services)
 
     assert stub_services["retriever"].retrieve.call_count == 0
     assert stub_services["gate"].evaluate.call_count == 0
 
 
-def test_fast_path_returns_bundle_with_no_gate_artifacts(stub_services):
+@pytest.mark.asyncio
+async def test_fast_path_returns_bundle_with_no_gate_artifacts(stub_services):
     """Fast-path bundle has gate_input and gate_output both None."""
-    bundle = _run(stub_services)
+    bundle = await _run(stub_services)
 
     assert bundle.gate_input is None
     assert bundle.gate_output is None
     assert bundle.retrieval_path == "skipped"
 
 
-def test_persists_bundle_via_store_write(stub_services):
+@pytest.mark.asyncio
+async def test_persists_bundle_via_store_write(stub_services):
     """The returned bundle is the same object passed to store.write."""
-    bundle = _run(stub_services)
+    bundle = await _run(stub_services)
 
     assert stub_services["store"].write.call_count == 1
     persisted = stub_services["store"].write.call_args[0][0]
     assert persisted is bundle
 
 
-def test_uses_provided_decision_id(stub_services):
+@pytest.mark.asyncio
+async def test_uses_provided_decision_id(stub_services):
     """An explicit decision_id flows through to the persisted bundle."""
-    bundle = _run(stub_services, decision_id="custom-decision-id")
+    bundle = await _run(stub_services, decision_id="custom-decision-id")
 
     assert bundle.decision_id == "custom-decision-id"
 
 
-def test_defaults_decision_id_to_generated_uuid(stub_services):
+@pytest.mark.asyncio
+async def test_defaults_decision_id_to_generated_uuid(stub_services):
     """When omitted, decision_id is auto-generated and non-empty."""
-    bundle = _run(stub_services)
+    bundle = await _run(stub_services)
 
     assert bundle.decision_id
     assert len(bundle.decision_id) >= 32  # UUID4 string form
 
 
-def test_defaults_idempotency_key_to_event_id(stub_services):
+@pytest.mark.asyncio
+async def test_defaults_idempotency_key_to_event_id(stub_services):
     """When omitted, idempotency_key falls back to event.event_id."""
     event = _make_event(event_id="evt-fallback-key")
-    bundle = _run(stub_services, event=event)
+    bundle = await _run(stub_services, event=event)
 
     assert bundle.idempotency_key == "evt-fallback-key"
 
 
-def test_uses_provided_idempotency_key(stub_services):
+@pytest.mark.asyncio
+async def test_uses_provided_idempotency_key(stub_services):
     """An explicit idempotency_key takes precedence over event.event_id."""
-    bundle = _run(stub_services, idempotency_key="explicit-key")
+    bundle = await _run(stub_services, idempotency_key="explicit-key")
 
     assert bundle.idempotency_key == "explicit-key"
 
 
-def test_populates_latency_breakdown_for_each_phase(stub_services):
+@pytest.mark.asyncio
+async def test_populates_latency_breakdown_for_each_phase(stub_services):
     """Bundle latency_breakdown carries one entry per measurable phase.
 
     bundle_ms is intentionally not tracked — see app/decide.py for why.
     """
-    bundle = _run(stub_services)
+    bundle = await _run(stub_services)
 
     expected_phases = {
         "features_ms",
@@ -232,19 +242,21 @@ def test_populates_latency_breakdown_for_each_phase(stub_services):
     assert bundle.latency_breakdown["gate_ms"] == 0.0
 
 
-def test_calls_feature_svc_with_event(stub_services):
+@pytest.mark.asyncio
+async def test_calls_feature_svc_with_event(stub_services):
     """feature_svc.compute receives the input event verbatim."""
     event = _make_event(event_id="evt-feature-check")
-    _run(stub_services, event=event)
+    await _run(stub_services, event=event)
 
     assert stub_services["feature_svc"].compute.call_count == 1
     assert stub_services["feature_svc"].compute.call_args[0][0] is event
 
 
-def test_calls_scorer_with_features(stub_services):
+@pytest.mark.asyncio
+async def test_calls_scorer_with_features(stub_services):
     """scorer.score receives the AtoFeatureVector from feature_svc.compute."""
     features = stub_services["feature_svc"].compute.return_value
-    _run(stub_services)
+    await _run(stub_services)
 
     assert stub_services["scorer"].score.call_count == 1
     assert stub_services["scorer"].score.call_args[0][0] is features
