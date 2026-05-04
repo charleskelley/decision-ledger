@@ -34,11 +34,25 @@ knowledge = os.path.join(project, "knowledge") if project else ""
 if knowledge and (cwd == knowledge or cwd.startswith(knowledge + os.sep)):
     rel = os.path.relpath(cwd, knowledge)
     suffix = "" if rel == "." else "/" + rel
-    print(f"[RESEARCHER] knowledge{suffix}")
+    location = f"[RESEARCHER] knowledge{suffix}"
 elif project and (cwd == project or cwd.startswith(project + os.sep)):
     rel = os.path.relpath(cwd, project)
     label = "(project root)" if rel == "." else rel
-    print(f"[DEVELOPER] {label}")
+    location = f"[DEVELOPER] {label}"
 else:
-    print(os.path.basename(cwd) or "?")
+    location = os.path.basename(cwd) or "?"
+
+ctx = state.get("context_window") or {}
+size = ctx.get("context_window_size")
+pct = ctx.get("used_percentage")
+used_tokens = (ctx.get("current_usage") or {}).get("input_tokens")
+
+if size and used_tokens is not None and pct is not None:
+    used_k = (used_tokens + 500) // 1000
+    total_k = (size + 500) // 1000
+    ctx_part = f"ctx: {used_k}k/{total_k}k ({round(pct)}%)"
+else:
+    ctx_part = "ctx: --"
+
+print(f"{location}  {ctx_part}")
 '
