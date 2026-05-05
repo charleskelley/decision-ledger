@@ -96,7 +96,7 @@ pyrightconfig.json
 # ----------------------------------------------------------------------------
 
 # Secrets and credentials — NEVER commit these
-.env.local
+.env
 .env.production
 .env.*.local
 secrets/
