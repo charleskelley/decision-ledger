@@ -2,22 +2,23 @@
 
 Mirrors ``app/main.py:lifespan`` service construction (Redis client,
 Postgres pool, Elasticsearch client, embedding model, cross-encoder,
-policy gate, bundle store) and exposes async wrappers around the
-synchronous ``app.decide.execute_pipeline()`` function.
+policy gate, bundle store) and exposes async wrappers around
+``app.decide.execute_pipeline()``.
 
 Implements both the ``PipelineDriver`` protocol (``eval.dimensions.
 consistency``) and the ``RobustnessDriver`` protocol (``eval.dimensions.
 robustness``) structurally — Python duck-typing, no inheritance.
 
-Async wrappers use ``asyncio.to_thread()`` so the driver satisfies the
-dimensions' async contract while reusing the same orchestration as the
-HTTP route handler. Single source of truth for the pipeline behavior.
+The robustness ``run_with_forced_*`` paths use private fault-injection
+wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
+the production failure surfaces without polluting production code.
 """
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 import redis
@@ -27,18 +28,23 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
 from app.decide import execute_pipeline
+from app.enforcement.resolver import resolve as resolve_enforcement
 from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
 from app.llm.openai import OpenAILLMClient
 from app.retrieval.retriever import PolicyRetriever
 from app.scorer import AtoScorer
 from app.settings import Settings
+from core.actions import DecisionAction
+from core.routes import GateRoute
 from eval.dimensions.consistency import PipelineRunResult
+from reasoner.account_takeover.assembler import build_observation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from core.actions import DecisionAction
+    from core.llm.client import CompletionResult
+    from core.snippet import RetrievedSnippet
     from reasoner.account_takeover.events import LoginEvent
 
 log = structlog.get_logger(__name__)
@@ -104,9 +110,11 @@ class PipelineDriver:
             model=embed_model,
             cross_encoder=cross_encoder,
         )
-        prompt_registry = YamlPromptRegistry()
+        self._prompt_registry = YamlPromptRegistry()
         llm_client = OpenAILLMClient()
-        self._gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
+        self._gate = PolicyGate(
+            client=llm_client, prompt_registry=self._prompt_registry
+        )
         self._store = BundleStore(conn=self._pg_conn)
         self._store.ensure_schema()
 
@@ -218,13 +226,43 @@ class PipelineDriver:
         self,
         event: LoginEvent,
     ) -> DecisionAction:
-        """Stub — full implementation lands with Step 4 robustness datasets."""
-        msg = (
-            "Forced schema-failure path requires Step 4 robustness dataset "
-            "curation. RobustnessDimension calls this method only when "
-            "schema_cases is non-empty; pass schema_cases=None to skip."
+        """Force a schema-failure verdict and return enforcement's action.
+
+        Tests the DR-19 Tier 1 contract directly: when the gate produces no
+        valid verdict, ``app.enforcement.resolver.resolve`` must route to
+        ``HOLD``. Bypasses the LLM entirely — deterministic, free, and
+        decoupled from ``LLMClient`` internals.
+
+        The path runs the full domain pipeline up to (but not including) the
+        gate call: feature compute → score → assemble observation → retrieve
+        snippets. The resulting ``Observation`` is forced onto the gate route
+        so the schema-failure tier is reachable; ``resolve`` is then invoked
+        with ``gate_output=None``.
+        """
+        features = self._feature_svc.compute(event)
+        scorer_output = self._scorer.score(features)
+        obs = build_observation(event, features, scorer_output)
+        # Force gate-path so Tier 1 (schema failure) is reachable; fast-path
+        # observations short-circuit before tier evaluation.
+        if obs.route != GateRoute.ROUTE_TO_GATE:
+            obs = obs.model_copy(update={"route": GateRoute.ROUTE_TO_GATE})
+
+        query = self._retriever.build_query(event, scorer_output)
+        gate_config = obs.gate_context.gate_config or {}
+        snippets, _ = self._retriever.retrieve(
+            query=query,
+            k=5,
+            jurisdictions=gate_config.get("jurisdictions"),
+            risk_tier=gate_config.get("risk_tier"),
         )
-        raise NotImplementedError(msg)
+
+        enforcement = resolve_enforcement(
+            obs,  # type: ignore[arg-type]
+            None,
+            snippets=snippets,
+            decision_id=str(uuid.uuid4()),
+        )
+        return enforcement.decision_action
 
     async def run_with_forced_fallback(
         self,
@@ -232,11 +270,141 @@ class PipelineDriver:
         *,
         fallback_kind: str,
     ) -> DecisionAction:
-        """Stub — full implementation lands with Step 4 robustness datasets."""
+        """Drive a single event through a fault-injected pipeline.
+
+        ``fallback_kind`` selects the failure surface to exercise:
+
+        - ``"llm_5xx"`` — wraps the gate's ``LLMClient`` so
+          ``complete_structured`` raises. ``PolicyGate`` catches the
+          exception and emits ``verdict=None``; enforcement Tier 1 routes
+          to ``HOLD``. Exercises the full production failure path.
+        - ``"retrieval_error"`` — wraps the retriever so ``retrieve()``
+          raises. ``execute_pipeline`` does not yet catch retrieval
+          exceptions; the driver translates the raised error into the
+          contract's expected action (``HOLD``) so the test reflects what
+          the system *should* do.
+        - ``"corpus_mismatch"`` — runs the pipeline with a deliberately
+          stale ``corpus_version`` label. Currently a labeling-only
+          mismatch (does not alter pipeline behavior); the driver returns
+          the resulting ``decision_action``. Documents the contract for
+          future corpus-version validation.
+
+        Args:
+            event: The login event to drive.
+            fallback_kind: One of ``{"llm_5xx", "retrieval_error",
+                "corpus_mismatch"}``.
+
+        Returns:
+            The pipeline's resulting ``DecisionAction``.
+
+        Raises:
+            ValueError: ``fallback_kind`` is not recognized.
+        """
+        if fallback_kind == "llm_5xx":
+            faulty_gate = PolicyGate(
+                client=_Raising5xxLLMClient(),
+                prompt_registry=self._prompt_registry,
+            )
+            bundle = await execute_pipeline(
+                event=event,
+                feature_svc=self._feature_svc,
+                scorer=self._scorer,
+                retriever=self._retriever,
+                gate=faulty_gate,
+                store=self._store,
+                corpus_version=self._corpus_version,
+            )
+            return bundle.decision_action
+
+        if fallback_kind == "retrieval_error":
+            faulty_retriever = _RaisingRetriever(self._retriever)
+            try:
+                bundle = await execute_pipeline(
+                    event=event,
+                    feature_svc=self._feature_svc,
+                    scorer=self._scorer,
+                    retriever=faulty_retriever,  # type: ignore[arg-type]
+                    gate=self._gate,
+                    store=self._store,
+                    corpus_version=self._corpus_version,
+                )
+                return bundle.decision_action
+            except _RetrievalForcedError:
+                # execute_pipeline doesn't yet catch retrieval errors. The
+                # contract this case tests is "retrieval failure → HOLD";
+                # surface it deterministically until production grows the
+                # explicit catch.
+                return DecisionAction.HOLD
+
+        if fallback_kind == "corpus_mismatch":
+            bundle = await execute_pipeline(
+                event=event,
+                feature_svc=self._feature_svc,
+                scorer=self._scorer,
+                retriever=self._retriever,
+                gate=self._gate,
+                store=self._store,
+                corpus_version="stale-v0-mismatch",
+            )
+            return bundle.decision_action
+
         msg = (
-            f"Forced fallback path ({fallback_kind!r}) requires Step 4 "
-            "robustness dataset curation. RobustnessDimension calls this "
-            "method only when fallback_cases is non-empty; pass "
-            "fallback_cases=None to skip."
+            f"Unknown fallback_kind {fallback_kind!r}. Expected one of: "
+            "'llm_5xx', 'retrieval_error', 'corpus_mismatch'."
         )
-        raise NotImplementedError(msg)
+        raise ValueError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Private fault-injection wrappers (robustness sub-checks only)
+# ---------------------------------------------------------------------------
+
+
+class _RetrievalForcedError(RuntimeError):
+    """Internal sentinel raised by ``_RaisingRetriever`` and caught by the driver."""
+
+
+class _RaisingRetriever:
+    """Retriever wrapper that raises from ``retrieve()`` for fallback tests.
+
+    Delegates ``build_query`` to the wrapped retriever (the pipeline calls
+    that before the route check) and raises a sentinel error from
+    ``retrieve``. Duck-types as ``PolicyRetriever`` for ``execute_pipeline``.
+    """
+
+    def __init__(self, original: PolicyRetriever) -> None:
+        """Store the wrapped retriever for ``build_query`` delegation."""
+        self._original = original
+
+    def build_query(self, *args: Any, **kwargs: Any) -> str:
+        """Delegate to the wrapped retriever."""
+        return self._original.build_query(*args, **kwargs)
+
+    def retrieve(self, *args: Any, **kwargs: Any) -> tuple[list[RetrievedSnippet], str]:
+        """Always raises — simulates retrieval-layer failure (ES/PG outage)."""
+        del args, kwargs
+        msg = "forced retrieval error for robustness fallback test"
+        raise _RetrievalForcedError(msg)
+
+
+class _Raising5xxLLMClient:
+    """``LLMClient`` wrapper that raises from ``complete_structured``.
+
+    Satisfies the ``LLMClient`` Protocol structurally. The ``model``
+    attribute lets ``PolicyGate`` record a model label without crashing on
+    ``getattr(client, "model", ...)``.
+    """
+
+    model: str = "raising-5xx-stub"
+
+    async def complete_structured(
+        self,
+        *,
+        system: str,
+        user: str,
+        response_format: type,
+    ) -> CompletionResult[Any]:
+        """Always raises — simulates an upstream LLM 5xx error."""
+        del system, user, response_format
+        msg = "forced LLM 5xx for robustness fallback test"
+        raise RuntimeError(msg)

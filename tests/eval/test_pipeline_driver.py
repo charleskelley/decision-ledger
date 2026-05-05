@@ -3,11 +3,12 @@
 Coverage scope:
 - Fail-fast configuration validation in ``__init__`` (no infrastructure
   required — assertion fires before any connection).
-- Stubbed RobustnessDriver methods raise ``NotImplementedError`` with
-  guidance pointing at Step 4 dataset curation.
+- Pure validation paths in ``run_with_forced_fallback`` (unknown
+  ``fallback_kind`` rejected before any service call).
 
-Live-pipeline behavior (run, run_event) requires Docker + OPENAI_API_KEY
-and is exercised by the Step 5 scenario smoke test.
+Live-pipeline behavior (``run``, ``run_event``, the live branches of the
+forced-failure methods) requires Docker + OPENAI_API_KEY and is exercised
+by the Step 6 scenario smoke test plus the robustness eval dimension.
 """
 
 from __future__ import annotations
@@ -72,41 +73,41 @@ def test_constructor_raises_when_scorer_model_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# RobustnessDriver stub methods — bypass __init__ to avoid infra construction
+# Pure validation in run_with_forced_fallback — bypass __init__ (no infra)
 # ---------------------------------------------------------------------------
 
 
 def _uninstantiated_driver() -> PipelineDriver:
     """Build a PipelineDriver shell without running __init__.
 
-    The stub methods don't touch instance state, so they're testable
-    without infrastructure construction.
+    The unknown-fallback_kind path raises before any service is touched,
+    so the dispatch validation is testable without infrastructure.
     """
     return PipelineDriver.__new__(PipelineDriver)
 
 
-def test_run_with_forced_schema_failure_raises_not_implemented():
-    """Schema-failure stub points at the Step 4 dataset curation work."""
+def test_run_with_forced_fallback_rejects_unknown_kind():
+    """Unknown fallback_kind raises ValueError before any service is called."""
     driver = _uninstantiated_driver()
-    with pytest.raises(NotImplementedError, match="Step 4"):
-        asyncio.run(driver.run_with_forced_schema_failure(_make_event()))
-
-
-def test_run_with_forced_fallback_raises_not_implemented():
-    """Fallback stub points at the Step 4 dataset curation work."""
-    driver = _uninstantiated_driver()
-    with pytest.raises(NotImplementedError, match="Step 4"):
+    with pytest.raises(ValueError, match="Unknown fallback_kind"):
         asyncio.run(
-            driver.run_with_forced_fallback(_make_event(), fallback_kind="llm_error")
+            driver.run_with_forced_fallback(
+                _make_event(), fallback_kind="not_a_real_kind"
+            )
         )
 
 
-def test_fallback_stub_includes_kind_in_message():
-    """Fallback stub names the requested fallback_kind for debuggability."""
+def test_unknown_fallback_kind_message_lists_valid_kinds():
+    """Error message names the supported kinds for debuggability."""
     driver = _uninstantiated_driver()
-    with pytest.raises(NotImplementedError, match="retrieval_timeout"):
+    with pytest.raises(ValueError, match="Unknown fallback_kind") as exc_info:
         asyncio.run(
             driver.run_with_forced_fallback(
                 _make_event(), fallback_kind="retrieval_timeout"
             )
         )
+    msg = str(exc_info.value)
+    assert "retrieval_timeout" in msg
+    assert "llm_5xx" in msg
+    assert "retrieval_error" in msg
+    assert "corpus_mismatch" in msg
