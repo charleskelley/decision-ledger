@@ -2,6 +2,12 @@
   <img src="docs/assets/decision-ledger-hero/decision-ledger-hero-universal.png" alt="DecisionLedger Hero" width="850">
 </p>
 
+<p align="center">
+  <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/ci.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/integration.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/integration.yaml/badge.svg" alt="Integration"></a>
+  <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/eval.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/eval.yaml/badge.svg" alt="Eval"></a>
+</p>
+
 AI outputs are probabilistic. The accountability required when those outputs
 affect customers is not. Every production decision needs grounded reasoning,
 a policy basis, a citable rationale, and a reproducible audit trail. And every
@@ -122,21 +128,30 @@ The eval harness runs in CI on every commit.
 
 ```bash
 uv sync                        # Install dependencies
+cp .env.example .env           # Then paste your OPENAI_API_KEY and ANTHROPIC_API_KEY
 docker compose up -d           # Start infra (Redis, PostgreSQL+pgvector, Elasticsearch)
 make build-policy-index        # Build and embed the policy corpus
- 
+make install-hooks             # Install pre-commit hooks (gitleaks + ruff)
+
 # Run a scenario
 uv run python -m scenarios run --scenario post_breach_ato --count 50
- 
+
 # Replay a decision
 uv run python -m decision_ledger.audit replay --id <decision_id>
- 
-# Run the full eval gate
+
+# Run the 8-scenario smoke test
+make test-smoke
+
+# Run the full eval gate (uses ANTHROPIC_API_KEY for cross-family judges)
 make eval
 ```
 
 All infrastructure runs locally via `docker compose up`; no cloud account is
-required. 
+required. Two API keys are needed: `OPENAI_API_KEY` for the policy gate and
+`ANTHROPIC_API_KEY` for the eval harness's faithfulness/citation judges.
+See [`docs/operations/secrets.md`](docs/operations/secrets.md) for full
+secrets-handling guidance across local, CI, and production deployment.
+
 
 ---
 
