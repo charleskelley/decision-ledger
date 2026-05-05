@@ -45,9 +45,14 @@ else:
 ctx = state.get("context_window") or {}
 size = ctx.get("context_window_size")
 pct = ctx.get("used_percentage")
-used_tokens = (ctx.get("current_usage") or {}).get("input_tokens")
 
-if size and used_tokens is not None and pct is not None:
+# Derive tokens-used from the percentage rather than current_usage.input_tokens.
+# input_tokens reports only the non-cached portion of the current turn, so it
+# undercounts massively once prompt caching kicks in. The percentage that
+# Claude Code surfaces already accounts for cached segments — multiplying it
+# back against context_window_size gives the absolute count the user expects.
+if size and pct is not None:
+    used_tokens = round(size * pct / 100)
     used_k = (used_tokens + 500) // 1000
     total_k = (size + 500) // 1000
     ctx_part = f"ctx: {used_k}k/{total_k}k ({round(pct)}%)"
