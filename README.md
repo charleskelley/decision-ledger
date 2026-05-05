@@ -30,6 +30,19 @@ regressed.
 
 ***AI reasons. Policy enforces. Everything is replayable.***
 
+### Current MVP Status
+
+| # | Launch criterion                                                                       | Status |
+|---|----------------------------------------------------------------------------------------|--------|
+| 1 | `make check` — lint, sqlfluff, typecheck, and unit tests all pass                      | ✅     |
+| 2 | `make test-smoke` — all 8 ATO scenarios pass end-to-end                                | ✅     |
+| 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ⏳     |
+| 4 | All three GitHub Actions workflows (CI, Integration, Eval) green on `main`             | ⏳     |
+| 5 | Versioned baseline eval report (`outputs/eval/eval-report-v1.json`) committed + linked | ⏳     |
+
+When every row reads ✅, the MVP ships. Tracked in
+[`zoo/mvp-completion-plan.md`](zoo/mvp-completion-plan.md).
+
 ### The Production Problem
 
 Governed AI decision systems introduce operational failure modes that classical
@@ -119,7 +132,8 @@ just model artifacts:
 | **Adversarial Robustness**  | Injection attempts, schema violations, novel patterns |
 
 No release candidate passes unless all five dimensions clear defined thresholds.
-The eval harness runs in CI on every commit.
+Quality and integration gates run on every push to `main`; the 5D eval harness
+runs nightly and on demand via GitHub Actions.
  
 
 ---
