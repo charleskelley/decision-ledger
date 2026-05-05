@@ -1,0 +1,91 @@
+# Consistency scenario — baseline normal user.
+#
+# 5 normal logins from the same account, same device, same residential ASN,
+# all in San Francisco. Whatever the gate decides on the trigger event
+# (5th), it should decide identically regardless of the order in which the
+# 4 precursor events arrived. Same evidence → same decision.
+#
+# Expected stable action: ALLOW.
+
+scenarios:
+  - scenario_id: cs-baseline-normal
+    description: >
+      Five normal logins from a single user, single device, single
+      residential ASN. The decision on the trigger must be order-invariant.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &cs_baseline_e1
+            event_id: evt-cs-baseline-e1
+            timestamp: 2026-04-16T09:00:00Z
+            account_id: acct-cs-baseline-001
+            session_id: sess_cs_baseline_e1
+            ip_address: 198.51.100.10
+            geolocation: &cs_baseline_geo_sf
+              latitude: 37.7749
+              longitude: -122.4194
+              country: US
+              city: San Francisco
+              asn: AS7922
+            device_fingerprint: &cs_baseline_device "csb01a01:csb01b02:csb01c03:csb01d04:csb01e05"
+            user_agent: &cs_baseline_ua "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+            auth_method: PASSWORD
+            outcome: SUCCESS
+          - &cs_baseline_e2
+            event_id: evt-cs-baseline-e2
+            timestamp: 2026-04-16T10:30:00Z
+            account_id: acct-cs-baseline-001
+            session_id: sess_cs_baseline_e2
+            ip_address: 198.51.100.10
+            geolocation: *cs_baseline_geo_sf
+            device_fingerprint: *cs_baseline_device
+            user_agent: *cs_baseline_ua
+            auth_method: PASSWORD
+            outcome: SUCCESS
+          - &cs_baseline_e3
+            event_id: evt-cs-baseline-e3
+            timestamp: 2026-04-16T13:15:00Z
+            account_id: acct-cs-baseline-001
+            session_id: sess_cs_baseline_e3
+            ip_address: 198.51.100.10
+            geolocation: *cs_baseline_geo_sf
+            device_fingerprint: *cs_baseline_device
+            user_agent: *cs_baseline_ua
+            auth_method: PASSWORD
+            outcome: SUCCESS
+          - &cs_baseline_e4
+            event_id: evt-cs-baseline-e4
+            timestamp: 2026-04-16T16:00:00Z
+            account_id: acct-cs-baseline-001
+            session_id: sess_cs_baseline_e4
+            ip_address: 198.51.100.10
+            geolocation: *cs_baseline_geo_sf
+            device_fingerprint: *cs_baseline_device
+            user_agent: *cs_baseline_ua
+            auth_method: PASSWORD
+            outcome: SUCCESS
+          - &cs_baseline_trigger
+            event_id: evt-cs-baseline-trigger
+            timestamp: 2026-04-16T18:30:00Z
+            account_id: acct-cs-baseline-001
+            session_id: sess_cs_baseline_trigger
+            ip_address: 198.51.100.10
+            geolocation: *cs_baseline_geo_sf
+            device_fingerprint: *cs_baseline_device
+            user_agent: *cs_baseline_ua
+            auth_method: PASSWORD
+            outcome: SUCCESS
+      - ordering_id: reversed-precursors
+        events:
+          - *cs_baseline_e4
+          - *cs_baseline_e3
+          - *cs_baseline_e2
+          - *cs_baseline_e1
+          - *cs_baseline_trigger
+      - ordering_id: shuffled
+        events:
+          - *cs_baseline_e2
+          - *cs_baseline_e4
+          - *cs_baseline_e1
+          - *cs_baseline_e3
+          - *cs_baseline_trigger

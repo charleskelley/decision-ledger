@@ -1,0 +1,91 @@
+# Consistency scenario — stable MFA user.
+#
+# 5 MFA-PUSH logins from the same account, single device, single ASN.
+# MFA evidence is the strongest signal of legitimate-user presence;
+# decision on the trigger should be order-invariant.
+#
+# Expected stable action: ALLOW.
+
+scenarios:
+  - scenario_id: cs-stable-mfa
+    description: >
+      Five MFA-PUSH logins from a single user, single device. The MFA
+      evidence dominates the decision — order of precursor events should
+      not change the trigger's outcome.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &cs_mfa_e1
+            event_id: evt-cs-mfa-e1
+            timestamp: 2026-04-17T08:00:00Z
+            account_id: acct-cs-mfa-001
+            session_id: sess_cs_mfa_e1
+            ip_address: 203.0.113.20
+            geolocation: &cs_mfa_geo_ny
+              latitude: 40.7128
+              longitude: -74.0060
+              country: US
+              city: New York
+              asn: AS7018
+            device_fingerprint: &cs_mfa_device "mfa01a01:mfa01b02:mfa01c03:mfa01d04:mfa01e05"
+            user_agent: &cs_mfa_ua "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)"
+            auth_method: MFA_PUSH
+            outcome: SUCCESS
+          - &cs_mfa_e2
+            event_id: evt-cs-mfa-e2
+            timestamp: 2026-04-17T09:45:00Z
+            account_id: acct-cs-mfa-001
+            session_id: sess_cs_mfa_e2
+            ip_address: 203.0.113.20
+            geolocation: *cs_mfa_geo_ny
+            device_fingerprint: *cs_mfa_device
+            user_agent: *cs_mfa_ua
+            auth_method: MFA_PUSH
+            outcome: SUCCESS
+          - &cs_mfa_e3
+            event_id: evt-cs-mfa-e3
+            timestamp: 2026-04-17T11:20:00Z
+            account_id: acct-cs-mfa-001
+            session_id: sess_cs_mfa_e3
+            ip_address: 203.0.113.20
+            geolocation: *cs_mfa_geo_ny
+            device_fingerprint: *cs_mfa_device
+            user_agent: *cs_mfa_ua
+            auth_method: MFA_PUSH
+            outcome: SUCCESS
+          - &cs_mfa_e4
+            event_id: evt-cs-mfa-e4
+            timestamp: 2026-04-17T14:05:00Z
+            account_id: acct-cs-mfa-001
+            session_id: sess_cs_mfa_e4
+            ip_address: 203.0.113.20
+            geolocation: *cs_mfa_geo_ny
+            device_fingerprint: *cs_mfa_device
+            user_agent: *cs_mfa_ua
+            auth_method: MFA_PUSH
+            outcome: SUCCESS
+          - &cs_mfa_trigger
+            event_id: evt-cs-mfa-trigger
+            timestamp: 2026-04-17T17:00:00Z
+            account_id: acct-cs-mfa-001
+            session_id: sess_cs_mfa_trigger
+            ip_address: 203.0.113.20
+            geolocation: *cs_mfa_geo_ny
+            device_fingerprint: *cs_mfa_device
+            user_agent: *cs_mfa_ua
+            auth_method: MFA_PUSH
+            outcome: SUCCESS
+      - ordering_id: reversed-precursors
+        events:
+          - *cs_mfa_e4
+          - *cs_mfa_e3
+          - *cs_mfa_e2
+          - *cs_mfa_e1
+          - *cs_mfa_trigger
+      - ordering_id: shuffled
+        events:
+          - *cs_mfa_e3
+          - *cs_mfa_e1
+          - *cs_mfa_e4
+          - *cs_mfa_e2
+          - *cs_mfa_trigger

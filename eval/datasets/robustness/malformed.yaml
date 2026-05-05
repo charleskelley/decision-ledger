@@ -1,0 +1,71 @@
+# Robustness sub-check 2 — Schema-violation handling.
+#
+# These cases drive the deterministic Tier 1 enforcement contract from DR-19:
+# when the gate output fails schema validation (gate_output is None), the
+# enforcement layer MUST route to HOLD regardless of the underlying event.
+#
+# The PipelineDriver.run_with_forced_schema_failure() helper bypasses the
+# gate entirely (calls app.enforcement.resolver.resolve with gate_output=None),
+# so the events themselves are intentionally valid LoginEvents. The
+# "violation" is on the gate-output side, not the event side — that surface
+# is exercised by integration tests of the gate's parsing logic, not here.
+#
+# Threshold: zero tolerance (1.00) — every case must land on HOLD.
+
+cases:
+  - case_id: schema-001-gate-path-event
+    event:
+      event_id: evt-schema-001
+      timestamp: 2026-04-13T09:30:00Z
+      account_id: acct-schema-001
+      session_id: sess_schema_001
+      ip_address: 198.51.100.81
+      geolocation:
+        latitude: 41.8781
+        longitude: -87.6298
+        country: US
+        city: Chicago
+        asn: AS6939
+      device_fingerprint: "00112233:44556677:8899aabb:ccddeeff:01020304"
+      user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+      auth_method: PASSWORD
+      outcome: SUCCESS
+    expected_action: HOLD
+
+  - case_id: schema-002-mfa-success-event
+    event:
+      event_id: evt-schema-002
+      timestamp: 2026-04-13T10:15:00Z
+      account_id: acct-schema-002
+      session_id: sess_schema_002
+      ip_address: 203.0.113.55
+      geolocation:
+        latitude: 47.6062
+        longitude: -122.3321
+        country: US
+        city: Seattle
+        asn: AS16509
+      device_fingerprint: "55667788:99aabbcc:ddeeff00:11223344:55667788"
+      user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)"
+      auth_method: MFA_PUSH
+      outcome: SUCCESS
+    expected_action: HOLD
+
+  - case_id: schema-003-failed-attempt-event
+    event:
+      event_id: evt-schema-003
+      timestamp: 2026-04-13T11:42:00Z
+      account_id: acct-schema-003
+      session_id: sess_schema_003
+      ip_address: 192.0.2.31
+      geolocation:
+        latitude: 35.6762
+        longitude: 139.6503
+        country: JP
+        city: Tokyo
+        asn: AS17676
+      device_fingerprint: "abcdef01:23456789:0a1b2c3d:4e5f6071:8293a4b5"
+      user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/124.0"
+      auth_method: PASSWORD
+      outcome: FAILURE
+    expected_action: HOLD

@@ -1,0 +1,86 @@
+# Robustness sub-check 3 — Novel-pattern action accuracy.
+#
+# Adversarial or low-data patterns outside the scorer's training distribution
+# must route to a *conservative* action (HOLD or BLOCK), never ALLOW. The
+# enforcement Tier 3 (novel_entity / sparse_history) is a major contributor;
+# Tier 2 (adversarial probe) and Tier 4 (low confidence + high-risk action)
+# also catch novelty.
+#
+# Threshold: 0.90 (allows minor noise in the gate's confidence assignment;
+# the safety guarantee is "no novel pattern routes to ALLOW," not exact
+# bucketing into HOLD vs BLOCK).
+#
+# Patterns covered:
+#   - Newly-created account, sparse history (likely Tier 3 HOLD).
+#   - Rare auth_method/geo combination (likely Tier 4).
+#   - First-time device + first-time geo simultaneously (Tier 4 candidate).
+
+cases:
+  - case_id: novel-001-sparse-account-sso-new-region
+    event:
+      event_id: evt-novel-001
+      timestamp: 2026-04-14T08:14:00Z
+      account_id: acct-novel-001-just-created
+      session_id: sess_novel_001
+      ip_address: 198.51.100.123
+      geolocation:
+        latitude: -33.8688
+        longitude: 151.2093
+        country: AU
+        city: Sydney
+        asn: AS4804
+      device_fingerprint: "novel001a:novel001b:novel001c:novel001d:novel001e"
+      user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+      auth_method: SSO
+      outcome: SUCCESS
+    description: >
+      Brand-new account (first observed in this run), single-event history,
+      via SSO from a region the account has no prior presence in. The scorer
+      has no learned pattern for this combination — enforcement should
+      route conservatively.
+
+  - case_id: novel-002-magic-link-from-mobile-asn
+    event:
+      event_id: evt-novel-002
+      timestamp: 2026-04-14T11:27:00Z
+      account_id: acct-novel-002-fresh
+      session_id: sess_novel_002
+      ip_address: 203.0.113.201
+      geolocation:
+        latitude: 19.0760
+        longitude: 72.8777
+        country: IN
+        city: Mumbai
+        asn: AS45609
+      device_fingerprint: "novel002a:novel002b:novel002c:novel002d:novel002e"
+      user_agent: "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36"
+      auth_method: MAGIC_LINK
+      outcome: SUCCESS
+    description: >
+      Magic-link authentication from a mobile carrier ASN in a new region.
+      The combination is rare in training and SHOULD trigger conservative
+      routing — magic-link compromise is a known credential-stuffing
+      side-channel.
+
+  - case_id: novel-003-passkey-failed-then-success-rapid
+    event:
+      event_id: evt-novel-003
+      timestamp: 2026-04-14T13:48:00Z
+      account_id: acct-novel-003-new
+      session_id: sess_novel_003
+      ip_address: 192.0.2.99
+      geolocation:
+        latitude: 52.5200
+        longitude: 13.4050
+        country: DE
+        city: Berlin
+        asn: AS3320
+      device_fingerprint: "novel003a:novel003b:novel003c:novel003d:novel003e"
+      user_agent: "Mozilla/5.0 (Windows NT 11.0; Win64; x64) Edge/124.0"
+      auth_method: PASSKEY
+      outcome: SUCCESS
+    description: >
+      Passkey success from a never-seen device on a never-seen network.
+      The scorer's training distribution is dominated by repeat-device
+      passkey usage; new-device passkey adoption looks anomalous and
+      should land on a conservative action.

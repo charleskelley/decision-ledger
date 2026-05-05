@@ -1,0 +1,91 @@
+# Consistency scenario — stable passkey user.
+#
+# 5 passkey logins from the same account, same device. Passkey is a
+# phishing-resistant credential; decision on the trigger should be
+# order-invariant given the strength of the auth signal.
+#
+# Expected stable action: ALLOW.
+
+scenarios:
+  - scenario_id: cs-stable-passkey
+    description: >
+      Five passkey logins from a single user, single device. Passkey
+      evidence is the strongest legitimate-user signal — order of
+      precursor events should not affect the trigger's decision.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &cs_pk_e1
+            event_id: evt-cs-pk-e1
+            timestamp: 2026-04-18T07:30:00Z
+            account_id: acct-cs-pk-001
+            session_id: sess_cs_pk_e1
+            ip_address: 192.0.2.50
+            geolocation: &cs_pk_geo_sea
+              latitude: 47.6062
+              longitude: -122.3321
+              country: US
+              city: Seattle
+              asn: AS16509
+            device_fingerprint: &cs_pk_device "pk0001a:pk0001b:pk0001c:pk0001d:pk0001e"
+            user_agent: &cs_pk_ua "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0"
+            auth_method: PASSKEY
+            outcome: SUCCESS
+          - &cs_pk_e2
+            event_id: evt-cs-pk-e2
+            timestamp: 2026-04-18T09:15:00Z
+            account_id: acct-cs-pk-001
+            session_id: sess_cs_pk_e2
+            ip_address: 192.0.2.50
+            geolocation: *cs_pk_geo_sea
+            device_fingerprint: *cs_pk_device
+            user_agent: *cs_pk_ua
+            auth_method: PASSKEY
+            outcome: SUCCESS
+          - &cs_pk_e3
+            event_id: evt-cs-pk-e3
+            timestamp: 2026-04-18T11:50:00Z
+            account_id: acct-cs-pk-001
+            session_id: sess_cs_pk_e3
+            ip_address: 192.0.2.50
+            geolocation: *cs_pk_geo_sea
+            device_fingerprint: *cs_pk_device
+            user_agent: *cs_pk_ua
+            auth_method: PASSKEY
+            outcome: SUCCESS
+          - &cs_pk_e4
+            event_id: evt-cs-pk-e4
+            timestamp: 2026-04-18T14:25:00Z
+            account_id: acct-cs-pk-001
+            session_id: sess_cs_pk_e4
+            ip_address: 192.0.2.50
+            geolocation: *cs_pk_geo_sea
+            device_fingerprint: *cs_pk_device
+            user_agent: *cs_pk_ua
+            auth_method: PASSKEY
+            outcome: SUCCESS
+          - &cs_pk_trigger
+            event_id: evt-cs-pk-trigger
+            timestamp: 2026-04-18T17:10:00Z
+            account_id: acct-cs-pk-001
+            session_id: sess_cs_pk_trigger
+            ip_address: 192.0.2.50
+            geolocation: *cs_pk_geo_sea
+            device_fingerprint: *cs_pk_device
+            user_agent: *cs_pk_ua
+            auth_method: PASSKEY
+            outcome: SUCCESS
+      - ordering_id: reversed-precursors
+        events:
+          - *cs_pk_e4
+          - *cs_pk_e3
+          - *cs_pk_e2
+          - *cs_pk_e1
+          - *cs_pk_trigger
+      - ordering_id: shuffled
+        events:
+          - *cs_pk_e2
+          - *cs_pk_e3
+          - *cs_pk_e1
+          - *cs_pk_e4
+          - *cs_pk_trigger

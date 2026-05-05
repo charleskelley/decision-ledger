@@ -1,0 +1,222 @@
+# Faithfulness golden outputs.
+#
+# SEED FIXTURES — these are hand-crafted seeds derived from the citations
+# dataset, intended to unblock Step 5 with a runnable dimension. Replace
+# them via `zoo/scripts/capture_baselines.py` once the Docker stack is up
+# so the fixtures reflect actual gate output. Do not over-invest in
+# editing these by hand; the live-capture script writes higher-fidelity
+# replacements.
+#
+# Schema (from eval/dimensions/faithfulness.py:66–101):
+#   case_id          — stable identifier
+#   rationale        — gate's natural-language justification
+#   contexts         — full retrieved snippet text list (the haystack)
+#   cited_snippets   — subset of contexts the rationale actually grounds in
+#
+# Faithfulness threshold: rationale must stay grounded in the contexts
+# (no hallucinated policy citations). The dimension's RAGAS scorer plus
+# Anthropic-backed judge produce the score.
+
+cases:
+  - case_id: f01-stepup-aal2
+    rationale: >
+      The session originates from a previously unobserved device, which
+      under NIST SP 800-63B Rev-3 §5.1.7 requires re-binding the
+      authenticator through a step-up process at AAL2 or higher prior to
+      granting access. The decision is to CHALLENGE with MFA before
+      issuing a session.
+    contexts:
+      - >
+        When a verifier observes a session originating from a device or
+        context not previously associated with the subscriber, the
+        verifier SHALL re-bind the authenticator through a step-up process
+        at AAL2 or higher prior to granting access.
+      - >
+        Authenticator Assurance Level 2 (AAL2) requires the use of two
+        different authentication factors. Approved cryptographic
+        techniques are required at AAL2 and above.
+    cited_snippets:
+      - >
+        When a verifier observes a session originating from a device or
+        context not previously associated with the subscriber, the
+        verifier SHALL re-bind the authenticator through a step-up process
+        at AAL2 or higher prior to granting access.
+
+  - case_id: f02-impossible-travel-block
+    rationale: >
+      The current event's geolocation is incompatible with the prior
+      session location given the elapsed time, producing an apparent
+      velocity well above the 1000 km/h threshold. Policy
+      INT-GEO-RISK-V1 §2.3 mandates an immediate session block in this
+      condition.
+    contexts:
+      - >
+        Authentication attempts whose source geolocation is incompatible
+        with the subject's prior session location given the elapsed time
+        (commonly >1000 km/h apparent velocity) must be treated as
+        impossible-travel events. The pipeline SHALL block the session.
+      - >
+        Geographic risk signals are computed from the IP address using
+        the geolocation provider's lookup, and reflect the subject's
+        prior known cities of activity.
+    cited_snippets:
+      - >
+        Authentication attempts whose source geolocation is incompatible
+        with the subject's prior session location given the elapsed time
+        (commonly >1000 km/h apparent velocity) must be treated as
+        impossible-travel events. The pipeline SHALL block the session.
+
+  - case_id: f03-velocity-rate-limit
+    rationale: >
+      The rolling 60-minute authentication count for this account exceeds
+      the configured per-account threshold. Per INT-VELOCITY-V1 §4.1, the
+      system applies progressive rate-limiting and routes subsequent
+      attempts through CHALLENGE or HOLD pending review.
+    contexts:
+      - >
+        When the rolling 60-minute authentication count for an account
+        exceeds the configured threshold, the system applies progressive
+        rate-limiting controls and routes subsequent attempts through
+        CHALLENGE or HOLD pending review.
+      - >
+        Credential-stuffing-burst patterns are typified by sub-second
+        repeat attempts across multiple accounts from the same source
+        ASN; treat these as ASN-scoped controls in addition to per-account
+        velocity.
+    cited_snippets:
+      - >
+        When the rolling 60-minute authentication count for an account
+        exceeds the configured threshold, the system applies progressive
+        rate-limiting controls and routes subsequent attempts through
+        CHALLENGE or HOLD pending review.
+
+  - case_id: f04-novel-entity-hold
+    rationale: >
+      The account was created within the last 7 days and has fewer than
+      five prior successful authentications. Under INT-NOVEL-ENTITY-V1
+      §3.2, suspicious authentication patterns from such accounts route
+      to HOLD with an analyst review packet rather than to ALLOW or
+      BLOCK.
+    contexts:
+      - >
+        Accounts created within the prior 7 days, or with fewer than 5
+        prior successful authentications, are subject to enhanced
+        scrutiny. Suspicious authentication patterns from these accounts
+        route to HOLD with an analyst review packet rather than to ALLOW
+        or BLOCK.
+      - >
+        The HOLD action queues the decision for analyst review. Resolution
+        attempts are tracked via the resolution journal and surfaced
+        through the review UI.
+    cited_snippets:
+      - >
+        Accounts created within the prior 7 days, or with fewer than 5
+        prior successful authentications, are subject to enhanced
+        scrutiny. Suspicious authentication patterns from these accounts
+        route to HOLD with an analyst review packet rather than to ALLOW
+        or BLOCK.
+
+  - case_id: f05-passkey-allow
+    rationale: >
+      The session is authenticated via a FIDO2/WebAuthn passkey bound to
+      a known device on file. Per FIDO2-WEBAUTHN-CRED, passkey assertions
+      satisfy AAL2 phishing-resistant requirements without an additional
+      step-up factor; the decision is to ALLOW.
+    contexts:
+      - >
+        FIDO2/WebAuthn passkey credentials are phishing-resistant
+        authenticators bound to a hardware authenticator or device
+        biometric. A successful passkey assertion satisfies AAL2 without
+        an additional second-factor challenge.
+      - >
+        Passkey-bound devices are recorded in the subscriber's known
+        device list at credential registration time and may be used for
+        future authentication without re-enrollment.
+    cited_snippets:
+      - >
+        FIDO2/WebAuthn passkey credentials are phishing-resistant
+        authenticators bound to a hardware authenticator or device
+        biometric. A successful passkey assertion satisfies AAL2 without
+        an additional second-factor challenge.
+
+  - case_id: f06-jurisdiction-conflict-hold
+    rationale: >
+      The retrieved evidence spans both EU GDPR Article 32 obligations
+      and US FFIEC layered-security guidance, with conflicting
+      requirements on data minimization vs. extended logging. The
+      decision is to HOLD for jurisdiction conflict review.
+    contexts:
+      - >
+        GDPR Article 32 requires data minimization in security
+        processing; logs and authentication telemetry must be limited to
+        what is strictly necessary for the security purpose, and retained
+        only for the period required.
+      - >
+        FFIEC guidance recommends layered security controls and
+        risk-based authentication. Banking institutions must retain
+        authentication and access logs for examiner review for the
+        period specified by their primary regulator.
+      - >
+        When two policies governing the same authentication event impose
+        conflicting requirements, the gate emits a jurisdiction-conflict
+        signal and routes to HOLD pending compliance review.
+    cited_snippets:
+      - >
+        GDPR Article 32 requires data minimization in security
+        processing; logs and authentication telemetry must be limited to
+        what is strictly necessary for the security purpose, and retained
+        only for the period required.
+      - >
+        FFIEC guidance recommends layered security controls and
+        risk-based authentication. Banking institutions must retain
+        authentication and access logs for examiner review for the
+        period specified by their primary regulator.
+
+  - case_id: f07-hva-mandatory-passkey
+    rationale: >
+      The account is classified as high-value (HVA), which under
+      INT-HVA-POLICY-V2 mandates passkey-only authentication. The
+      current attempt uses a password credential, so the decision is to
+      CHALLENGE for passkey enrollment before granting access.
+    contexts:
+      - >
+        High-value accounts (HVA) are subject to elevated authentication
+        requirements. Password-only authentication is not permitted; HVA
+        sessions require passkey assertion or hardware-token MFA.
+      - >
+        HVA classification is set by account-tier policy and refreshed
+        nightly; downgrades require a 7-day cooling period before the
+        elevated requirements relax.
+    cited_snippets:
+      - >
+        High-value accounts (HVA) are subject to elevated authentication
+        requirements. Password-only authentication is not permitted; HVA
+        sessions require passkey assertion or hardware-token MFA.
+
+  - case_id: f08-credential-stuffing-block
+    rationale: >
+      Multiple sub-second authentication attempts have been observed
+      across accounts originating from the same ASN, matching the
+      credential-stuffing-burst pattern from INT-CRED-STUFF-V2. The
+      pipeline blocks the session and applies an ASN-scoped temporary
+      control.
+    contexts:
+      - >
+        Credential-stuffing-burst patterns are typified by sub-second
+        repeat attempts across multiple accounts from the same source
+        ASN; treat these as ASN-scoped controls in addition to per-account
+        velocity.
+      - >
+        ASN-scoped controls apply a temporary 15-minute block on
+        authentication attempts originating from the source ASN; the
+        block is logged and reviewed by the security operations team.
+    cited_snippets:
+      - >
+        Credential-stuffing-burst patterns are typified by sub-second
+        repeat attempts across multiple accounts from the same source
+        ASN; treat these as ASN-scoped controls in addition to per-account
+        velocity.
+      - >
+        ASN-scoped controls apply a temporary 15-minute block on
+        authentication attempts originating from the source ASN; the
+        block is logged and reviewed by the security operations team.

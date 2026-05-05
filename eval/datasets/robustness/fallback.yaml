@@ -1,0 +1,100 @@
+# Robustness sub-check 4 — Fallback behavior correctness.
+#
+# When an upstream dependency fails (LLM 5xx, retrieval-layer outage,
+# corpus-version mismatch), the pipeline must degrade safely. The contract:
+# every failure path lands on the conservative HOLD action. Failing open
+# (returning ALLOW on dependency error) is the worst-case posture.
+#
+# Threshold: zero tolerance (1.00).
+#
+# fallback_kind values supported by PipelineDriver.run_with_forced_fallback:
+#   - "llm_5xx"          — LLMClient.complete_structured raises; PolicyGate
+#                          catches internally and emits verdict=None;
+#                          enforcement Tier 1 routes to HOLD.
+#   - "retrieval_error"  — PolicyRetriever.retrieve raises; the driver
+#                          translates the raised error into HOLD per the
+#                          fallback contract (production code is expected
+#                          to grow an explicit catch over time).
+#   - "corpus_mismatch"  — pipeline runs with a stale corpus_version label;
+#                          documents the contract for future validation.
+
+cases:
+  - case_id: fallback-001-llm-5xx-on-gate-call
+    event:
+      event_id: evt-fallback-001
+      timestamp: 2026-04-15T09:05:00Z
+      account_id: acct-fallback-001
+      session_id: sess_fallback_001
+      ip_address: 198.51.100.13
+      geolocation:
+        latitude: 37.7749
+        longitude: -122.4194
+        country: US
+        city: San Francisco
+        asn: AS7922
+      device_fingerprint: "fb001a01:fb001b02:fb001c03:fb001d04:fb001e05"
+      user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+      auth_method: PASSWORD
+      outcome: SUCCESS
+    fallback_kind: llm_5xx
+    expected_action: HOLD
+
+  - case_id: fallback-002-retrieval-error-es-down
+    event:
+      event_id: evt-fallback-002
+      timestamp: 2026-04-15T10:18:00Z
+      account_id: acct-fallback-002
+      session_id: sess_fallback_002
+      ip_address: 203.0.113.77
+      geolocation:
+        latitude: 40.7128
+        longitude: -74.0060
+        country: US
+        city: New York
+        asn: AS7018
+      device_fingerprint: "fb002a01:fb002b02:fb002c03:fb002d04:fb002e05"
+      user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/124.0"
+      auth_method: MFA_TOTP
+      outcome: SUCCESS
+    fallback_kind: retrieval_error
+    expected_action: HOLD
+
+  - case_id: fallback-003-corpus-version-mismatch
+    event:
+      event_id: evt-fallback-003
+      timestamp: 2026-04-15T11:42:00Z
+      account_id: acct-fallback-003
+      session_id: sess_fallback_003
+      ip_address: 192.0.2.45
+      geolocation:
+        latitude: 51.5074
+        longitude: -0.1278
+        country: GB
+        city: London
+        asn: AS2856
+      device_fingerprint: "fb003a01:fb003b02:fb003c03:fb003d04:fb003e05"
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0"
+      auth_method: PASSWORD
+      outcome: SUCCESS
+    fallback_kind: corpus_mismatch
+    expected_action: HOLD
+
+  - case_id: fallback-004-llm-5xx-mfa-event
+    event:
+      event_id: evt-fallback-004
+      timestamp: 2026-04-15T12:55:00Z
+      account_id: acct-fallback-004
+      session_id: sess_fallback_004
+      ip_address: 198.51.100.222
+      geolocation:
+        latitude: 35.6762
+        longitude: 139.6503
+        country: JP
+        city: Tokyo
+        asn: AS17676
+      device_fingerprint: "fb004a01:fb004b02:fb004c03:fb004d04:fb004e05"
+      user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)"
+      auth_method: MFA_PUSH
+      outcome: TIMEOUT
+    fallback_kind: llm_5xx
+    expected_action: HOLD
