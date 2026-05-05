@@ -24,6 +24,7 @@ import psycopg
 import redis
 import structlog
 from elasticsearch import Elasticsearch
+from pgvector.psycopg import register_vector
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
@@ -97,6 +98,9 @@ class PipelineDriver:
             decode_responses=False,
         )
         self._pg_conn = psycopg.connect(settings.postgres_dsn)
+        # Teach psycopg how to adapt numpy ndarrays to pgvector parameters; the
+        # retriever's dense-search query passes the embedding via %s.
+        register_vector(self._pg_conn)
         self._es = Elasticsearch(settings.elasticsearch_url)
 
         embed_model = SentenceTransformer("all-MiniLM-L6-v2")

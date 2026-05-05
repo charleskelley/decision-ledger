@@ -73,7 +73,7 @@ def test_dense_retrieval_returns_relevant_nist_chunks(retriever):
 
     assert len(snippets) > 0, "Dense search returned no results — is corpus loaded?"
 
-    all_ids = [s.policy_id for s in snippets]
+    all_ids = [s.document_id for s in snippets]
     assert any("NIST" in pid for pid in all_ids), (
         f"Expected a NIST policy in top-5 dense results, got: {all_ids}"
     )
@@ -94,7 +94,7 @@ def test_dense_search_applies_jurisdiction_filter(retriever):
     )
     for s in snippets:
         assert s.jurisdiction == "EU_GDPR", (
-            f"Expected EU_GDPR jurisdiction, got {s.jurisdiction} from {s.policy_id}"
+            f"Expected EU_GDPR jurisdiction, got {s.jurisdiction} from {s.document_id}"
         )
 
 
