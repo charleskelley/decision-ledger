@@ -61,9 +61,34 @@ def journal(pg_conn) -> ResolutionJournal:
 
 
 @pytest.fixture
-def fresh_decision_id() -> str:
-    """Unique decision_id per test to avoid cross-test interference."""
-    return str(uuid.uuid4())
+def fresh_decision_id(pg_conn) -> str:
+    """Unique decision_id per test to avoid cross-test interference.
+
+    Inserts a stub ``decision_bundles`` parent row so the FK constraint on
+    ``decision_resolution_attempts.decision_id`` is satisfied. Without this
+    parent row, ``record_attempt`` raises ``ForeignKeyViolation`` against
+    the canonical schema in ``infra/postgres/02_tables.sql``.
+    """
+    decision_id = str(uuid.uuid4())
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO decision_bundles
+                (decision_id, entity_id, account_id, created_at,
+                 decision_action, bundle)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                decision_id,
+                str(uuid.uuid4()),
+                f"acct-fixture-{decision_id[:8]}",
+                datetime.now(UTC),
+                "HOLD",
+                "{}",
+            ),
+        )
+    pg_conn.commit()
+    return decision_id
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import redis
 import structlog
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Request
+from pgvector.psycopg import register_vector
 from pydantic import BaseModel
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -96,6 +97,9 @@ async def lifespan(application: FastAPI):
         decode_responses=False,
     )
     pg_conn = psycopg.connect(settings.postgres_dsn)
+    # Teach psycopg how to adapt numpy ndarrays to pgvector parameters; the
+    # retriever's dense-search query passes the embedding via %s.
+    register_vector(pg_conn)
     es_client = Elasticsearch(settings.elasticsearch_url)
 
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
