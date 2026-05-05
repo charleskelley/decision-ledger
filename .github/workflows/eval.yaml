@@ -1,0 +1,129 @@
+name: Eval
+
+# Full 5-dimension eval harness against the live stack. Manual trigger or
+# nightly cron — not on every push. Cost-bounded by definition.
+#
+# Uses an `eval` GitHub Actions environment so secrets and budget can be
+# scoped separately from CI/integration. Configure required reviewers on
+# the environment if you want manual triggers to require approval.
+# See docs/operations/secrets.md for full operator guidance.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 07:00 UTC daily
+    - cron: "0 7 * * *"
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    name: 5-dimension eval harness
+    runs-on: ubuntu-latest
+    environment: eval
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: account_takeover
+          POSTGRES_PASSWORD: account_takeover
+          POSTGRES_DB: account_takeover
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U account_takeover -d account_takeover"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+        env:
+          discovery.type: single-node
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+          xpack.security.enabled: "false"
+          xpack.security.http.ssl.enabled: "false"
+          cluster.routing.allocation.disk.threshold_enabled: "false"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: account_takeover
+      POSTGRES_PASSWORD: account_takeover
+      POSTGRES_DB: account_takeover
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      ELASTICSEARCH_URL: http://localhost:9200
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Initialize Postgres schema
+        env:
+          PGPASSWORD: account_takeover
+        run: |
+          psql -h localhost -U account_takeover -d account_takeover \
+            -f infra/postgres/01_init.sql
+          psql -h localhost -U account_takeover -d account_takeover \
+            -f infra/postgres/02_tables.sql
+
+      - name: Train scorer if artifact missing
+        run: |
+          if [ ! -f app/scorer/models/ato-v1.ubj ]; then
+            uv run python -m app.scorer train \
+              --output app/scorer/models/ato-v1.ubj \
+              --samples 2000
+          fi
+
+      - name: Build policy index
+        run: make build-policy-index
+
+      - name: Run eval harness
+        run: make eval
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-${{ github.run_id }}
+          path: outputs/stage/eval/eval-report.json
+          if-no-files-found: warn
+          retention-days: 30

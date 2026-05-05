@@ -1,0 +1,79 @@
+name: CI
+
+# Static analysis + unit tests + DR-23 boundary check on every push and PR.
+# No Docker, no LLM provider secrets — runs successfully on forks.
+# Target: under 60 seconds.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality (lint, typecheck, unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: SQLFluff lint (postgres dialect)
+        run: uv run sqlfluff lint --dialect postgres infra/
+
+      - name: Pyright typecheck
+        run: uv run pyright
+
+      - name: Unit tests (no integration, eval, slow, or smoke)
+        run: >
+          uv run pytest tests/
+          -m "not integration and not evaluation and not slow and not smoke"
+          --maxfail=5
+
+  boundary:
+    name: Boundary (DR-23 SDK-import integrity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      # DR-23: only app/llm/openai.py and app/llm/anthropic.py may import
+      # an LLM SDK. Any other file with `from openai` / `import anthropic`
+      # is an architectural regression — fail the build immediately.
+      - name: Check no SDK imports outside app/llm/
+        run: |
+          set -euo pipefail
+          leaks=$(grep -rE "^(from|import) (openai|anthropic)" \
+            --include="*.py" \
+            app/ core/ eval/ reasoner/ tests/ \
+            | grep -v "^app/llm/" || true)
+          if [ -n "$leaks" ]; then
+            echo "ERROR: DR-23 boundary violation — LLM SDK imported outside app/llm/:"
+            echo "$leaks"
+            exit 1
+          fi
+          echo "OK: no SDK imports outside app/llm/"

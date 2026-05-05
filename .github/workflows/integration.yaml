@@ -1,0 +1,120 @@
+name: Integration
+
+# Integration + smoke tests against live Redis + Postgres+pgvector +
+# Elasticsearch. Runs only on PRs to main (not every push) to keep
+# OpenAI/Anthropic spend bounded.
+# Target: under 5 minutes.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Integration + smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: account_takeover
+          POSTGRES_PASSWORD: account_takeover
+          POSTGRES_DB: account_takeover
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U account_takeover -d account_takeover"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+        env:
+          discovery.type: single-node
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+          xpack.security.enabled: "false"
+          xpack.security.http.ssl.enabled: "false"
+          cluster.routing.allocation.disk.threshold_enabled: "false"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: account_takeover
+      POSTGRES_PASSWORD: account_takeover
+      POSTGRES_DB: account_takeover
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      ELASTICSEARCH_URL: http://localhost:9200
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Service containers don't support volume mounts for init scripts the
+      # way docker-compose does, so apply Postgres init SQL explicitly.
+      - name: Initialize Postgres schema (pgvector + tables)
+        env:
+          PGPASSWORD: account_takeover
+        run: |
+          psql -h localhost -U account_takeover -d account_takeover \
+            -f infra/postgres/01_init.sql
+          psql -h localhost -U account_takeover -d account_takeover \
+            -f infra/postgres/02_tables.sql
+
+      - name: Train scorer if artifact missing
+        run: |
+          if [ ! -f app/scorer/models/ato-v1.ubj ]; then
+            echo "Scorer artifact not in repo — training a small model for CI."
+            uv run python -m app.scorer train \
+              --output app/scorer/models/ato-v1.ubj \
+              --samples 2000
+          fi
+
+      - name: Build policy index (pgvector + Elasticsearch)
+        run: make build-policy-index
+
+      - name: Integration tests
+        run: make test-integration
+
+      - name: 8-scenario smoke test
+        run: make test-smoke
