@@ -1,13 +1,14 @@
 """Tests for ``_build_default_dimensions()`` — the harness wiring layer.
 
 Coverage scope:
-- ``OPENAI_API_KEY`` fail-fast (no infrastructure required).
+- ``OPENAI_API_KEY`` and ``ANTHROPIC_API_KEY`` fail-fast (no
+  infrastructure required).
 - All datasets missing → 5 ``SkippedDimension`` entries (heavy clients
   monkey-patched).
 
-Live-stack dimension construction (real PolicyRetriever, OpenAI calls,
-RAGAS init) is exercised by the Step 5 scenario smoke test against a
-running Docker stack.
+Live-stack dimension construction (real PolicyRetriever, OpenAI/Anthropic
+calls, RAGAS init) is exercised by the Step 6 scenario smoke test against
+a running Docker stack.
 """
 
 from __future__ import annotations
@@ -33,8 +34,19 @@ if TYPE_CHECKING:
 
 def test_raises_when_openai_api_key_missing():
     """Empty OPENAI_API_KEY raises ValueError before any client construction."""
-    settings = Settings(openai_api_key="")
+    settings = Settings(openai_api_key="", anthropic_api_key="sk-ant-test")
     with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
+        harness._build_default_dimensions(settings=settings)
+
+
+def test_raises_when_anthropic_api_key_missing():
+    """Empty ANTHROPIC_API_KEY raises ValueError before any client construction.
+
+    The faithfulness/citation judges run on Anthropic to reduce in-family
+    bias against the OpenAI-backed gate; both keys are required.
+    """
+    settings = Settings(openai_api_key="sk-test", anthropic_api_key="")
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is required"):
         harness._build_default_dimensions(settings=settings)
 
 
@@ -45,15 +57,15 @@ def test_raises_when_openai_api_key_missing():
 
 @pytest.fixture
 def patch_heavy_clients(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub PipelineDriver, OpenAILLMClient, RagasFaithfulnessAdapter.
+    """Stub PipelineDriver, AnthropicLLMClient, RagasFaithfulnessAdapter.
 
     Lets ``_build_default_dimensions`` run end-to-end without opening any
-    Redis/PG/ES connections, instantiating an OpenAI client, or
-    initializing RAGAS. (OpenAILLMClient default-constructs AsyncOpenAI
+    Redis/PG/ES connections, instantiating an Anthropic client, or
+    initializing RAGAS. (AnthropicLLMClient default-constructs AsyncAnthropic
     internally — mocking the client class itself is sufficient.)
     """
     monkeypatch.setattr(harness, "PipelineDriver", MagicMock())
-    monkeypatch.setattr(harness, "OpenAILLMClient", MagicMock())
+    monkeypatch.setattr(harness, "AnthropicLLMClient", MagicMock())
     monkeypatch.setattr(harness, "RagasFaithfulnessAdapter", MagicMock())
 
 
@@ -62,7 +74,7 @@ def test_all_datasets_missing_returns_five_skipped_dimensions(
     tmp_path: Path,
 ) -> None:
     """Empty dataset_root → all 5 dimensions become SkippedDimension."""
-    settings = Settings(openai_api_key="sk-test")
+    settings = Settings(openai_api_key="sk-test", anthropic_api_key="sk-ant-test")
 
     dimensions = harness._build_default_dimensions(
         settings=settings,
@@ -78,7 +90,7 @@ def test_all_datasets_missing_covers_each_canonical_kind(
     tmp_path: Path,
 ) -> None:
     """The 5 SkippedDimensions cover each EvalDimension exactly once."""
-    settings = Settings(openai_api_key="sk-test")
+    settings = Settings(openai_api_key="sk-test", anthropic_api_key="sk-ant-test")
 
     dimensions = harness._build_default_dimensions(
         settings=settings,
@@ -100,7 +112,7 @@ def test_skipped_dimensions_carry_dataset_path_in_reason(
     tmp_path: Path,
 ) -> None:
     """Each skipped dimension's reason names the missing dataset path."""
-    settings = Settings(openai_api_key="sk-test")
+    settings = Settings(openai_api_key="sk-test", anthropic_api_key="sk-ant-test")
 
     dimensions = harness._build_default_dimensions(
         settings=settings,

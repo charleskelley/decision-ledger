@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from app.llm.openai import OpenAILLMClient
+from app.llm.anthropic import AnthropicLLMClient
 from app.settings import Settings
 from core.eval.metrics import (
     CitationMetrics,
@@ -190,7 +190,10 @@ def _build_default_dimensions(
         missing).
 
     Raises:
-        ValueError: ``OPENAI_API_KEY`` is not set in ``settings``.
+        ValueError: ``OPENAI_API_KEY`` or ``ANTHROPIC_API_KEY`` is not set
+            in ``settings``. The gate runs on OpenAI and the
+            faithfulness/citation judges run on Anthropic — both keys are
+            required to assemble the dimension set.
     """
     settings = settings if settings is not None else Settings()
     if not settings.openai_api_key:
@@ -199,14 +202,22 @@ def _build_default_dimensions(
             "Set OPENAI_API_KEY in the environment or in .env."
         )
         raise ValueError(msg)
+    if not settings.anthropic_api_key:
+        msg = (
+            "ANTHROPIC_API_KEY is required to construct the eval harness. "
+            "Faithfulness and citation judges run on Anthropic to reduce "
+            "in-family bias against the OpenAI-backed gate. Set "
+            "ANTHROPIC_API_KEY in the environment or in .env."
+        )
+        raise ValueError(msg)
 
     dataset_root = dataset_root if dataset_root is not None else _DEFAULT_DATASET_ROOT
 
-    # Heavy clients — opened once, shared across dimensions. Both gate
-    # (inside the driver) and judge use OpenAILLMClient by default; swap
-    # the judge to a different provider here to reduce in-family bias.
+    # Heavy clients — opened once, shared across dimensions. The gate (inside
+    # the driver) uses OpenAI; faithfulness/citation judges use Anthropic.
+    # Cross-family pairing reduces in-family judging bias.
     driver = PipelineDriver(settings=settings)
-    judge_client = OpenAILLMClient()
+    judge_client = AnthropicLLMClient()
     ragas_scorer = RagasFaithfulnessAdapter()
 
     dimensions: list[Dimension] = []
