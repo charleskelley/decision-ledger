@@ -279,4 +279,8 @@ def _payload_to_attempt(row: tuple[object, ...]) -> ResolutionAttempt:
         raise TypeError(
             f"Unexpected payload type in resolution_attempts row: {type(payload)!r}"
         )
-    return _ATTEMPT_ADAPTER.validate_python(data)
+    # ``ResolutionAttempt`` declares ``strict=True`` for write-time
+    # construction; on read we coerce JSON-shaped values (datetime ISO
+    # strings, StrEnum value-strings) back into typed instances, matching
+    # the pattern in ``app/audit/store.py:_deserialize_bundle``.
+    return _ATTEMPT_ADAPTER.validate_python(data, strict=False)
