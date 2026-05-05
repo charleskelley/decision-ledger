@@ -141,6 +141,11 @@ class ResolutionJournal:
                 ``SlaDefaultResolutionAttempt``).
         """
         payload_json = attempt.model_dump(mode="json")
+        # Concrete subclasses narrow ``resolver_kind`` to a Pydantic
+        # ``Literal[...]`` (DR-21) — the runtime value is then a plain ``str``
+        # rather than the ``ResolverKind`` enum. ``str(...)`` accepts both
+        # the StrEnum (yielding its value) and the literal string verbatim,
+        # so use it consistently here and in the log fields below.
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -157,11 +162,11 @@ class ResolutionJournal:
                     attempt.sequence,
                     attempt.started_at,
                     attempt.completed_at,
-                    attempt.resolver_kind.value,
+                    str(attempt.resolver_kind),
                     attempt.resolver_id,
-                    attempt.status.value,
+                    str(attempt.status),
                     (
-                        attempt.resolution_action.value
+                        str(attempt.resolution_action)
                         if attempt.resolution_action is not None
                         else None
                     ),
@@ -176,8 +181,8 @@ class ResolutionJournal:
             decision_id=attempt.decision_id,
             attempt_id=attempt.attempt_id,
             sequence=attempt.sequence,
-            resolver_kind=attempt.resolver_kind.value,
-            status=attempt.status.value,
+            resolver_kind=str(attempt.resolver_kind),
+            status=str(attempt.status),
         )
 
     def load_attempts(self, decision_id: str) -> list[ResolutionAttempt]:

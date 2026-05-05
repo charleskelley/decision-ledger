@@ -4,30 +4,18 @@ BundleStore writes complete DecisionBundles to PostgreSQL and replays them
 by re-executing the deterministic enforcement layer against cached intermediate
 states. The LLM is never re-invoked during replay.
 
-Schema (created automatically on first write)::
-
-    decision_bundles(
-        decision_id    TEXT PRIMARY KEY,
-        created_at     TIMESTAMPTZ NOT NULL,
-        idempotency_key TEXT NOT NULL,
-        bundle_json    JSONB NOT NULL
-    )
-
-    replay_logs(
-        replay_id      TEXT PRIMARY KEY,  -- UUID
-        decision_id    TEXT NOT NULL REFERENCES decision_bundles,
-        replayed_at    TIMESTAMPTZ NOT NULL,
-        original_action TEXT NOT NULL,
-        replayed_action TEXT NOT NULL,
-        actions_match  BOOLEAN NOT NULL,
-        override_log   JSONB NOT NULL
-    )
+Schema is defined canonically in ``infra/postgres/02_tables.sql`` under the
+``account_takeover`` schema. ``ensure_schema`` here mirrors that DDL so the
+store can initialize a fresh dev database without depending on the init
+scripts having run. Surfaced scalar columns (``entity_id``, ``account_id``,
+``decision_action``) support indexed lookups; the full bundle is stored as
+JSONB in ``bundle``. The ``replay_logs.diff`` column is populated only when
+``is_matched = false``.
 """
 
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -52,22 +40,22 @@ log = structlog.get_logger(__name__)
 
 _CREATE_BUNDLES_TABLE = """
 CREATE TABLE IF NOT EXISTS decision_bundles (
-    decision_id     TEXT PRIMARY KEY,
+    decision_id     UUID PRIMARY KEY,
+    entity_id       UUID NOT NULL,
+    account_id      TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    bundle_json     JSONB NOT NULL
+    decision_action TEXT NOT NULL,
+    bundle          JSONB NOT NULL
 );
 """
 
 _CREATE_REPLAY_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS replay_logs (
-    replay_id       TEXT PRIMARY KEY,
-    decision_id     TEXT NOT NULL REFERENCES decision_bundles(decision_id),
-    replayed_at     TIMESTAMPTZ NOT NULL,
-    original_action TEXT NOT NULL,
-    replayed_action TEXT NOT NULL,
-    actions_match   BOOLEAN NOT NULL,
-    override_log    JSONB NOT NULL
+    replay_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    decision_id UUID NOT NULL REFERENCES decision_bundles(decision_id),
+    replayed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_matched  BOOLEAN NOT NULL,
+    diff        JSONB
 );
 """
 
@@ -159,7 +147,7 @@ def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
     ``"ALLOW"`` → ``DecisionAction.ALLOW``).
 
     Args:
-        bundle_json: JSON string from the ``bundle_json`` column.
+        bundle_json: JSON string from the ``bundle`` JSONB column.
 
     Returns:
         Reconstituted ``DecisionBundle``.
@@ -255,18 +243,27 @@ class BundleStore:
             bundle: Fully assembled bundle to persist.
         """
         bundle_json = _serialize_bundle(bundle)
+        raw_event = bundle.raw_event
+        # entity_id is on the framework Observation protocol; account_id is
+        # a domain attribute on the underlying event class. Fall back to
+        # entity_id-as-string for domains that don't surface account_id.
+        entity_id = raw_event.entity_id
+        account_id = getattr(raw_event, "account_id", str(entity_id))
         with self._conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO decision_bundles
-                    (decision_id, created_at, idempotency_key, bundle_json)
-                VALUES (%s, %s, %s, %s::jsonb)
+                    (decision_id, entity_id, account_id, created_at,
+                     decision_action, bundle)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT (decision_id) DO NOTHING
                 """,
                 (
                     bundle.decision_id,
+                    str(entity_id),
+                    account_id,
                     bundle.created_at,
-                    bundle.idempotency_key,
+                    bundle.decision_action.value,
                     bundle_json,
                 ),
             )
@@ -292,7 +289,7 @@ class BundleStore:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT bundle_json FROM decision_bundles WHERE decision_id = %s",
+                "SELECT bundle FROM decision_bundles WHERE decision_id = %s",
                 (decision_id,),
             )
             row = cur.fetchone()
@@ -352,23 +349,33 @@ class BundleStore:
                 action=replayed_action,
             )
 
-        replay_id = str(uuid.uuid4())
+        # Per canonical schema: diff is populated only when is_matched=false
+        # and carries the action discrepancy plus the override log for
+        # investigation. is_matched=true rows leave diff null.
+        diff_payload = (
+            None
+            if actions_match
+            else json.dumps(
+                {
+                    "original_action": original_action,
+                    "replayed_action": replayed_action,
+                    "override_log": list(replay_decision.override_log),
+                },
+                default=str,
+            )
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO replay_logs
-                    (replay_id, decision_id, replayed_at, original_action,
-                     replayed_action, actions_match, override_log)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (decision_id, replayed_at, is_matched, diff)
+                VALUES (%s, %s, %s, %s::jsonb)
                 """,
                 (
-                    replay_id,
                     decision_id,
                     datetime.now(UTC),
-                    original_action,
-                    replayed_action,
                     actions_match,
-                    json.dumps(replay_decision.override_log),
+                    diff_payload,
                 ),
             )
         self._conn.commit()
