@@ -1,12 +1,16 @@
 name: Integration
 
 # Integration + smoke tests against live Redis + Postgres+pgvector +
-# Elasticsearch. Runs only on PRs to main (not every push) to keep
-# OpenAI/Anthropic spend bounded.
+# Elasticsearch. Trunk-based development: also runs on direct push to
+# main so solo trunk pushes are validated even without a PR cycle.
+# OpenAI/Anthropic spend stays bounded because the smoke suite hits the
+# fast-path scorer; only gate-routed events make LLM calls.
 # Target: under 5 minutes.
 
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 concurrency:

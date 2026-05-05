@@ -34,3 +34,17 @@ repos:
     rev: v8.21.2
     hooks:
       - id: gitleaks
+
+  # Pre-push gate: run the local verify suite before every push.
+  # Lenient by design — when the Docker compose stack is up, runs the
+  # full ``check + test-integration + test-smoke``; otherwise falls back
+  # to ``check`` only and prints a hint. CI re-validates either way, so
+  # external contributors without Docker are not blocked.
+  - repo: local
+    hooks:
+      - id: verify-push
+        name: Local verify gate
+        entry: make verify-push
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
