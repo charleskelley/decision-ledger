@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from app.llm.anthropic import AnthropicLLMClient
-from app.settings import Settings
+from app.settings import FrameworkSettings
 from core.eval.metrics import (
     CitationMetrics,
     ConsistencyMetrics,
@@ -163,7 +163,7 @@ _DEFAULT_DATASET_ROOT = Path("eval/datasets")
 
 def _build_default_dimensions(
     *,
-    settings: Settings | None = None,
+    settings: FrameworkSettings | None = None,
     dataset_root: Path | None = None,
 ) -> list[Dimension]:
     """Construct the MVP dimension set against live infrastructure.
@@ -176,9 +176,9 @@ def _build_default_dimensions(
     threshold violation instead of disappearing silently.
 
     Args:
-        settings: Optional ``Settings`` override. Defaults to a fresh
-            ``Settings()`` reading from the environment. Tests pass a
-            stub Settings to drive the API-key fail-fast path.
+        settings: Optional ``FrameworkSettings`` override. Defaults to a
+            fresh ``FrameworkSettings()`` reading from the environment.
+            Tests pass a stub Settings to drive the API-key fail-fast path.
         dataset_root: Optional override for the dataset directory.
             Defaults to ``eval/datasets/`` relative to the working
             directory.
@@ -195,7 +195,7 @@ def _build_default_dimensions(
             faithfulness/citation judges run on Anthropic — both keys are
             required to assemble the dimension set.
     """
-    settings = settings if settings is not None else Settings()
+    settings = settings if settings is not None else FrameworkSettings()
     if not settings.openai_api_key:
         msg = (
             "OPENAI_API_KEY is required to construct the eval harness. "
@@ -216,7 +216,7 @@ def _build_default_dimensions(
     # Heavy clients — opened once, shared across dimensions. The gate (inside
     # the driver) uses OpenAI; faithfulness/citation judges use Anthropic.
     # Cross-family pairing reduces in-family judging bias.
-    driver = PipelineDriver(settings=settings)
+    driver = PipelineDriver(framework_settings=settings)
     judge_client = AnthropicLLMClient()
     ragas_scorer = RagasFaithfulnessAdapter()
 

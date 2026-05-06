@@ -42,7 +42,7 @@ check: lint format-check typecheck test
 
 # ─── Training ───────────────────────────────────────────────────────────────
 train *args:
-    uv run python -m app.scorer train {{args}}
+    uv run python -m reasoner.account_takeover.scorer train {{args}}
 
 # ─── Infrastructure ──────────────────────────────────────────────────────────
 up:

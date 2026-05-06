@@ -1,9 +1,13 @@
 # Docker Compose V2 — no version key (deprecated; omit entirely for Compose V2)
 #
-# Brings up the full local development stack for the ATO Reasoner:
-#   Redis 7      — event queue (Streams) + sliding window feature store
-#   PostgreSQL 16 + pgvector — vector store (dense retrieval) + audit store
-#   Elasticsearch 8 — BM25 sparse retrieval
+# Brings up the full local development stack for DecisionLedger:
+#   Redis 7      — shared event queue (Streams) + sliding window feature store
+#                  Reasoners share the instance and namespace by key prefix
+#                  (e.g., `ato:*`).
+#   PostgreSQL 16 + pgvector — shared vector store (dense retrieval) + audit
+#                  store. All reasoners share the database; tenant separation
+#                  is row-level via `reasoner_id`.
+#   Elasticsearch 8 — shared BM25 sparse retrieval for the policy corpus.
 #
 # M1 Max (ARM64) compatible: all images publish linux/arm64 manifests.
 #
@@ -36,9 +40,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-account_takeover}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-account_takeover}
-      POSTGRES_DB: ${POSTGRES_DB:-account_takeover}
+      POSTGRES_USER: ${POSTGRES_USER:-decisionledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-decisionledger}
+      POSTGRES_DB: ${POSTGRES_DB:-decisionledger}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -49,7 +53,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-account_takeover} -d ${POSTGRES_DB:-account_takeover}",
+          "pg_isready -U ${POSTGRES_USER:-decisionledger} -d ${POSTGRES_DB:-decisionledger}",
         ]
       interval: 5s
       timeout: 3s

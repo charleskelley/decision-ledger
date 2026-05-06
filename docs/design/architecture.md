@@ -76,9 +76,9 @@ Twelve components across the pipeline, organized by phase:
 | C1 | Scenario Generator | `generator/` | Foundation |
 | C2 | Policy Corpus | `corpus/`, `app/retrieval/` | Foundation |
 | C2b | Reasoner Assembler | `reasoner/account_takeover/assembler.py` | Foundation |
-| C3 | Idempotent Ingestion | `app/ingestion/` | Foundation |
-| C4 | Online Feature Computation | `app/features/` | Core |
-| C5 | Fast ML Scorer | `app/scorer/` | Core |
+| C3 | Idempotent Ingestion | `reasoner/account_takeover/ingestion/` | Foundation |
+| C4 | Online Feature Computation | `reasoner/account_takeover/feature_service.py` | Core |
+| C5 | Fast ML Scorer | `reasoner/account_takeover/scorer/` | Core |
 | C6 | Policy RAG Retriever | `app/retrieval/` | Foundation → Core |
 | C7 | LLM Policy Gate | `app/policy_gate/` | Core |
 | C8 | Deterministic Enforcement | `app/enforcement/` | Core |

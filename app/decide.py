@@ -1,20 +1,25 @@
-"""Pipeline orchestration — single source of truth for the decision flow.
+"""Framework decision orchestrator — domain-agnostic half of the pipeline.
 
-``execute_pipeline()`` runs the full ATO decision sequence against a single
-``LoginEvent``: feature compute → scoring → observation assembly →
-(conditional) retrieval + policy gate → deterministic enforcement →
-bundle assembly → persistence. Returns the persisted ``DecisionBundle``.
+``execute_decision()`` runs the framework's portion of the pipeline against a
+fully-assembled ``Observation``: optional retrieval + policy gate (when the
+domain routed ``ROUTE_TO_GATE``), deterministic enforcement, bundle
+assembly, and persistence. Returns the persisted ``DecisionBundle``.
+
+The reasoner pipeline (``reasoner/<domain>/pipeline.py``) is responsible for
+everything *before* this function: feature computation, scoring, assembly,
+and rendering a retrieval query string. Once it has those, it calls
+``execute_decision()`` with the assembled observation and the rendered query.
 
 Used by:
-- ``app/main.py:create_decision()`` — the FastAPI route handler.
+- ``reasoner/account_takeover/pipeline.py:run_ato_decision`` — the ATO
+  domain orchestrator that wraps this function.
 - ``eval/clients/pipeline.py:PipelineDriver`` — the eval harness's
   in-process driver for consistency / robustness dimensions.
 
 Async (DR-23). The single ``await`` point is the policy-gate call;
-all other services (features, scorer, retriever, store) are sync and
-run inline. The pipeline itself does not log structured per-step
-events — callers log what makes sense for their context (HTTP request,
-eval run, etc.).
+all other services (retriever, store) are sync and run inline. The function
+itself does not log structured per-step events — callers log what makes
+sense for their context (HTTP request, eval run, etc.).
 """
 
 from __future__ import annotations
@@ -27,84 +32,86 @@ from app.audit import build_bundle
 from app.enforcement.resolver import resolve
 from app.monitoring import duration_ms
 from core.routes import GateRoute
-from reasoner.account_takeover.assembler import build_observation
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from app.audit import BundleStore
-    from app.features import FeatureService
     from app.gate.policy import PolicyGate
     from app.retrieval.retriever import PolicyRetriever
-    from app.scorer import AtoScorer
     from core.bundle import DecisionBundle
-    from reasoner.account_takeover.events import LoginEvent
+    from core.observation import Observation
 
 
-async def execute_pipeline(
+async def execute_decision(
     *,
-    event: LoginEvent,
-    feature_svc: FeatureService,
-    scorer: AtoScorer,
+    observation: Observation,
+    query: str,
     retriever: PolicyRetriever,
     gate: PolicyGate,
     store: BundleStore,
     corpus_version: str,
+    ingestion_timestamp: datetime,
+    upstream_latency: dict[str, float] | None = None,
     decision_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> DecisionBundle:
-    """Run the full decision pipeline for a single ``LoginEvent``.
+    """Run the framework half of the decision pipeline against an Observation.
+
+    The reasoner is expected to have already run feature computation,
+    scoring, and ``build_observation`` (or its equivalent) before calling
+    this function. The framework consumes the assembled ``Observation``
+    and the reasoner-rendered retrieval ``query`` string and produces a
+    persisted ``DecisionBundle``.
 
     Args:
-        event: Validated login event to evaluate.
-        feature_svc: Sliding-window feature computer (Redis-backed).
-        scorer: ATO XGBoost fast scorer.
+        observation: Fully-assembled Observation from the domain reasoner.
+            Must satisfy the ``core.observation.Observation`` protocol —
+            ``reasoner_context`` and ``gate_context`` populated.
+        query: Pre-rendered retrieval query string (built by the reasoner).
+            Empty string is acceptable when the route is fast-path.
         retriever: Hybrid policy retriever (pgvector + ES + reranker).
-        gate: LLM policy gate (invoked only when scorer routes to gate).
+        gate: LLM policy gate (invoked only when the route is to-gate).
         store: Bundle persistence store (Postgres-backed).
         corpus_version: Policy corpus version stamp for the bundle.
+        ingestion_timestamp: Wall-clock time at which the upstream raw event
+            entered the pipeline. Recorded in the bundle.
+        upstream_latency: Optional latency breakdown for steps the reasoner
+            ran before this call (e.g., ``{"features_ms": 1.2,
+            "scorer_ms": 3.1}``). Merged into the bundle's
+            ``latency_breakdown``.
         decision_id: Optional explicit UUID; auto-generated when omitted.
-        idempotency_key: Optional explicit key; defaults to ``event.event_id``.
+        idempotency_key: Optional explicit key; defaults to
+            ``observation.event_id``.
 
     Returns:
         The fully-assembled ``DecisionBundle`` after persistence.
 
     Side effects:
-        - Updates Redis sliding-window features for the event's entity.
         - Reads from pgvector + Elasticsearch when routed to the gate.
-        - Calls the OpenAI API when routed to the gate.
+        - Calls the LLM API when routed to the gate.
         - Writes the bundle to Postgres.
     """
     decision_id = decision_id or str(uuid.uuid4())
-    idempotency_key = idempotency_key or event.event_id
-    ingestion_ts = event.timestamp
-    latency: dict[str, float] = {}
+    idempotency_key = idempotency_key or observation.event_id
+    latency: dict[str, float] = dict(upstream_latency or {})
 
-    # --- Features ---
-    t0 = time.perf_counter()
-    features = feature_svc.compute(event)
-    latency["features_ms"] = duration_ms(t0)
-
-    # --- Scorer ---
-    t0 = time.perf_counter()
-    scorer_output = scorer.score(features)
-    latency["scorer_ms"] = duration_ms(t0)
-
-    # Build retrieval query before assembly (needs pre-assembly domain types)
-    query = retriever.build_query(event, scorer_output)
-
-    # --- Assembly ---
-    obs = build_observation(event, features, scorer_output)
-
-    # --- Retrieval + Gate (conditional on route) ---
     snippets = []
     gate_result = None
     retrieval_path = "skipped"
 
-    if obs.route == GateRoute.ROUTE_TO_GATE:
-        config = obs.gate_context.gate_config or {}
+    if observation.route == GateRoute.ROUTE_TO_GATE:
+        config = observation.gate_context.gate_config or {}
+        reasoner_id = (
+            observation.reasoner_context.reasoner_id
+            if observation.reasoner_context is not None
+            else None
+        )
         t0 = time.perf_counter()
         snippets, retrieval_path = retriever.retrieve(
             query=query,
             k=5,
+            reasoner_id=reasoner_id,
             jurisdictions=config.get("jurisdictions"),
             risk_tier=config.get("risk_tier"),
         )
@@ -112,7 +119,7 @@ async def execute_pipeline(
 
         t0 = time.perf_counter()
         gate_result = await gate.evaluate(
-            obs,  # type: ignore[arg-type]
+            observation,
             snippets,
             decision_id=decision_id,
             corpus_version=corpus_version,
@@ -127,7 +134,7 @@ async def execute_pipeline(
     # --- Enforcement ---
     t0 = time.perf_counter()
     enforcement = resolve(
-        obs,  # type: ignore[arg-type]
+        observation,
         verdict,
         snippets=snippets,
         decision_id=decision_id,
@@ -142,9 +149,9 @@ async def execute_pipeline(
     # than capturing bundle write time.
     bundle = build_bundle(
         decision_id=decision_id,
-        obs=obs,  # type: ignore[arg-type]
+        obs=observation,
         idempotency_key=idempotency_key,
-        ingestion_timestamp=ingestion_ts,
+        ingestion_timestamp=ingestion_timestamp,
         retrieval_query=query if gate_result else "",
         retrieval_results=snippets,
         retrieval_path=retrieval_path,

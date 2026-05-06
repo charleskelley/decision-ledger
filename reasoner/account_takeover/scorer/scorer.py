@@ -36,10 +36,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import xgboost as xgb
 
-from app.scorer.model_card import ModelCard
 from core.observation import Contribution
 from core.routes import GateRoute
-from reasoner.account_takeover.scorer import ScorerOutput
+from reasoner.account_takeover.scorer.model_card import ModelCard
+from reasoner.account_takeover.scorer.output import ScorerOutput
 
 if TYPE_CHECKING:
     from pathlib import Path

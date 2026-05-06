@@ -18,13 +18,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import redis
 
-from app.ingestion.consumer import IngestionConsumer
 from reasoner.account_takeover.events import (
     AuthMethod,
     AuthOutcome,
     Geolocation,
     LoginEvent,
 )
+from reasoner.account_takeover.ingestion.consumer import IngestionConsumer
 
 pytestmark = pytest.mark.integration
 

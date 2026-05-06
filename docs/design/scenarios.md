@@ -56,7 +56,7 @@ statistics appear in the ACM TOPS 2022 publication.
 | Attacker taxonomy | Naive / VPN / Targeted / Very Targeted | §5, Fig 2 |
 
 These numbers informed the design of `generator/scenarios/*.yaml` and
-`app/scorer/trainer.py:_generate_sample`, but were not used in a
+`reasoner/account_takeover/scorer/trainer.py:_generate_sample`, but were not used in a
 data-fitting sense — no empirical distribution was extracted from the raw
 dataset and used to set parameters.
 

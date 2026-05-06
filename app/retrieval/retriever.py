@@ -11,6 +11,10 @@
    If no cross-encoder is provided, or reranking exceeds the configured
    timeout, the RRF-ordered results are returned unchanged as ``rrf_only``.
 
+Domain-agnostic by design: callers pass a pre-rendered query string plus
+optional jurisdiction / risk-tier filters. Reasoners own query construction
+(see ``reasoner/<domain>/retrieval_query.py`` for the ATO reference).
+
 Jurisdiction metadata filtering is applied in both the Postgres and ES queries.
 Risk-tier filtering is applied in Postgres; ES filters by jurisdiction only.
 
@@ -20,7 +24,6 @@ at startup because the ``policy_chunks`` table does not carry a ``title`` column
 Usage::
 
     retriever = PolicyRetriever(pg_conn, es_client, model)
-    query = retriever.build_query(event, scorer_output)
     snippets, path = retriever.retrieve(
         query, k=5, jurisdictions=["US_FEDERAL", "INTERNAL"]
     )
@@ -37,15 +40,11 @@ from psycopg.rows import dict_row
 
 from app.retrieval.corpus_loader import parse_document
 from core.snippet import RetrievedSnippet
-from reasoner.account_takeover.events import AuthOutcome
 
 if TYPE_CHECKING:
     import psycopg
     from elasticsearch import Elasticsearch
     from sentence_transformers import CrossEncoder, SentenceTransformer
-
-    from reasoner.account_takeover.events import LoginEvent
-    from reasoner.account_takeover.scorer import ScorerOutput
 
 log = structlog.get_logger(__name__)
 
@@ -55,33 +54,6 @@ _CORPUS_DIR = _PROJECT_ROOT / "corpus"
 
 # RRF constant (k=60 from the original Cormack et al. paper)
 _RRF_K = 60
-
-# ---------------------------------------------------------------------------
-# Signal → retrieval term mapping
-# ---------------------------------------------------------------------------
-
-_SIGNAL_TERMS: dict[str, str] = {
-    "impossible_travel": "impossible travel geographic anomaly mandatory block",
-    "travel_speed_kmh": "impossible travel speed geographic block",
-    "velocity_1min": "velocity rate limiting authentication burst",
-    "velocity_5min": "high velocity credential stuffing rate limit",
-    "velocity_60min": "sustained velocity authentication rate limiting",
-    "device_novelty": "new unrecognized device fingerprint challenge hold",
-    "device_consistency_score": "device fingerprint consistency mismatch anomaly",
-    "geo_novelty": "geographic anomaly new country location access",
-    "ip_novelty": "new IP address network risk authentication",
-    "sparse_history": "novel entity new account insufficient history hold",
-    "user_agent_consistency": "user agent consistency browser anomaly",
-}
-
-_AUTH_METHOD_TERMS: dict[str, str] = {
-    "PASSWORD": "password credential memorized secret authentication",
-    "MFA_TOTP": "MFA TOTP multi-factor authenticator app",
-    "MFA_PUSH": "MFA push notification multi-factor authentication",
-    "SSO": "SSO single sign-on federated identity enterprise authentication",
-    "PASSKEY": "FIDO2 passkey WebAuthn phishing-resistant authenticator",
-    "MAGIC_LINK": "magic link email one-time authentication",
-}
 
 # Dedup key type for RRF: (policy_id, version, section_path)
 _SnippetKey = tuple[str, str, str]
@@ -162,57 +134,27 @@ class PolicyRetriever:
     # Public API
     # ------------------------------------------------------------------
 
-    def build_query(
-        self,
-        event: LoginEvent,
-        scorer_output: ScorerOutput,
-    ) -> str:
-        """Construct a natural language retrieval query from event signals.
-
-        Maps the top SHAP signals to policy-relevant terminology and adds
-        authentication method context. Falls back to a generic authentication
-        risk query when no signal mapping is available.
-
-        Args:
-            event: Validated login event from the ingestion layer.
-            scorer_output: Scorer output carrying top SHAP signals.
-
-        Returns:
-            Natural language query string for dense and sparse retrieval.
-        """
-        terms: list[str] = []
-
-        for signal in scorer_output.top_signals[:3]:
-            term = _SIGNAL_TERMS.get(signal.feature_name)
-            if term:
-                terms.append(term)
-
-        auth_term = _AUTH_METHOD_TERMS.get(event.auth_method.value, "")
-        if auth_term:
-            terms.append(auth_term)
-
-        if event.outcome in (AuthOutcome.FAILURE, AuthOutcome.BLOCKED):
-            terms.append("authentication failure blocked credential")
-
-        return " ".join(terms) if terms else "authentication risk controls policy"
-
     def dense_search(
         self,
         query: str,
         k: int,
         *,
+        reasoner_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
     ) -> list[RetrievedSnippet]:
         """Pgvector cosine similarity search via HNSW index.
 
-        Applies jurisdiction and risk-tier metadata filters before the
-        nearest-neighbour search. ``risk_tier`` filter includes chunks where
-        ``risk_tier`` is NULL (applies to all tiers).
+        Applies reasoner, jurisdiction, and risk-tier metadata filters before
+        the nearest-neighbour search. ``risk_tier`` filter includes chunks
+        where ``risk_tier`` is NULL (applies to all tiers).
 
         Args:
             query: Natural language query string.
             k: Maximum number of results to return.
+            reasoner_id: If provided, restrict to chunks belonging to this
+                reasoner's corpus. Required at the framework boundary; the
+                MVP keeps it optional only to ease test fixtures.
             jurisdictions: If provided, restrict to these jurisdiction codes.
             risk_tier: If provided, include chunks for this tier or all tiers.
 
@@ -223,6 +165,10 @@ class PolicyRetriever:
 
         filter_parts: list[str] = []
         filter_params: list[Any] = []
+
+        if reasoner_id:
+            filter_parts.append("reasoner_id = %s")
+            filter_params.append(reasoner_id)
 
         if jurisdictions:
             filter_parts.append("jurisdiction = ANY(%s)")
@@ -237,7 +183,7 @@ class PolicyRetriever:
         sql = f"""
             SELECT policy_id, policy_version, jurisdiction, section_path,
                    chunk_text, (1 - (embedding <=> %s)) AS relevance_score
-            FROM account_takeover.policy_chunks
+            FROM decisionledger.policy_chunks
             {where}
             ORDER BY embedding <=> %s
             LIMIT %s
@@ -255,6 +201,7 @@ class PolicyRetriever:
         query: str,
         k: int,
         *,
+        reasoner_id: str | None = None,
         jurisdictions: list[str] | None = None,
     ) -> list[RetrievedSnippet]:
         """Elasticsearch BM25 search with dual-analyzer query.
@@ -266,6 +213,8 @@ class PolicyRetriever:
         Args:
             query: Natural language query string.
             k: Maximum number of results to return.
+            reasoner_id: If provided, restrict to documents belonging to this
+                reasoner's corpus.
             jurisdictions: If provided, restrict to these jurisdiction codes.
 
         Returns:
@@ -284,8 +233,13 @@ class PolicyRetriever:
             }
         }
 
+        es_filters: list[dict[str, Any]] = []
+        if reasoner_id:
+            es_filters.append({"term": {"reasoner_id": reasoner_id}})
         if jurisdictions:
-            es_query["bool"]["filter"] = [{"terms": {"jurisdiction": jurisdictions}}]
+            es_filters.append({"terms": {"jurisdiction": jurisdictions}})
+        if es_filters:
+            es_query["bool"]["filter"] = es_filters
 
         response = self._es.search(index=_ES_INDEX, query=es_query, size=k)
         hits = response["hits"]["hits"]
@@ -398,6 +352,7 @@ class PolicyRetriever:
         query: str,
         k: int = 5,
         *,
+        reasoner_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
     ) -> tuple[list[RetrievedSnippet], str]:
@@ -407,8 +362,11 @@ class PolicyRetriever:
         snippets and the retrieval path taken (``"reranked"`` or ``"rrf_only"``).
 
         Args:
-            query: Pre-built retrieval query string (from ``build_query``).
+            query: Pre-rendered retrieval query string (built by the caller —
+                reasoners own query construction).
             k: Number of snippets to return.
+            reasoner_id: Tenant filter — restricts results to chunks belonging
+                to the calling reasoner's corpus.
             jurisdictions: Jurisdiction filter forwarded to both stores.
             risk_tier: Risk-tier filter forwarded to the dense store.
 
@@ -419,9 +377,18 @@ class PolicyRetriever:
         candidate_k = k * 2
 
         dense = self.dense_search(
-            query, candidate_k, jurisdictions=jurisdictions, risk_tier=risk_tier
+            query,
+            candidate_k,
+            reasoner_id=reasoner_id,
+            jurisdictions=jurisdictions,
+            risk_tier=risk_tier,
         )
-        sparse = self.sparse_search(query, candidate_k, jurisdictions=jurisdictions)
+        sparse = self.sparse_search(
+            query,
+            candidate_k,
+            reasoner_id=reasoner_id,
+            jurisdictions=jurisdictions,
+        )
         fused = self.rrf_fuse(dense, sparse, candidate_k)
         snippets, retrieval_path = self.rerank(query, fused, k)
 

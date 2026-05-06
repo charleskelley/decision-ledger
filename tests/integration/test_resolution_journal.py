@@ -36,9 +36,7 @@ from core.resolution import (
 
 pytestmark = pytest.mark.integration
 
-_PG_DSN = (
-    "postgresql://account_takeover:account_takeover@localhost:5432/account_takeover"
-)
+_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
 
 
 # ---------------------------------------------------------------------------
@@ -73,15 +71,15 @@ def fresh_decision_id(pg_conn) -> str:
     with pg_conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO decision_bundles
-                (decision_id, entity_id, account_id, created_at,
+            INSERT INTO decisionledger.decision_bundles
+                (decision_id, reasoner_id, entity_id, created_at,
                  decision_action, bundle)
             VALUES (%s, %s, %s, %s, %s, %s::jsonb)
             """,
             (
                 decision_id,
+                "ato-reasoner",
                 str(uuid.uuid4()),
-                f"acct-fixture-{decision_id[:8]}",
                 datetime.now(UTC),
                 "HOLD",
                 "{}",

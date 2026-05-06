@@ -86,7 +86,7 @@ class GeoMobility(StrEnum):
 class AuthMethod(StrEnum):
     """Authentication method used in generated events.
 
-    A subset of the full AuthMethod enum in core.account_takeover.events —
+    A subset of the full AuthMethod enum in reasoner.account_takeover.events —
     covers the four methods exercised by the current scenario definitions.
 
     Attributes:

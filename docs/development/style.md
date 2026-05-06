@@ -247,7 +247,7 @@ Primary keys use `uuid` type and the `_id` suffix. Do not use `serial` or
 **Schema qualification**
 
 Fully qualify all table references in SQL files:
-`account_takeover.decision_bundles`, not `decision_bundles`.
+`decisionledger.decision_bundles`, not `decision_bundles`.
 
 ---
 

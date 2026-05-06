@@ -119,12 +119,12 @@ eval:
 # -----------------------------------------------------------------------------
 
 train:
-	uv run python -m app.scorer train \
-		--output app/scorer/models/ato-v1.ubj \
+	uv run python -m reasoner.account_takeover.scorer train \
+		--output reasoner/account_takeover/scorer/models/ato-v1.ubj \
 		--samples 5000
 
 eval-model:
-	uv run python -m app.scorer eval --model app/scorer/models/ato-v1.ubj
+	uv run python -m reasoner.account_takeover.scorer eval --model reasoner/account_takeover/scorer/models/ato-v1.ubj
 
 test-all:
 	uv run pytest tests/ eval/ -v
@@ -137,7 +137,7 @@ scenario:
 	uv run python -m generator run --scenario baseline_normal --count 10
 
 build-policy-index:
-	uv run python -m app.retrieval.corpus_loader
+	uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
 
 install-hooks:
 	uv run pre-commit install

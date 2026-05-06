@@ -59,7 +59,7 @@ Where `timestamp_bucket` rounds the timestamp to the nearest configurable window
 
 ## Feature Vector
 
-Computed by the online feature layer (`app/features/`) from the raw event and the user's
+Computed by the online feature layer (`reasoner/account_takeover/feature_service.py`) from the raw event and the user's
 sliding window state in Redis. This is an ATO Reasoner domain type — it lives in
 `reasoner/account_takeover/features.py`, not in `core/`.
 

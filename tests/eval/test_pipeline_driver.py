@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.settings import Settings
+from app.settings import FrameworkSettings
 from eval.clients.pipeline import PipelineDriver
 from reasoner.account_takeover.events import (
     AuthMethod,
@@ -26,6 +26,7 @@ from reasoner.account_takeover.events import (
     Geolocation,
     LoginEvent,
 )
+from reasoner.account_takeover.settings import AtoSettings
 
 
 def _make_event() -> LoginEvent:
@@ -56,20 +57,18 @@ def _make_event() -> LoginEvent:
 
 def test_constructor_raises_when_openai_api_key_missing():
     """An empty OPENAI_API_KEY surfaces as ValueError before any connection."""
-    settings = Settings(openai_api_key="")
+    fw = FrameworkSettings(openai_api_key="")
     with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
-        PipelineDriver(settings=settings)
+        PipelineDriver(framework_settings=fw)
 
 
 def test_constructor_raises_when_scorer_model_missing(tmp_path):
     """A missing scorer model file surfaces as FileNotFoundError."""
     bad_path = tmp_path / "definitely-not-here.ubj"
-    settings = Settings(
-        openai_api_key="sk-test",
-        scorer_model_path=str(bad_path),
-    )
+    fw = FrameworkSettings(openai_api_key="sk-test")
+    ato = AtoSettings(scorer_model_path=str(bad_path))
     with pytest.raises(FileNotFoundError, match="Scorer model not found"):
-        PipelineDriver(settings=settings)
+        PipelineDriver(framework_settings=fw, ato_settings=ato)
 
 
 # ---------------------------------------------------------------------------

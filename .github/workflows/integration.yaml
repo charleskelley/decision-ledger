@@ -107,10 +107,10 @@ jobs:
 
       - name: Train scorer if artifact missing
         run: |
-          if [ ! -f app/scorer/models/ato-v1.ubj ]; then
+          if [ ! -f reasoner/account_takeover/scorer/models/ato-v1.ubj ]; then
             echo "Scorer artifact not in repo — training a small model for CI."
-            uv run python -m app.scorer train \
-              --output app/scorer/models/ato-v1.ubj \
+            uv run python -m reasoner.account_takeover.scorer train \
+              --output reasoner/account_takeover/scorer/models/ato-v1.ubj \
               --samples 2000
           fi
 

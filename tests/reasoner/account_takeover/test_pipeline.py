@@ -1,7 +1,7 @@
-"""Tests for app/decide.py — pure pipeline orchestration.
+"""Tests for the ATO domain pipeline orchestrator.
 
 The route handler in app/main.py and the eval harness's PipelineDriver
-both delegate to ``execute_pipeline()``. These tests lock in the
+both delegate to ``run_ato_decision()``. These tests lock in the
 orchestration contract: which services are called, in which order,
 with which arguments. Downstream artifact construction (build_bundle,
 resolve, build_observation) is exercised by their own dedicated test
@@ -21,7 +21,6 @@ from uuid import uuid4
 
 import pytest
 
-from app.decide import execute_pipeline
 from core.routes import GateRoute
 from reasoner.account_takeover.events import (
     AuthMethod,
@@ -30,6 +29,7 @@ from reasoner.account_takeover.events import (
     LoginEvent,
 )
 from reasoner.account_takeover.features import AtoFeatureVector, WindowSpec
+from reasoner.account_takeover.pipeline import run_ato_decision
 from reasoner.account_takeover.scorer import ScorerOutput
 
 if TYPE_CHECKING:
@@ -116,7 +116,6 @@ def stub_services() -> dict[str, MagicMock]:
     scorer.score.return_value = _make_fast_path_scorer_output()
 
     retriever = MagicMock()
-    retriever.build_query.return_value = "test query"
 
     # gate.evaluate is async (DR-23) — use AsyncMock so awaits work
     gate = MagicMock()
@@ -139,8 +138,8 @@ async def _run(
     decision_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> Callable:
-    """Invoke execute_pipeline with the stub services and an event."""
-    return await execute_pipeline(
+    """Invoke run_ato_decision with the stub services and an event."""
+    return await run_ato_decision(
         event=event or _make_event(),
         feature_svc=stub_services["feature_svc"],
         scorer=stub_services["scorer"],

@@ -32,8 +32,8 @@ import structlog
 from pydantic import ValidationError
 from redis.exceptions import ResponseError
 
-from app.ingestion.dedup import IdempotencyStore
 from reasoner.account_takeover.events import LoginEvent
+from reasoner.account_takeover.ingestion.dedup import IdempotencyStore
 
 if TYPE_CHECKING:
     import redis as redis_lib

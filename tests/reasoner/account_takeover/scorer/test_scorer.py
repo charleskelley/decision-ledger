@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.scorer.scorer import (
+from core.routes import GateRoute
+from reasoner.account_takeover.features import AtoFeatureVector, WindowSpec
+from reasoner.account_takeover.scorer.scorer import (
     FEATURE_NAMES,
     _route,
     _to_feature_row,
 )
-from core.routes import GateRoute
-from reasoner.account_takeover.features import AtoFeatureVector, WindowSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +55,7 @@ def _make_fv(**overrides) -> AtoFeatureVector:
 
 @pytest.fixture(scope="module")
 def trained_model_path(tmp_path_factory):
-    from app.scorer.trainer import train
+    from reasoner.account_takeover.scorer.trainer import train
 
     path = tmp_path_factory.mktemp("scorer") / "model.ubj"
     train(n_samples=300, model_path=path)
@@ -64,7 +64,7 @@ def trained_model_path(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def scorer(trained_model_path):
-    from app.scorer.scorer import AtoScorer
+    from reasoner.account_takeover.scorer.scorer import AtoScorer
 
     return AtoScorer(trained_model_path)
 
@@ -200,7 +200,7 @@ def test_to_feature_row_impossible_travel_becomes_one():
 
 
 def test_heuristic_label_high_risk():
-    from app.scorer.trainer import _heuristic_label
+    from reasoner.account_takeover.scorer.trainer import _heuristic_label
 
     row = dict.fromkeys(FEATURE_NAMES, 0.0)
     row["impossible_travel"] = 1.0
@@ -213,7 +213,7 @@ def test_heuristic_label_high_risk():
 
 
 def test_heuristic_label_low_risk():
-    from app.scorer.trainer import _heuristic_label
+    from reasoner.account_takeover.scorer.trainer import _heuristic_label
 
     row = dict.fromkeys(FEATURE_NAMES, 0.0)
     row["device_consistency_score"] = 1.0

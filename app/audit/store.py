@@ -1,13 +1,19 @@
-"""DecisionBundle persistence and deterministic replay.
+"""DecisionBundle persistence and deterministic replay (framework-owned).
 
 BundleStore writes complete DecisionBundles to PostgreSQL and replays them
-by re-executing the deterministic enforcement layer against cached intermediate
-states. The LLM is never re-invoked during replay.
+by re-executing the deterministic enforcement layer against cached
+intermediate states. The LLM is never re-invoked during replay.
+
+DecisionLedger is the framework-owned audit ledger; reasoners are tenants
+distinguished by ``reasoner_id``. The store is reasoner-agnostic — it types
+on the ``Observation`` protocol and pulls ``reasoner_id`` from
+``observation.reasoner_context``. Reasoner-specific business keys (account_id,
+content_id, …) live inside the JSONB bundle, never as scalar columns.
 
 Schema is defined canonically in ``infra/postgres/02_tables.sql`` under the
-``account_takeover`` schema. ``ensure_schema`` here mirrors that DDL so the
+``decisionledger`` schema. ``ensure_schema`` here mirrors that DDL so the
 store can initialize a fresh dev database without depending on the init
-scripts having run. Surfaced scalar columns (``entity_id``, ``account_id``,
+scripts having run. Surfaced scalar columns (``reasoner_id``, ``entity_id``,
 ``decision_action``) support indexed lookups; the full bundle is stored as
 JSONB in ``bundle``. The ``replay_logs.diff`` column is populated only when
 ``is_matched = false``.
@@ -16,9 +22,10 @@ JSONB in ``bundle``. The ``replay_logs.diff`` column is populated only when
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -27,22 +34,32 @@ from core.bundle import DecisionBundle
 from core.enforcement import EnforcementDecision  # noqa: TC001 (runtime use)
 from core.gate.policy import PolicyGateInput, PolicyGateOutput
 from core.snippet import RetrievedSnippet
-from reasoner.account_takeover.events import LoginEvent
 
 if TYPE_CHECKING:
     import psycopg
 
 log = structlog.get_logger(__name__)
 
+#: Deserializer signature for a reasoner's raw event payload. The store calls
+#: this on the JSON dict from ``bundle["raw_event"]`` to reconstitute a typed
+#: Observation for replay. Provided by the deployment composer at construction
+#: time so the store stays reasoner-agnostic. The return is typed loosely as
+#: ``Any`` because Pydantic ``computed_field`` properties make
+#: concrete event classes structurally — but not nominally — compatible with
+#: the ``Observation`` Protocol; downstream code duck-types on the protocol.
+RawEventFactory = Callable[[dict[str, Any]], Any]
+
 # ---------------------------------------------------------------------------
-# DDL
+# DDL — mirrors infra/postgres/02_tables.sql
 # ---------------------------------------------------------------------------
 
+_CREATE_SCHEMA = "CREATE SCHEMA IF NOT EXISTS decisionledger;"
+
 _CREATE_BUNDLES_TABLE = """
-CREATE TABLE IF NOT EXISTS decision_bundles (
+CREATE TABLE IF NOT EXISTS decisionledger.decision_bundles (
     decision_id     UUID PRIMARY KEY,
+    reasoner_id     TEXT NOT NULL,
     entity_id       UUID NOT NULL,
-    account_id      TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL,
     decision_action TEXT NOT NULL,
     bundle          JSONB NOT NULL
@@ -50,9 +67,10 @@ CREATE TABLE IF NOT EXISTS decision_bundles (
 """
 
 _CREATE_REPLAY_LOGS_TABLE = """
-CREATE TABLE IF NOT EXISTS replay_logs (
+CREATE TABLE IF NOT EXISTS decisionledger.replay_logs (
     replay_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    decision_id UUID NOT NULL REFERENCES decision_bundles(decision_id),
+    decision_id UUID NOT NULL
+        REFERENCES decisionledger.decision_bundles(decision_id),
     replayed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     is_matched  BOOLEAN NOT NULL,
     diff        JSONB
@@ -139,22 +157,29 @@ def _serialize_bundle(bundle: DecisionBundle) -> str:
     return json.dumps(data, default=str)
 
 
-def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
+def _deserialize_bundle(
+    bundle_json: str,
+    raw_event_factory: RawEventFactory,
+) -> DecisionBundle:
     """Reconstruct a DecisionBundle from its stored JSON representation.
 
     Parses each nested Pydantic layer explicitly and uses ``strict=False``
     to coerce StrEnum values from their string representations (e.g.,
-    ``"ALLOW"`` → ``DecisionAction.ALLOW``).
+    ``"ALLOW"`` → ``DecisionAction.ALLOW``). The reasoner-specific
+    ``raw_event`` is reconstituted via the injected factory.
 
     Args:
         bundle_json: JSON string from the ``bundle`` JSONB column.
+        raw_event_factory: Reasoner-supplied callable that converts the
+            JSON dict from ``bundle["raw_event"]`` back into a typed
+            ``Observation``.
 
     Returns:
         Reconstituted ``DecisionBundle``.
     """
     data = json.loads(bundle_json)
 
-    raw_event = LoginEvent.model_validate(data["raw_event"], strict=False)
+    raw_event = raw_event_factory(data["raw_event"])
 
     retrieval_results = [
         RetrievedSnippet.model_validate(r, strict=False)
@@ -181,7 +206,7 @@ def _deserialize_bundle(bundle_json: str) -> DecisionBundle:
     return DecisionBundle(
         decision_id=data["decision_id"],
         created_at=datetime.fromisoformat(data["created_at"]),
-        raw_event=raw_event,  # type: ignore[arg-type]
+        raw_event=raw_event,
         idempotency_key=data["idempotency_key"],
         ingestion_timestamp=datetime.fromisoformat(data["ingestion_timestamp"]),
         queue_position=data.get("queue_position"),
@@ -210,23 +235,39 @@ class BundleStore:
     ``ensure_schema()`` method creates the required tables if they do not
     exist — call it once during startup before the first write.
 
-    The store is stateless beyond the connection. Thread safety is the
-    caller's responsibility (psycopg connections are not thread-safe).
+    The store is reasoner-agnostic: tenant identity comes from
+    ``observation.reasoner_context.reasoner_id`` on write, and replay
+    deserializes the stored ``raw_event`` JSON via the ``raw_event_factory``
+    callable supplied at construction time. Reasoner-specific business keys
+    (account_id, content_id, …) live inside the JSONB bundle payload.
+
+    Thread safety is the caller's responsibility (psycopg connections are
+    not thread-safe).
 
     Args:
         conn: Open psycopg3 synchronous connection.
+        raw_event_factory: Reasoner-supplied deserializer that converts a
+            stored ``raw_event`` JSON dict back into a typed Observation.
+            Required for ``load()`` and ``replay()``.
     """
 
-    def __init__(self, conn: psycopg.Connection[object]) -> None:
-        """Initialize BundleStore with a psycopg connection."""
+    def __init__(
+        self,
+        conn: psycopg.Connection[object],
+        *,
+        raw_event_factory: RawEventFactory,
+    ) -> None:
+        """Initialize BundleStore with a psycopg connection and event factory."""
         self._conn = conn
+        self._raw_event_factory = raw_event_factory
 
     def ensure_schema(self) -> None:
-        """Create decision_bundles and replay_logs tables if they do not exist.
+        """Create the schema and tables if they do not exist.
 
         Idempotent — safe to call on every startup.
         """
         with self._conn.cursor() as cur:
+            cur.execute(_CREATE_SCHEMA)
             cur.execute(_CREATE_BUNDLES_TABLE)
             cur.execute(_CREATE_REPLAY_LOGS_TABLE)
         self._conn.commit()
@@ -239,29 +280,40 @@ class BundleStore:
         at-least-once delivery semantics in the pipeline without causing
         duplicate audit records.
 
+        ``reasoner_id`` is sourced from
+        ``bundle.raw_event.reasoner_context.reasoner_id`` — the framework
+        intake validator guarantees ``reasoner_context`` is populated before
+        the bundle reaches the store.
+
         Args:
             bundle: Fully assembled bundle to persist.
+
+        Raises:
+            ValueError: If the bundle's raw_event has no reasoner_context
+                (an upstream contract violation that should never occur).
         """
         bundle_json = _serialize_bundle(bundle)
         raw_event = bundle.raw_event
-        # entity_id is on the framework Observation protocol; account_id is
-        # a domain attribute on the underlying event class. Fall back to
-        # entity_id-as-string for domains that don't surface account_id.
-        entity_id = raw_event.entity_id
-        account_id = getattr(raw_event, "account_id", str(entity_id))
+        if raw_event.reasoner_context is None:
+            msg = (
+                "Cannot persist bundle without reasoner_context — "
+                "validate_observation() should have caught this upstream."
+            )
+            raise ValueError(msg)
+        reasoner_id = raw_event.reasoner_context.reasoner_id
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO decision_bundles
-                    (decision_id, entity_id, account_id, created_at,
+                INSERT INTO decisionledger.decision_bundles
+                    (decision_id, reasoner_id, entity_id, created_at,
                      decision_action, bundle)
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT (decision_id) DO NOTHING
                 """,
                 (
                     bundle.decision_id,
-                    str(entity_id),
-                    account_id,
+                    reasoner_id,
+                    str(raw_event.entity_id),
                     bundle.created_at,
                     bundle.decision_action.value,
                     bundle_json,
@@ -272,6 +324,7 @@ class BundleStore:
             "audit.bundle_written",
             component="audit",
             decision_id=bundle.decision_id,
+            reasoner_id=reasoner_id,
             decision_action=bundle.decision_action.value,
         )
 
@@ -289,7 +342,8 @@ class BundleStore:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT bundle FROM decision_bundles WHERE decision_id = %s",
+                "SELECT bundle FROM decisionledger.decision_bundles "
+                "WHERE decision_id = %s",
                 (decision_id,),
             )
             row = cur.fetchone()
@@ -299,7 +353,7 @@ class BundleStore:
         # the connection's row factory. Normalize to str for _deserialize_bundle.
         raw = row[0]  # type: ignore[index]
         bundle_str = json.dumps(raw) if isinstance(raw, dict) else str(raw)
-        return _deserialize_bundle(bundle_str)
+        return _deserialize_bundle(bundle_str, self._raw_event_factory)
 
     def replay(self, decision_id: str) -> ReplayResult:
         """Replay a decision by re-running enforcement against cached states.
@@ -367,7 +421,7 @@ class BundleStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO replay_logs
+                INSERT INTO decisionledger.replay_logs
                     (decision_id, replayed_at, is_matched, diff)
                 VALUES (%s, %s, %s, %s::jsonb)
                 """,

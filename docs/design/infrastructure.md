@@ -40,7 +40,7 @@ All tables live under the `account_takeover` schema, created by `infra/postgres/
 #### `decision_bundles` — Audit store
 
 ```sql
-create table if not exists account_takeover.decision_bundles (
+create table if not exists decisionledger.decision_bundles (
     decision_id   uuid        primary key,
     entity_id     uuid        not null,    -- UUID5 from account_id (framework identity)
     account_id    text        not null,    -- ATO domain business key
@@ -55,7 +55,7 @@ create table if not exists account_takeover.decision_bundles (
 #### `policy_chunks` — pgvector HNSW index
 
 ```sql
-create table if not exists account_takeover.policy_chunks (
+create table if not exists decisionledger.policy_chunks (
     chunk_id      uuid        primary key default gen_random_uuid(),
     policy_id     text        not null,
     version       text        not null,
@@ -68,7 +68,7 @@ create table if not exists account_takeover.policy_chunks (
 );
 
 create index if not exists idx_policy_chunks_hnsw
-    on account_takeover.policy_chunks
+    on decisionledger.policy_chunks
     using hnsw (embedding vector_cosine_ops);
 ```
 
@@ -77,10 +77,10 @@ The `vector(384)` dimension matches the `all-MiniLM-L6-v2` sentence-transformer 
 #### `replay_logs` — Enforcement replay audit trail
 
 ```sql
-create table if not exists account_takeover.replay_logs (
+create table if not exists decisionledger.replay_logs (
     replay_id    uuid        primary key default gen_random_uuid(),
     decision_id  uuid        not null
-                             references account_takeover.decision_bundles (decision_id),
+                             references decisionledger.decision_bundles (decision_id),
     replayed_at  timestamptz not null default now(),
     matched      boolean     not null,    -- true = same action as original
     diff         jsonb                    -- populated only when matched = false
@@ -102,7 +102,7 @@ create table if not exists account_takeover.replay_logs (
 | `history:geo:{account_id}` | Set | — | Known countries per account (feature layer — not yet built) |
 | `last_location:{account_id}` | Hash | — | lat/lon + timestamp for impossible travel detection (feature layer — not yet built) |
 
-Feature layer keys are documented for forward reference — `app/features/` is not yet implemented.
+Feature layer keys are documented for forward reference — `reasoner/account_takeover/feature_service.py` is not yet implemented.
 
 ---
 
@@ -125,10 +125,10 @@ The corpus must be loaded into pgvector and Elasticsearch before the retrieval l
 
 ```bash
 # Load all 32 corpus documents (safe to re-run — deletes per policy_id before inserting)
-uv run python -m app.retrieval.corpus_loader
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
 
 # Full wipe and reload
-uv run python -m app.retrieval.corpus_loader --wipe
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner --wipe
 ```
 
 This command:
@@ -137,15 +137,15 @@ This command:
 2. Parses YAML frontmatter into `PolicyDocument`
 3. Chunks each document at `##` boundaries; `###` secondary split for sections > 300 words
 4. Embeds chunks using `all-MiniLM-L6-v2` (384 dimensions) via sentence-transformers
-5. Writes embeddings + metadata to `account_takeover.policy_chunks` in PostgreSQL
+5. Writes embeddings + metadata to `decisionledger.policy_chunks` in PostgreSQL
 6. Writes text + metadata (no embedding) to the `policy-chunks` Elasticsearch index
 
 Verify the load:
 
 ```bash
 # PostgreSQL — chunk count per policy document
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c "SELECT policy_id, COUNT(*) AS chunks FROM account_takeover.policy_chunks GROUP BY policy_id ORDER BY chunks DESC;"
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "SELECT policy_id, COUNT(*) AS chunks FROM decisionledger.policy_chunks GROUP BY policy_id ORDER BY chunks DESC;"
 
 # Elasticsearch — total chunk count
 curl -s localhost:9200/policy-chunks/_count | python3 -m json.tool
@@ -208,7 +208,7 @@ All runtime configuration via environment variables. No secrets in code or commi
 | `ELASTICSEARCH_PORT` | Elasticsearch port (Docker Compose override) | `9200` |
 | `OPENAI_API_KEY` | OpenAI API key | — (required) |
 | `OPENAI_MODEL` | Model name | `gpt-4o` |
-| `SCORER_MODEL_PATH` | Path to serialized XGBoost model | `app/scorer/models/current.json` |
+| `SCORER_MODEL_PATH` | Path to serialized XGBoost model | `reasoner/account_takeover/scorer/models/current.json` |
 | `ACTIVE_PROMPT_VERSION` | Prompt version tag | `v1` |
 | `RERANK_ENABLED` | Enable cross-encoder reranking | `true` |
 | `RERANK_TIMEOUT_MS` | Reranker latency budget | `100` |

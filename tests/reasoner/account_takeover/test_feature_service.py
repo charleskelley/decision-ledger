@@ -1,4 +1,4 @@
-"""Tests for app/features/features.py — pure function and FeatureService."""
+"""Tests for the ATO feature_service — pure function and FeatureService."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.features.features import (
+from reasoner.account_takeover.feature_service import (
     _MAX_TRAVEL_SPEED_KMH,
     _SPARSE_HISTORY_THRESHOLD,
     FeatureService,

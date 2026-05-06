@@ -11,8 +11,8 @@ validates it on load. The card captures everything needed to:
   - Audit-trail the model's behavior (``TrainingReport`` block,
     routing-distribution sanity, configured fast-path thresholds).
 
-Living under ``app/scorer/`` keeps the framework's ``core/`` boundary clean
-of model-management types — ``ScorerOutput`` (the framework-side contract)
+Living inside the ATO scorer package keeps the framework's ``core/`` boundary
+clean of model-management types — ``ScorerOutput`` (the framework-side contract)
 remains unchanged.
 """
 
@@ -22,7 +22,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.scorer.eval import TrainingReport
+from reasoner.account_takeover.scorer.eval import TrainingReport
 
 
 class ModelCard(BaseModel):
@@ -47,10 +47,10 @@ class ModelCard(BaseModel):
         max_depth: Maximum tree depth.
         learning_rate: XGBoost ``eta`` parameter.
         feature_names: Ordered list of input feature names. Must match
-            ``app.scorer.scorer.FEATURE_NAMES`` at load time — mismatch is
-            a feature-schema drift error.
+            the scorer's ``FEATURE_NAMES`` at load time — mismatch is a
+            feature-schema drift error.
         heuristic_label_version: Version tag for the heuristic labeling
-            function in ``app.scorer.trainer``. Bump on label changes so
+            function in the ATO scorer trainer. Bump on label changes so
             historical cards remain interpretable.
         training: Training and evaluation metrics from the run.
         fast_path_allow_threshold: Lower routing-band cutoff at training

@@ -33,7 +33,7 @@ docker compose exec redis redis-cli ping
 # Expected: PONG
 
 # PostgreSQL
-docker compose exec postgres pg_isready -U account_takeover -d account_takeover
+docker compose exec postgres pg_isready -U decisionledger -d decisionledger
 # Expected: /var/run/postgresql:5432 - accepting connections
 
 # Elasticsearch
@@ -45,17 +45,17 @@ curl -s localhost:9200/_cluster/health | python3 -m json.tool | grep '"status"'
 
 ```bash
 # pgvector extension installed
-docker compose exec postgres psql -U account_takeover -d account_takeover -c '\dx'
+docker compose exec postgres psql -U decisionledger -d decisionledger -c '\dx'
 # Expected: vector listed in extensions
 
-# account_takeover schema exists
-docker compose exec postgres psql -U account_takeover -d account_takeover \
+# decisionledger schema exists
+docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dn'
-# Expected: account_takeover schema listed
+# Expected: decisionledger schema listed
 
 # Tables exist
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c '\dt account_takeover.*'
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c '\dt decisionledger.*'
 # Expected: decision_bundles, policy_chunks, replay_logs
 ```
 
@@ -75,7 +75,7 @@ The corpus must be loaded before the retrieval layer can serve queries. This is 
 ### Load
 
 ```bash
-uv run python -m app.retrieval.corpus_loader
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
 ```
 
 Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
@@ -84,12 +84,12 @@ Expected output: progress lines per document, then a summary. Typical run: 32 do
 
 ```bash
 # PostgreSQL — chunk count per policy document
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c "SELECT policy_id, COUNT(*) AS chunks FROM account_takeover.policy_chunks GROUP BY policy_id ORDER BY chunks DESC LIMIT 10;"
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "SELECT policy_id, COUNT(*) AS chunks FROM decisionledger.policy_chunks GROUP BY policy_id ORDER BY chunks DESC LIMIT 10;"
 
 # PostgreSQL — total chunk count
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c "SELECT COUNT(*) FROM account_takeover.policy_chunks;"
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "SELECT COUNT(*) FROM decisionledger.policy_chunks;"
 # Expected: ~215
 
 # Elasticsearch — total chunk count
@@ -104,10 +104,10 @@ curl -s 'localhost:9200/policy-chunks/_search?size=1' | python3 -m json.tool | h
 
 ```bash
 # Safe re-run — deletes per policy_id before inserting, no duplicates
-uv run python -m app.retrieval.corpus_loader
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
 
 # Full wipe and reload
-uv run python -m app.retrieval.corpus_loader --wipe
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner --wipe
 ```
 
 ---
@@ -190,7 +190,7 @@ uv run python
 
 ```python
 import redis
-from app.ingestion.consumer import IngestionConsumer
+from reasoner.account_takeover.ingestion.consumer import IngestionConsumer
 
 r = redis.Redis(decode_responses=True)
 consumer = IngestionConsumer(
@@ -231,7 +231,7 @@ Push the same event twice, then consume once — first delivery accepted, second
 ```python
 import json
 import redis
-from app.ingestion.consumer import IngestionConsumer
+from reasoner.account_takeover.ingestion.consumer import IngestionConsumer
 from reasoner.account_takeover.events import AuthMethod, AuthOutcome,
     GeoLocation, LoginEvent
 from datetime import datetime, UTC
@@ -313,7 +313,7 @@ from app.retrieval.retriever import PolicyRetriever
 from pathlib import Path
 
 pg = psycopg.connect(
-    "host=localhost dbname=account_takeover user=account_takeover password=account_takeover"
+    "host=localhost dbname=decisionledger user=decisionledger password=decisionledger"
 )
 es = Elasticsearch("http://localhost:9200")
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -431,11 +431,11 @@ docker compose exec redis redis-cli XPENDING ato:login-events ato-reasoner - + 1
 ### Reset PostgreSQL tables (keep schema)
 
 ```bash
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c "TRUNCATE account_takeover.decision_bundles, account_takeover.replay_logs CASCADE;"
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "TRUNCATE decisionledger.decision_bundles, decisionledger.replay_logs CASCADE;"
 
-docker compose exec postgres psql -U account_takeover -d account_takeover \
-  -c "TRUNCATE account_takeover.policy_chunks CASCADE;"
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "TRUNCATE decisionledger.policy_chunks CASCADE;"
 # Note: after truncating policy_chunks, reload the corpus
 ```
 
@@ -444,7 +444,7 @@ docker compose exec postgres psql -U account_takeover -d account_takeover \
 ```bash
 docker compose down -v     # destroys all volumes
 docker compose up -d       # fresh start
-uv run python -m app.retrieval.corpus_loader   # reload corpus
+uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner   # reload corpus
 ```
 
 ---
@@ -453,7 +453,7 @@ uv run python -m app.retrieval.corpus_loader   # reload corpus
 
 The following sections will be added as each component is built:
 
-- **Section 7 — Feature Computation** (week 4): running `app/features/`, inspecting velocity and novelty features in Redis
+- **Section 7 — Feature Computation** (week 4): running `reasoner/account_takeover/feature_service.py`, inspecting velocity and novelty features in Redis
 - **Section 8 — XGBoost Scorer** (week 4): training, loading the model, running inference, interpreting fast-path vs. gate routing
 - **Section 9 — LLM Policy Gate** (week 5): prompt template management, live gate invocation, reviewing `PolicyGateOutput`
 - **Section 10 — Enforcement + Decision Bundle** (week 5–6): full pipeline end-to-end, reading a `DecisionBundle` from Postgres

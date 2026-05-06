@@ -919,7 +919,7 @@ Streamlit or Django) will need HTTP access to both bundle retrieval and replay.
 Building the endpoint now avoids giving the reviewer app direct database access
 or requiring a separate CLI shim.
 
-**Hard fail on missing model.** If `app/scorer/models/ato-v1.ubj` does not
+**Hard fail on missing model.** If `reasoner/account_takeover/scorer/models/ato-v1.ubj` does not
 exist at startup, the lifespan raises `FileNotFoundError` with a message
 pointing to `make train`. Auto-training on startup was rejected: implicit
 behavior during startup masks a missing prerequisite step and makes
@@ -1757,3 +1757,67 @@ this decision.
   (c) *Ship OpenAI adapter only; defer Anthropic.* Single concrete is
   not a proof of generalization. The protocol claim is more credible
   with two adapters than with the design alone.
+
+## DR-24: Framework owns audit storage; reasoner_id is a row-level filter, not a schema-level partition
+
+**Decision.** DecisionLedger is a multi-tenant governance hub. All
+reasoners write decision bundles, policy chunks, replay logs, and
+resolution attempts to the same framework-owned `decisionledger.*`
+Postgres schema. Tenant separation is via the `reasoner_id` column on
+each row, not via per-domain schemas. The policy gate, retrieval
+infrastructure, enforcement layer, and audit ledger are all shared.
+Reasoners own only the upstream half of the pipeline (events, features,
+scoring, query rendering, assembly) and ship that as a self-contained
+package under `reasoner/<domain>/` including all supporting infra.
+
+**Why now.** Pre-this DR the schema was named `account_takeover.*` and
+the audit store imported `LoginEvent` directly. That undercut the
+framework's value prop (a domain-agnostic audit hub) and would have
+forced N copies of the audit infrastructure when a second reasoner
+landed. The refactor codifies the hub model before the second-reasoner
+work starts. Polish item 1 (content moderation reasoner) drops in as a
+new package with no framework changes — `app.include_router(cm_router)`
+plus a `CmSettings` class is the entire integration.
+
+**Consequences.**
+- **One Postgres schema for all reasoners.** `decisionledger.decision_bundles`,
+  `decisionledger.policy_chunks`, `decisionledger.replay_logs`,
+  `decisionledger.decision_resolution_attempts` — all carry or reach
+  `reasoner_id` (directly on the row, or via the `decision_id` join).
+  The Postgres role / database default rename `account_takeover` →
+  `decisionledger` matches.
+- **`BundleStore` stays in `app/audit/`.** Types on the framework
+  `Observation` protocol; pulls `reasoner_id` from
+  `observation.reasoner_context.reasoner_id`. Domain-specific business
+  keys (`account_id`, `content_id`) live inside the JSONB bundle.
+- **Replay needs a reasoner-supplied event factory.** `BundleStore`
+  takes a `raw_event_factory: Callable[[dict], Observation]` at
+  construction time so it can reconstitute the typed observation
+  during replay without importing reasoner types itself. The
+  deployment composer wires the right factory per registered reasoner.
+- **Retrieval is reasoner-filtered.** `PolicyRetriever.retrieve()`
+  accepts a `reasoner_id` parameter and applies it as a hard filter on
+  both pgvector and Elasticsearch queries. The corpus loader takes
+  `--reasoner-id` and tags every chunk on insert.
+- **Boundary enforcement test.** `tests/test_framework_boundary.py`
+  asserts (a) `app/*.py` (excluding `app/main.py`) contains no
+  `from reasoner.` imports, (b) `core/*.py` contains no `app.*` or
+  `reasoner.*` imports, (c) no ATO-coded symbols (`LoginEvent`,
+  `AuthOutcome`, hardcoded `account_takeover.*` schema names) appear in
+  framework source. New leaks fail `make check`.
+
+**Alternatives rejected.**
+(a) *Per-domain schemas (`account_takeover.*`, `content_moderation.*`).*
+The original layout. Each reasoner ships a duplicate `BundleStore`
+implementation; cross-domain audit queries become unions across N
+schemas; replay tooling forks per domain. Operationally expensive and
+philosophically wrong — the framework is the audit hub, not the schema
+host.
+(b) *Per-tenant Postgres databases.* Bigger isolation but doubles the
+deployment complexity (per-tenant migrations, per-tenant connection
+pools) for no MVP-relevant benefit. Defer to a hypothetical future
+where tenants demand physical isolation.
+(c) *Keep schema generic but leave `LoginEvent` import in `BundleStore`.*
+Half-measure. The schema is generic but the code still wouldn't
+admit a second reasoner without new imports — the boundary test
+catches this and the leak stays "almost generic."

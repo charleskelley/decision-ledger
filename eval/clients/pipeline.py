@@ -3,7 +3,7 @@
 Mirrors ``app/main.py:lifespan`` service construction (Redis client,
 Postgres pool, Elasticsearch client, embedding model, cross-encoder,
 policy gate, bundle store) and exposes async wrappers around
-``app.decide.execute_pipeline()``.
+``reasoner.account_takeover.pipeline.run_ato_decision()``.
 
 Implements both the ``PipelineDriver`` protocol (``eval.dimensions.
 consistency``) and the ``RobustnessDriver`` protocol (``eval.dimensions.
@@ -28,25 +28,27 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
-from app.decide import execute_pipeline
 from app.enforcement.resolver import resolve as resolve_enforcement
-from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
 from app.llm.openai import OpenAILLMClient
 from app.retrieval.retriever import PolicyRetriever
-from app.scorer import AtoScorer
-from app.settings import Settings
+from app.settings import FrameworkSettings
 from core.actions import DecisionAction
 from core.routes import GateRoute
 from eval.dimensions.consistency import PipelineRunResult
 from reasoner.account_takeover.assembler import build_observation
+from reasoner.account_takeover.events import LoginEvent
+from reasoner.account_takeover.feature_service import FeatureService
+from reasoner.account_takeover.pipeline import run_ato_decision
+from reasoner.account_takeover.retrieval_query import build_ato_query
+from reasoner.account_takeover.scorer import AtoScorer
+from reasoner.account_takeover.settings import AtoSettings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from core.llm.client import CompletionResult
     from core.snippet import RetrievedSnippet
-    from reasoner.account_takeover.events import LoginEvent
 
 log = structlog.get_logger(__name__)
 
@@ -59,49 +61,64 @@ class PipelineDriver:
     use as a context manager) on shutdown to release them.
 
     Args:
-        settings: Optional ``Settings`` override. Defaults to a fresh
-            ``Settings()`` reading from the environment. ``OPENAI_API_KEY``
-            must be set; the constructor raises ``ValueError`` otherwise.
+        framework_settings: Optional ``FrameworkSettings`` override. Defaults
+            to a fresh ``FrameworkSettings()`` reading from the environment.
+            ``OPENAI_API_KEY`` must be set; the constructor raises
+            ``ValueError`` otherwise.
+        ato_settings: Optional ``AtoSettings`` override. Defaults to a fresh
+            ``AtoSettings()`` reading ``ATO_*`` vars from the environment.
 
     Raises:
         ValueError: ``OPENAI_API_KEY`` is empty.
-        FileNotFoundError: ``scorer_model_path`` does not point at a
+        FileNotFoundError: ``ATO_SCORER_MODEL_PATH`` does not point at a
             readable file. Run ``make train`` to produce one.
     """
 
-    def __init__(self, *, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        framework_settings: FrameworkSettings | None = None,
+        ato_settings: AtoSettings | None = None,
+    ) -> None:
         """Construct the driver and open all infrastructure connections."""
-        settings = settings if settings is not None else Settings()
+        fw = (
+            framework_settings
+            if framework_settings is not None
+            else FrameworkSettings()
+        )
+        ato = ato_settings if ato_settings is not None else AtoSettings()
 
         # Fail-fast configuration validation — before any infrastructure
         # connection so misconfiguration surfaces immediately.
-        if not settings.openai_api_key:
+        if not fw.openai_api_key:
             msg = (
                 "OPENAI_API_KEY is required for PipelineDriver. "
-                "Set the env var or pass Settings(openai_api_key=...)."
+                "Set the env var or pass "
+                "FrameworkSettings(openai_api_key=...)."
             )
             raise ValueError(msg)
 
-        model_path = Path(settings.scorer_model_path)
+        model_path = Path(ato.scorer_model_path)
         if not model_path.exists():
             msg = (
                 f"Scorer model not found at {model_path}. "
-                "Run `make train` or `uv run python -m app.scorer train "
+                "Run `make train` or "
+                "`uv run python -m reasoner.account_takeover.scorer train "
                 f"--output {model_path} --samples 2000` first."
             )
             raise FileNotFoundError(msg)
 
         # Service construction — same order as app/main.py:lifespan.
         self._redis = redis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
+            host=fw.redis_host,
+            port=fw.redis_port,
             decode_responses=False,
         )
-        self._pg_conn = psycopg.connect(settings.postgres_dsn)
+        self._pg_conn = psycopg.connect(fw.postgres_dsn)
         # Teach psycopg how to adapt numpy ndarrays to pgvector parameters; the
         # retriever's dense-search query passes the embedding via %s.
         register_vector(self._pg_conn)
-        self._es = Elasticsearch(settings.elasticsearch_url)
+        self._es = Elasticsearch(fw.elasticsearch_url)
 
         embed_model = SentenceTransformer("all-MiniLM-L6-v2")
         cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -119,10 +136,19 @@ class PipelineDriver:
         self._gate = PolicyGate(
             client=llm_client, prompt_registry=self._prompt_registry
         )
-        self._store = BundleStore(conn=self._pg_conn)
+
+        # The store is reasoner-agnostic — supply the ATO event deserializer
+        # so replay() can reconstitute the typed observation from JSONB.
+        def _ato_raw_event_factory(data: dict[str, Any]) -> LoginEvent:
+            return LoginEvent.model_validate(data, strict=False)
+
+        self._store = BundleStore(
+            conn=self._pg_conn,
+            raw_event_factory=_ato_raw_event_factory,
+        )
         self._store.ensure_schema()
 
-        self._corpus_version = settings.corpus_version
+        self._corpus_version = ato.corpus_version
 
         log.info(
             "eval.pipeline_driver.ready",
@@ -180,7 +206,7 @@ class PipelineDriver:
         """
         last_bundle = None
         for event in events:
-            last_bundle = await execute_pipeline(
+            last_bundle = await run_ato_decision(
                 event=event,
                 feature_svc=self._feature_svc,
                 scorer=self._scorer,
@@ -215,7 +241,7 @@ class PipelineDriver:
 
     async def run_event(self, event: LoginEvent) -> DecisionAction:
         """Run a single event through the normal pipeline."""
-        bundle = await execute_pipeline(
+        bundle = await run_ato_decision(
             event=event,
             feature_svc=self._feature_svc,
             scorer=self._scorer,
@@ -251,11 +277,17 @@ class PipelineDriver:
         if obs.route != GateRoute.ROUTE_TO_GATE:
             obs = obs.model_copy(update={"route": GateRoute.ROUTE_TO_GATE})
 
-        query = self._retriever.build_query(event, scorer_output)
+        query = build_ato_query(event, scorer_output)
         gate_config = obs.gate_context.gate_config or {}
+        reasoner_id = (
+            obs.reasoner_context.reasoner_id
+            if obs.reasoner_context is not None
+            else None
+        )
         snippets, _ = self._retriever.retrieve(
             query=query,
             k=5,
+            reasoner_id=reasoner_id,
             jurisdictions=gate_config.get("jurisdictions"),
             risk_tier=gate_config.get("risk_tier"),
         )
@@ -283,7 +315,7 @@ class PipelineDriver:
           exception and emits ``verdict=None``; enforcement Tier 1 routes
           to ``HOLD``. Exercises the full production failure path.
         - ``"retrieval_error"`` — wraps the retriever so ``retrieve()``
-          raises. ``execute_pipeline`` does not yet catch retrieval
+          raises. ``run_ato_decision`` does not yet catch retrieval
           exceptions; the driver translates the raised error into the
           contract's expected action (``HOLD``) so the test reflects what
           the system *should* do.
@@ -309,7 +341,7 @@ class PipelineDriver:
                 client=_Raising5xxLLMClient(),
                 prompt_registry=self._prompt_registry,
             )
-            bundle = await execute_pipeline(
+            bundle = await run_ato_decision(
                 event=event,
                 feature_svc=self._feature_svc,
                 scorer=self._scorer,
@@ -323,7 +355,7 @@ class PipelineDriver:
         if fallback_kind == "retrieval_error":
             faulty_retriever = _RaisingRetriever(self._retriever)
             try:
-                bundle = await execute_pipeline(
+                bundle = await run_ato_decision(
                     event=event,
                     feature_svc=self._feature_svc,
                     scorer=self._scorer,
@@ -334,14 +366,14 @@ class PipelineDriver:
                 )
                 return bundle.decision_action
             except _RetrievalForcedError:
-                # execute_pipeline doesn't yet catch retrieval errors. The
+                # run_ato_decision doesn't yet catch retrieval errors. The
                 # contract this case tests is "retrieval failure → HOLD";
                 # surface it deterministically until production grows the
                 # explicit catch.
                 return DecisionAction.HOLD
 
         if fallback_kind == "corpus_mismatch":
-            bundle = await execute_pipeline(
+            bundle = await run_ato_decision(
                 event=event,
                 feature_svc=self._feature_svc,
                 scorer=self._scorer,
@@ -371,18 +403,13 @@ class _RetrievalForcedError(RuntimeError):
 class _RaisingRetriever:
     """Retriever wrapper that raises from ``retrieve()`` for fallback tests.
 
-    Delegates ``build_query`` to the wrapped retriever (the pipeline calls
-    that before the route check) and raises a sentinel error from
-    ``retrieve``. Duck-types as ``PolicyRetriever`` for ``execute_pipeline``.
+    Raises a sentinel error from ``retrieve``. Duck-types as
+    ``PolicyRetriever`` for ``run_ato_decision``.
     """
 
     def __init__(self, original: PolicyRetriever) -> None:
-        """Store the wrapped retriever for ``build_query`` delegation."""
+        """Store the wrapped retriever (kept for parity with sibling wrappers)."""
         self._original = original
-
-    def build_query(self, *args: Any, **kwargs: Any) -> str:
-        """Delegate to the wrapped retriever."""
-        return self._original.build_query(*args, **kwargs)
 
     def retrieve(self, *args: Any, **kwargs: Any) -> tuple[list[RetrievedSnippet], str]:
         """Always raises — simulates retrieval-layer failure (ES/PG outage)."""

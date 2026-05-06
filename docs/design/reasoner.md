@@ -144,7 +144,7 @@ A way to compute the features the reasoner consumes. For batch domains
 this might be precomputed; for streaming domains (the ATO reference) this
 is done online from the inbound event plus prior state.
 
-The framework does not prescribe a feature store — `app/features/` in the
+The framework does not prescribe a feature store — `reasoner/account_takeover/feature_service.py` in the
 ATO reference uses Redis sliding-windows; another domain might use
 DataFrames, SQL, or a managed feature store. What matters is that
 `feature_set` in `ReasonerContext` is populated with everything the model

@@ -1,11 +1,16 @@
-"""Policy corpus loader.
+r"""Policy corpus loader.
 
 Reads all ``corpus/**/*.md`` files, parses YAML frontmatter into
 ``PolicyDocument``, chunks the body at ``##`` / ``###`` section boundaries,
 embeds each chunk using sentence-transformers (all-MiniLM-L6-v2), and writes to:
 
-- PostgreSQL ``account_takeover.policy_chunks`` (text + embedding + metadata)
-- Elasticsearch ``policy-chunks`` index (text + metadata; no embedding)
+- PostgreSQL ``decisionledger.policy_chunks`` (text + embedding + metadata,
+  including ``reasoner_id`` for tenant filtering at retrieval time).
+- Elasticsearch ``policy-chunks`` index (text + metadata; no embedding).
+
+The framework owns the schema; the loader is invoked with ``--reasoner-id``
+to tag every chunk with its owning reasoner's identity so a multi-tenant
+deployment can filter at retrieval time.
 
 Chunking rules (from ``docs/design/policy-corpus.md``):
 
@@ -19,12 +24,16 @@ Chunking rules (from ``docs/design/policy-corpus.md``):
 
 Usage::
 
-    uv run python -m app.retrieval.corpus_loader [--wipe]
+    uv run python -m app.retrieval.corpus_loader \\
+        --reasoner-id ato-reasoner [--wipe]
 
 Options:
-    --wipe    Truncate both stores before loading. Default behaviour is to
-              delete existing chunks for each ``policy_id`` before inserting,
-              making repeated runs safe without accumulating duplicates.
+    --reasoner-id  Reasoner that owns this corpus (e.g., ``ato-reasoner``).
+                   Stored on every chunk so the retriever can filter by tenant.
+    --wipe         Truncate both stores before loading. Default behaviour is
+                   to delete existing chunks for each ``(reasoner_id,
+                   policy_id)`` before inserting, making repeated runs safe
+                   without accumulating duplicates.
 """
 
 from __future__ import annotations
@@ -59,9 +68,7 @@ _ES_MAPPING_PATH = _PROJECT_ROOT / "infra" / "elasticsearch" / "policy-chunks.js
 
 _MODEL_NAME = "all-MiniLM-L6-v2"
 _ES_INDEX = "policy-chunks"
-_PG_DSN = (
-    "postgresql://account_takeover:account_takeover@localhost:5432/account_takeover"
-)
+_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
 _ES_URL = "http://localhost:9200"
 
 _CHUNK_MAX_WORDS = 300
@@ -227,36 +234,40 @@ def write_postgres(
     conn: psycopg.Connection,
     chunks: list[dict[str, Any]],
     *,
+    reasoner_id: str,
     policy_id: str,
     wipe: bool,
 ) -> None:
     """Write chunks for one policy document to ``policy_chunks``.
 
-    When ``wipe`` is False, existing chunks for ``policy_id`` are deleted
-    before inserting so repeated runs do not accumulate duplicates.
+    When ``wipe`` is False, existing chunks for ``(reasoner_id, policy_id)``
+    are deleted before inserting so repeated runs do not accumulate duplicates.
 
     Args:
         conn: Open psycopg connection with pgvector adapter registered.
         chunks: Chunk dicts including ``embedding`` as a list of floats.
+        reasoner_id: Reasoner that owns this corpus (e.g., ``"ato-reasoner"``).
         policy_id: Document identifier — used for the pre-insert delete.
         wipe: When True, skip the per-document delete (caller truncated).
     """
     with conn.cursor() as cur:
         if not wipe:
             cur.execute(
-                "DELETE FROM account_takeover.policy_chunks WHERE policy_id = %s",
-                (policy_id,),
+                "DELETE FROM decisionledger.policy_chunks "
+                "WHERE reasoner_id = %s AND policy_id = %s",
+                (reasoner_id, policy_id),
             )
         cur.executemany(
             """
-            INSERT INTO account_takeover.policy_chunks
-                (chunk_id, policy_id, policy_version, jurisdiction, risk_tier,
-                 section_path, chunk_text, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO decisionledger.policy_chunks
+                (chunk_id, reasoner_id, policy_id, policy_version,
+                 jurisdiction, risk_tier, section_path, chunk_text, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
                 (
                     c["chunk_id"],
+                    reasoner_id,
                     c["policy_id"],
                     c["version"],
                     c["jurisdiction"],
@@ -275,7 +286,12 @@ def write_postgres(
 # ---------------------------------------------------------------------------
 
 
-def write_elasticsearch(es: Elasticsearch, chunks: list[dict[str, Any]]) -> None:
+def write_elasticsearch(
+    es: Elasticsearch,
+    chunks: list[dict[str, Any]],
+    *,
+    reasoner_id: str,
+) -> None:
     """Bulk-index chunks into the ``policy-chunks`` Elasticsearch index.
 
     Embeddings are not written to ES — only text and metadata fields.
@@ -283,6 +299,8 @@ def write_elasticsearch(es: Elasticsearch, chunks: list[dict[str, Any]]) -> None
     Args:
         es: Connected Elasticsearch client.
         chunks: Chunk dicts (``embedding`` field is ignored).
+        reasoner_id: Reasoner that owns this corpus, stored on each document
+            so the framework retriever can filter by tenant.
     """
     actions = [
         {
@@ -290,6 +308,7 @@ def write_elasticsearch(es: Elasticsearch, chunks: list[dict[str, Any]]) -> None
             "_id": c["chunk_id"],
             "_source": {
                 "chunk_id": c["chunk_id"],
+                "reasoner_id": reasoner_id,
                 "policy_id": c["policy_id"],
                 "title": c["title"],
                 "version": c["version"],
@@ -316,16 +335,25 @@ def main() -> None:
         description="Load policy corpus into pgvector and Elasticsearch."
     )
     parser.add_argument(
+        "--reasoner-id",
+        required=True,
+        help=(
+            "Reasoner that owns this corpus (e.g., 'ato-reasoner'). Stored "
+            "on every chunk so the retriever can filter by tenant."
+        ),
+    )
+    parser.add_argument(
         "--wipe",
         action="store_true",
         help=(
             "Truncate both stores before loading. Default: delete existing "
-            "chunks per policy_id before inserting (safe for repeated runs)."
+            "chunks per (reasoner_id, policy_id) before inserting (safe for "
+            "repeated runs)."
         ),
     )
     args = parser.parse_args()
 
-    log.info("corpus_loader.start", wipe=args.wipe)
+    log.info("corpus_loader.start", reasoner_id=args.reasoner_id, wipe=args.wipe)
 
     # Load embedding model
     log.info("corpus_loader.model_loading", model=_MODEL_NAME)
@@ -374,15 +402,24 @@ def main() -> None:
 
         if args.wipe:
             with conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE account_takeover.policy_chunks")
-            log.info("corpus_loader.postgres_wiped")
+                cur.execute(
+                    "DELETE FROM decisionledger.policy_chunks WHERE reasoner_id = %s",
+                    (args.reasoner_id,),
+                )
+            log.info("corpus_loader.postgres_wiped", reasoner_id=args.reasoner_id)
 
         by_policy: dict[str, list[dict[str, Any]]] = {}
         for chunk in all_chunks:
             by_policy.setdefault(chunk["policy_id"], []).append(chunk)
 
         for policy_id, chunks in by_policy.items():
-            write_postgres(conn, chunks, policy_id=policy_id, wipe=args.wipe)
+            write_postgres(
+                conn,
+                chunks,
+                reasoner_id=args.reasoner_id,
+                policy_id=policy_id,
+                wipe=args.wipe,
+            )
             log.debug(
                 "corpus_loader.postgres_written",
                 policy_id=policy_id,
@@ -398,10 +435,14 @@ def main() -> None:
     _ensure_es_index(es)
 
     if args.wipe:
-        es.delete_by_query(index=_ES_INDEX, query={"match_all": {}}, refresh=True)
-        log.info("corpus_loader.es_wiped")
+        es.delete_by_query(
+            index=_ES_INDEX,
+            query={"term": {"reasoner_id": args.reasoner_id}},
+            refresh=True,
+        )
+        log.info("corpus_loader.es_wiped", reasoner_id=args.reasoner_id)
 
-    write_elasticsearch(es, all_chunks)
+    write_elasticsearch(es, all_chunks, reasoner_id=args.reasoner_id)
     log.info("corpus_loader.es_done", chunks=len(all_chunks))
 
     log.info(

@@ -1,4 +1,4 @@
-"""Unit tests for the pure metric helpers in app/scorer/eval.py."""
+"""Unit tests for the pure metric helpers in the ATO scorer eval module."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from app.scorer.eval import (
+from reasoner.account_takeover.scorer.eval import (
     TrainingReport,
     confusion_matrix_at_threshold,
     log_loss,

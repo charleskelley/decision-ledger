@@ -1,8 +1,13 @@
-"""FastAPI entry point — wires all pipeline services into HTTP endpoints.
+"""FastAPI deployment composer — wires framework + reasoner services.
 
-Constructs infrastructure clients and domain services at startup via the
-lifespan context manager. All connections are shared across requests and
-closed on shutdown.
+Constructs all infrastructure clients and reasoner-specific services in
+the lifespan context manager, then mounts each registered reasoner's
+router. This file is the single sanctioned ``app/`` → ``reasoner.*``
+import seam — every other framework module is reasoner-agnostic.
+
+Generic framework routes (decision lookup, replay) live here since they
+key on ``decision_id`` only. ATO-specific routes (``POST /api/v1/ato/
+decisions``) live in ``reasoner/account_takeover/api.py``.
 
 Run locally::
 
@@ -25,32 +30,23 @@ from pydantic import BaseModel
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.audit import BundleStore
-from app.decide import execute_pipeline
-from app.features import FeatureService
 from app.gate.policy import PolicyGate, YamlPromptRegistry
 from app.llm.openai import OpenAILLMClient
 from app.monitoring import configure_logging
 from app.retrieval.retriever import PolicyRetriever
-from app.scorer import AtoScorer
-from app.settings import Settings
-from reasoner.account_takeover.events import LoginEvent  # noqa: TC001
+from app.settings import FrameworkSettings
+from reasoner.account_takeover.api import router as ato_router
+from reasoner.account_takeover.events import LoginEvent
+from reasoner.account_takeover.feature_service import FeatureService
+from reasoner.account_takeover.scorer import AtoScorer
+from reasoner.account_takeover.settings import AtoSettings
 
 log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Response models
+# Framework-side response models (generic — keyed on decision_id)
 # ---------------------------------------------------------------------------
-
-
-class DecisionResponse(BaseModel):
-    """Summary DTO returned by POST /api/v1/decisions."""
-
-    decision_id: str
-    decision_action: str
-    enforcement_rule_applied: str | None
-    route: str
-    latency_ms: float
 
 
 class ReplayResponse(BaseModel):
@@ -77,30 +73,31 @@ class ErrorResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Construct all pipeline services at startup; close on shutdown."""
-    settings = Settings()
-    configure_logging(json_logs=settings.log_json, level=settings.log_level)
+    """Construct all framework + reasoner services at startup."""
+    fw = FrameworkSettings()
+    ato = AtoSettings()
+    configure_logging(json_logs=fw.log_json, level=fw.log_level)
 
-    model_path = Path(settings.scorer_model_path)
+    model_path = Path(ato.scorer_model_path)
     if not model_path.exists():
         msg = (
             f"Scorer model not found at {model_path}. "
             "Run `make train` or "
-            "`uv run python -m app.scorer train "
+            "`uv run python -m reasoner.account_takeover.scorer train "
             f"--output {model_path} --samples 2000` first."
         )
         raise FileNotFoundError(msg)
 
     redis_client = redis.Redis(
-        host=settings.redis_host,
-        port=settings.redis_port,
+        host=fw.redis_host,
+        port=fw.redis_port,
         decode_responses=False,
     )
-    pg_conn = psycopg.connect(settings.postgres_dsn)
+    pg_conn = psycopg.connect(fw.postgres_dsn)
     # Teach psycopg how to adapt numpy ndarrays to pgvector parameters; the
     # retriever's dense-search query passes the embedding via %s.
     register_vector(pg_conn)
-    es_client = Elasticsearch(settings.elasticsearch_url)
+    es_client = Elasticsearch(fw.elasticsearch_url)
 
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -116,7 +113,14 @@ async def lifespan(application: FastAPI):
     prompt_registry = YamlPromptRegistry()
     llm_client = OpenAILLMClient()
     gate = PolicyGate(client=llm_client, prompt_registry=prompt_registry)
-    store = BundleStore(conn=pg_conn)
+
+    # The store is reasoner-agnostic. The deployment composer supplies a
+    # deserializer that knows how to reconstitute this reasoner's raw_event
+    # JSON back into its concrete typed Observation for replay.
+    def _ato_raw_event_factory(data: dict[str, Any]) -> LoginEvent:
+        return LoginEvent.model_validate(data, strict=False)
+
+    store = BundleStore(conn=pg_conn, raw_event_factory=_ato_raw_event_factory)
     store.ensure_schema()
 
     application.state.feature_svc = feature_svc
@@ -124,7 +128,7 @@ async def lifespan(application: FastAPI):
     application.state.retriever = retriever
     application.state.gate = gate
     application.state.store = store
-    application.state.corpus_version = settings.corpus_version
+    application.state.corpus_version = ato.corpus_version
 
     log.info("api.startup", component="api", msg="All services initialized")
 
@@ -137,19 +141,22 @@ async def lifespan(application: FastAPI):
 
 
 # ---------------------------------------------------------------------------
-# Application
+# Application — mounts framework routes + each reasoner's router
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="DecisionLedger — ATO Reasoner",
+    title="DecisionLedger",
     description="Model-agnostic governed decision API.",
     version="0.1.0",
     lifespan=lifespan,
 )
 
+# Reasoner routers — the only sanctioned app/ → reasoner/ import seam.
+app.include_router(ato_router)
+
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Framework-side endpoints (decision lookup + replay are reasoner-agnostic)
 # ---------------------------------------------------------------------------
 
 
@@ -159,64 +166,12 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post(
-    "/api/v1/decisions",
-    response_model=DecisionResponse,
-    status_code=200,
-    responses={422: {"model": ErrorResponse}},
-)
-async def create_decision(event: LoginEvent, request: Request) -> DecisionResponse:
-    """Run the full decision pipeline on a LoginEvent.
-
-    Scores the event, retrieves relevant policies if needed, invokes
-    the LLM policy gate when the route indicates, and produces a final
-    action via deterministic enforcement. The complete DecisionBundle
-    is persisted; this endpoint returns a summary.
-
-    Args:
-        event: Validated LoginEvent from the request body.
-        request: FastAPI request (for accessing app.state services).
-
-    Returns:
-        DecisionResponse summary with decision_id and decision_action.
-    """
-    bundle = await execute_pipeline(
-        event=event,
-        feature_svc=request.app.state.feature_svc,
-        scorer=request.app.state.scorer,
-        retriever=request.app.state.retriever,
-        gate=request.app.state.gate,
-        store=request.app.state.store,
-        corpus_version=request.app.state.corpus_version,
-        idempotency_key=event.event_id,
-    )
-
-    total_ms = sum(bundle.latency_breakdown.values())
-
-    log.info(
-        "api.decision_complete",
-        component="api",
-        decision_id=bundle.decision_id,
-        decision_action=bundle.decision_action.value,
-        route=bundle.raw_event.route.value,
-        duration_ms=total_ms,
-    )
-
-    return DecisionResponse(
-        decision_id=bundle.decision_id,
-        decision_action=bundle.decision_action.value,
-        enforcement_rule_applied=bundle.enforcement_rule_applied,
-        route=bundle.raw_event.route.value,
-        latency_ms=total_ms,
-    )
-
-
 @app.get(
     "/api/v1/decisions/{decision_id}",
     responses={404: {"model": ErrorResponse}},
 )
 def get_decision(decision_id: str, request: Request) -> dict[str, Any]:
-    """Retrieve a stored DecisionBundle by ID.
+    """Retrieve a stored DecisionBundle by ID (any reasoner).
 
     Args:
         decision_id: UUID of the decision to retrieve.
@@ -245,7 +200,7 @@ def get_decision(decision_id: str, request: Request) -> dict[str, Any]:
     responses={404: {"model": ErrorResponse}},
 )
 def replay_decision(decision_id: str, request: Request) -> ReplayResponse:
-    """Replay enforcement against cached gate output.
+    """Replay enforcement against cached gate output (any reasoner).
 
     Re-executes the deterministic enforcement layer against the stored
     bundle's gate output. The LLM is never re-invoked. A mismatch

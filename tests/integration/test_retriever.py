@@ -20,9 +20,7 @@ from app.retrieval.retriever import PolicyRetriever
 
 pytestmark = pytest.mark.integration
 
-_PG_DSN = (
-    "postgresql://account_takeover:account_takeover@localhost:5432/account_takeover"
-)
+_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
 _ES_URL = "http://localhost:9200"
 _MODEL_NAME = "all-MiniLM-L6-v2"
 

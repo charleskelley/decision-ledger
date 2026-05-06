@@ -19,10 +19,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from app.scorer.eval import TrainingReport
-from app.scorer.model_card import ModelCard
-from app.scorer.scorer import FEATURE_NAMES
-from app.scorer.trainer import (
+from reasoner.account_takeover.scorer.eval import TrainingReport
+from reasoner.account_takeover.scorer.model_card import ModelCard
+from reasoner.account_takeover.scorer.scorer import FEATURE_NAMES
+from reasoner.account_takeover.scorer.trainer import (
     HEURISTIC_LABEL_VERSION,
     _generate_dataset,
     _train_test_split,

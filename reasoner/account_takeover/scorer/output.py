@@ -1,8 +1,8 @@
 """ATO Reasoner scorer output — internal domain type.
 
 ScorerOutput is the ATO Reasoner's internal representation of the fast ML
-scorer's result. It is produced by app/scorer/ and consumed by the domain
-layer when assembling the Observation (specifically FastPathRecord and
+scorer's result. It is produced by the ATO scorer package and consumed by the
+domain layer when assembling the Observation (specifically FastPathRecord and
 GateContext.template_vars). It is not a framework contract and does not
 appear in DecisionBundle or any core/decision/ type.
 """
@@ -20,7 +20,7 @@ from core.routes import GateRoute
 class ScorerOutput(BaseModel):
     """ATO fast ML scorer output including risk score and SHAP signals.
 
-    Produced by the XGBoost scorer in app/scorer/. The domain layer
+    Produced by the XGBoost scorer in the ATO scorer package. The domain layer
     consumes this to populate FastPathRecord and GateContext.template_vars
     on the outbound Observation before submitting to the DecisionLedger
     framework.

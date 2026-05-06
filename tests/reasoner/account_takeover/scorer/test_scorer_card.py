@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from app.scorer.scorer import AtoScorer
-from app.scorer.trainer import train
+from reasoner.account_takeover.scorer.scorer import AtoScorer
+from reasoner.account_takeover.scorer.trainer import train
 
 if TYPE_CHECKING:
     from pathlib import Path

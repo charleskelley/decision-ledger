@@ -142,7 +142,7 @@ def routing_distribution(
 ) -> dict[str, float]:
     """Fraction of scores landing in each fast-path band.
 
-    Bands match ``app.scorer.scorer._route``: ``< allow_threshold`` →
+    Bands match the scorer's ``_route`` function: ``< allow_threshold`` →
     ``FAST_PATH_ALLOW``; ``> block_threshold`` → ``FAST_PATH_BLOCK``;
     otherwise → ``ROUTE_TO_GATE``.
 

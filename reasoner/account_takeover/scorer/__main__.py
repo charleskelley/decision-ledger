@@ -11,12 +11,12 @@ Subcommands:
 
 Usage::
 
-    uv run python -m app.scorer train \
-        --output app/scorer/models/ato-v1.ubj \
+    uv run python -m reasoner.account_takeover.scorer train \
+        --output reasoner/account_takeover/scorer/models/ato-v1.ubj \
         --samples 5000
 
-    uv run python -m app.scorer eval \
-        --model app/scorer/models/ato-v1.ubj
+    uv run python -m reasoner.account_takeover.scorer eval \
+        --model reasoner/account_takeover/scorer/models/ato-v1.ubj
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ from pathlib import Path
 import numpy as np
 import xgboost as xgb
 
-from app.scorer.eval import (
+from reasoner.account_takeover.scorer.eval import (
     confusion_matrix_at_threshold,
     log_loss,
     precision_recall_at_threshold,
     roc_auc,
     routing_distribution,
 )
-from app.scorer.scorer import (
+from reasoner.account_takeover.scorer.scorer import (
     FAST_PATH_ALLOW_THRESHOLD,
     FAST_PATH_BLOCK_THRESHOLD,
     FEATURE_NAMES,
@@ -47,7 +47,7 @@ _EVAL_SANITY_FLOOR_AUC: float = 0.85
 def _build_parser() -> argparse.ArgumentParser:
     """Construct the argparse hierarchy for ``train`` and ``eval`` subcommands."""
     parser = argparse.ArgumentParser(
-        prog="python -m app.scorer",
+        prog="python -m reasoner.account_takeover.scorer",
         description="ATO XGBoost scorer training and evaluation CLI.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -59,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--output",
         type=Path,
-        default=Path("app/scorer/models/ato-v1.ubj"),
+        default=Path("reasoner/account_takeover/scorer/models/ato-v1.ubj"),
         help="Destination .ubj path (sidecar .json and CSVs go alongside).",
     )
     train_parser.add_argument(
@@ -88,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--model",
         type=Path,
-        default=Path("app/scorer/models/ato-v1.ubj"),
+        default=Path("reasoner/account_takeover/scorer/models/ato-v1.ubj"),
         help="Path to the trained .ubj artifact.",
     )
     eval_parser.add_argument(
@@ -102,7 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_train(args: argparse.Namespace) -> int:
-    from app.scorer.trainer import train
+    from reasoner.account_takeover.scorer.trainer import train
 
     print(
         f"Training ATO scorer: {args.samples} samples → {args.output}",
@@ -125,7 +125,7 @@ def _run_train(args: argparse.Namespace) -> int:
 
 
 def _run_eval(args: argparse.Namespace) -> int:
-    from app.scorer.trainer import _generate_dataset
+    from reasoner.account_takeover.scorer.trainer import _generate_dataset
 
     if not args.model.exists():
         print(f"Model not found: {args.model}", file=sys.stderr)
@@ -134,7 +134,7 @@ def _run_eval(args: argparse.Namespace) -> int:
     # Re-derive a fresh test set with a perturbed seed to avoid the
     # exact-same-distribution-as-training case.
     saved_seed_attr = "_SEED"
-    from app.scorer import trainer as trainer_mod
+    from reasoner.account_takeover.scorer import trainer as trainer_mod
 
     original_seed = getattr(trainer_mod, saved_seed_attr)
     fresh_seed = original_seed + 1

@@ -17,11 +17,13 @@ arms here. The bundle's typed surface (``ResolutionAttempt``) does not
 change.
 
 Schema is created in ``infra/postgres/02_tables.sql`` under the
-``account_takeover`` schema. ``ensure_schema`` here mirrors that DDL so
-the journal can be initialized in a fresh dev database without depending
-on the init scripts having run. The ``evidence jsonb`` column is
+framework-owned ``decisionledger`` schema. ``ensure_schema`` here mirrors
+that DDL so the journal can be initialized in a fresh dev database without
+depending on the init scripts having run. The ``evidence jsonb`` column is
 preserved nullable for backward-compatible reads of pre-DR-21 rows; new
-writes leave it null because typed subclass fields supersede it.
+writes leave it null because typed subclass fields supersede it. Reasoner
+identity is reachable via the ``decision_id`` join to ``decision_bundles``;
+no ``reasoner_id`` column lives on this table.
 """
 
 from __future__ import annotations
@@ -61,8 +63,10 @@ _ATTEMPT_ADAPTER = TypeAdapter(_ResolutionAttemptUnion)
 # DDL — mirrors infra/postgres/02_tables.sql for tests / fresh-DB bootstrapping
 # ---------------------------------------------------------------------------
 
+_CREATE_SCHEMA = "CREATE SCHEMA IF NOT EXISTS decisionledger;"
+
 _CREATE_ATTEMPTS_TABLE = """
-CREATE TABLE IF NOT EXISTS decision_resolution_attempts (
+CREATE TABLE IF NOT EXISTS decisionledger.decision_resolution_attempts (
     attempt_id        TEXT        PRIMARY KEY,
     decision_id       TEXT        NOT NULL,
     attempt_sequence  INTEGER     NOT NULL,
@@ -81,12 +85,12 @@ CREATE TABLE IF NOT EXISTS decision_resolution_attempts (
 
 _CREATE_DECISION_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_resolution_attempts_decision_id "
-    "ON decision_resolution_attempts (decision_id);"
+    "ON decisionledger.decision_resolution_attempts (decision_id);"
 )
 
 _CREATE_STATUS_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_resolution_attempts_status "
-    "ON decision_resolution_attempts (status);"
+    "ON decisionledger.decision_resolution_attempts (status);"
 )
 
 
@@ -119,6 +123,7 @@ class ResolutionJournal:
         Idempotent — safe to call on every startup.
         """
         with self._conn.cursor() as cur:
+            cur.execute(_CREATE_SCHEMA)
             cur.execute(_CREATE_ATTEMPTS_TABLE)
             cur.execute(_CREATE_DECISION_INDEX)
             cur.execute(_CREATE_STATUS_INDEX)
@@ -149,7 +154,7 @@ class ResolutionJournal:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO decision_resolution_attempts
+                INSERT INTO decisionledger.decision_resolution_attempts
                     (attempt_id, decision_id, attempt_sequence,
                      started_at, completed_at,
                      resolver_kind, resolver_id, status, resolution_action,
@@ -203,7 +208,7 @@ class ResolutionJournal:
             cur.execute(
                 """
                 SELECT payload
-                FROM decision_resolution_attempts
+                FROM decisionledger.decision_resolution_attempts
                 WHERE decision_id = %s
                 ORDER BY attempt_sequence ASC
                 """,

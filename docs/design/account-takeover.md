@@ -33,13 +33,13 @@ deployments would replace each with operational artifacts.
 
 | Layer | Module | Responsibility |
 |---|---|---|
-| Ingestion | `app/ingestion/` | Redis Streams consumer + SHA-256 dedup; produces typed `LoginEvent`s. |
-| Features | `app/features/` | Redis sliding-window velocity + novelty + impossible-travel; produces `AtoFeatureVector`. |
-| Scorer | `app/scorer/` | XGBoost binary-logistic with TreeSHAP attribution; produces `ScorerOutput` (risk + signals + route). |
+| Ingestion | `reasoner/account_takeover/ingestion/` | Redis Streams consumer + SHA-256 dedup; produces typed `LoginEvent`s. |
+| Features | `reasoner/account_takeover/feature_service.py` | Redis sliding-window velocity + novelty + impossible-travel; produces `AtoFeatureVector`. |
+| Scorer | `reasoner/account_takeover/scorer/` | XGBoost binary-logistic with TreeSHAP attribution; produces `ScorerOutput` (risk + signals + route). |
 | Assembler | `reasoner/account_takeover/assembler.py` | Composes event + features + scorer output into a typed `Observation` with populated `ReasonerContext` and `GateContext`. |
 | API | `app/main.py` | FastAPI surface; orchestrates the pipeline per request. |
 
-The boundaries are intentional. `app/scorer/` knows about XGBoost; `core/`
+The boundaries are intentional. `reasoner/account_takeover/scorer/` knows about XGBoost; `core/`
 doesn't. `reasoner/account_takeover/` knows about login events;
 `core/observation/` doesn't. Adding a different reasoner means following
 this layering, not modifying the framework.
@@ -57,7 +57,7 @@ two confidence-band thresholds:
 | `0.20 – 0.85` | `ROUTE_TO_GATE` | Run retrieval + LLM policy gate; enforcement consumes verdict. |
 | `> 0.85` | `FAST_PATH_BLOCK` | Skip retrieval + gate; enforcement applies blocking default. |
 
-The thresholds live as public constants in `app/scorer/scorer.py`
+The thresholds live as public constants in `reasoner/account_takeover/scorer/scorer.py`
 (`FAST_PATH_ALLOW_THRESHOLD`, `FAST_PATH_BLOCK_THRESHOLD`) and are recorded
 in the `ModelCard` sidecar at training time so the routing distribution
 captured against the test set is interpretable later.
@@ -88,7 +88,7 @@ contract specification.
 ### Data
 
 Synthetic feature rows from five archetype distributions inside
-`app/scorer/trainer.py:_generate_sample()`:
+`reasoner/account_takeover/scorer/trainer.py:_generate_sample()`:
 
 | Archetype | Sampled prevalence | Pattern |
 |---|---|---|
@@ -100,7 +100,7 @@ Synthetic feature rows from five archetype distributions inside
 
 The training set is generated in-memory from these archetypes; the exact
 train and test partitions are persisted as CSV alongside the committed model
-(`app/scorer/models/ato-v1.{train,test}.csv`) for reproducibility and
+(`reasoner/account_takeover/scorer/models/ato-v1.{train,test}.csv`) for reproducibility and
 inspection.
 
 The archetype distributions are *qualitatively informed* by published
@@ -120,7 +120,7 @@ which events need the LLM gate's attention.
 
 ### Train / test split + evaluation
 
-`train()` in `app/scorer/trainer.py`:
+`train()` in `reasoner/account_takeover/scorer/trainer.py`:
 
 1. Generates the dataset (default: 5000 samples).
 2. Deterministic 80/20 split (numpy permutation, seed 42).
@@ -134,18 +134,18 @@ which events need the LLM gate's attention.
 Run:
 
 ```bash
-make train       # 5000 samples → app/scorer/models/ato-v1.{ubj,json,train.csv,test.csv}
+make train       # 5000 samples → reasoner/account_takeover/scorer/models/ato-v1.{ubj,json,train.csv,test.csv}
 make eval-model  # Re-evaluate on a fresh-seed test set; exits non-zero if test_auc < 0.85
 ```
 
 ### Model card and integrity
 
-The `ModelCard` (in `app/scorer/model_card.py`) is the persisted contract
+The `ModelCard` (in `reasoner/account_takeover/scorer/model_card.py`) is the persisted contract
 between training and runtime. At load time, `AtoScorer.__init__`
 validates two integrity properties:
 
 - `feature_names` in the card matches `FEATURE_NAMES` in
-  `app/scorer/scorer.py`. Mismatch → `ValueError` (catches schema drift
+  `reasoner/account_takeover/scorer/scorer.py`. Mismatch → `ValueError` (catches schema drift
   between training and inference).
 - `artifact_sha256` in the card matches the binary on disk. Mismatch →
   `ValueError` (catches post-write tampering).
@@ -192,7 +192,7 @@ not a production fraud detector. Every choice below reflects that scope.
   the reference implementation introduces infrastructure that doesn't
   pay for itself at MVP scope. A production deployment would likely
   replace this with Feast, Tecton, or a custom Kafka-backed store; the
-  feature contract in `app/features/` is small enough to swap.
+  feature contract in `reasoner/account_takeover/feature_service.py` is small enough to swap.
 
 - **Commit the model artifact (and train/test CSVs).** Sub-MB total; the
   cost is a binary in git. The benefit is `git clone && uvicorn` works

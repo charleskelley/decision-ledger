@@ -1,27 +1,18 @@
 """Unit tests for PolicyRetriever pure functions.
 
-Tests for rrf_fuse and build_query do not require Docker — infrastructure
-dependencies are mocked at construction time.
+Tests for rrf_fuse and rerank do not require Docker — infrastructure
+dependencies are mocked at construction time. Domain-specific query
+construction lives in ``reasoner/account_takeover/retrieval_query.py``
+and is exercised by ``tests/reasoner/account_takeover/test_retrieval_query.py``.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
-from uuid import uuid4
 
 from app.retrieval.retriever import PolicyRetriever
-from core.observation import Contribution
-from core.routes import GateRoute
 from core.snippet import RetrievedSnippet
-from reasoner.account_takeover.events import (
-    AuthMethod,
-    AuthOutcome,
-    Geolocation,
-    LoginEvent,
-)
-from reasoner.account_takeover.scorer import ScorerOutput
 
 _CORPUS_DIR = Path(__file__).parents[2] / "corpus"
 
@@ -56,46 +47,6 @@ def _make_snippet(
         text="Sample text.",
         relevance_score=relevance_score,
         retrieval_path="rrf_only",
-    )
-
-
-def _make_event(auth_method: AuthMethod = AuthMethod.PASSWORD) -> LoginEvent:
-    return LoginEvent(
-        event_id="evt-unit-001",
-        timestamp=datetime.now(UTC),
-        account_id="acct-001",
-        session_id="sess-001",
-        ip_address="203.0.113.1",
-        geolocation=Geolocation(
-            latitude=37.77,
-            longitude=-122.42,
-            country="US",
-            city="San Francisco",
-            asn="AS7922",
-        ),
-        device_fingerprint="fp-abc",
-        user_agent="Mozilla/5.0",
-        auth_method=auth_method,
-        outcome=AuthOutcome.SUCCESS,
-    )
-
-
-def _make_scorer_output(feature_names: list[str]) -> ScorerOutput:
-    return ScorerOutput(
-        entity_id=uuid4(),
-        risk_score=0.7,
-        top_signals=[
-            Contribution(
-                feature_name=name,
-                feature_value=1.0,
-                method="shap",
-                value=0.3,
-            )
-            for name in feature_names
-        ],
-        scorer_version="xgb-v1.0.0",
-        inference_latency_ms=2.5,
-        route=GateRoute.ROUTE_TO_GATE,
     )
 
 
@@ -160,78 +111,6 @@ def test_rrf_fuse_deduplicates_by_full_snippet_key():
     fused = r.rrf_fuse([a], [b], k=5)
 
     assert len(fused) == 2
-
-
-# ---------------------------------------------------------------------------
-# build_query
-# ---------------------------------------------------------------------------
-
-
-def test_build_query_maps_impossible_travel_signal():
-    """impossible_travel signal maps to geographic block terminology."""
-    r = _make_retriever()
-    event = _make_event()
-    scorer = _make_scorer_output(["impossible_travel"])
-
-    query = r.build_query(event, scorer)
-
-    assert "impossible travel" in query.lower()
-
-
-def test_build_query_includes_auth_method_terms():
-    """Auth method is appended to the query regardless of signals."""
-    r = _make_retriever()
-    event = _make_event(auth_method=AuthMethod.MFA_TOTP)
-    scorer = _make_scorer_output([])
-
-    query = r.build_query(event, scorer)
-
-    assert "TOTP" in query or "MFA" in query
-
-
-def test_build_query_falls_back_when_no_signals_or_method():
-    """Returns the generic fallback when no signals and no known auth method map."""
-    r = _make_retriever()
-    event = _make_event(auth_method=AuthMethod.PASSWORD)
-    # Empty signal list — no known terms, but auth method contributes
-    scorer = _make_scorer_output([])
-
-    query = r.build_query(event, scorer)
-
-    # PASSWORD maps to a term, so fallback should not trigger
-    assert query != ""
-
-
-def test_build_query_uses_generic_fallback_for_empty_everything():
-    """Returns generic fallback when signals are unknown and auth method is unknown."""
-    r = _make_retriever()
-    event = _make_event(auth_method=AuthMethod.PASSWORD)
-    # Contributions with unrecognised feature names, no auth method term gap
-    scorer = _make_scorer_output(["unknown_feature_xyz"])
-
-    query = r.build_query(event, scorer)
-
-    # Should still include PASSWORD term (not the generic fallback)
-    assert "password" in query.lower() or "credential" in query.lower()
-
-
-def test_build_query_uses_top_3_signals_only():
-    """Only the top-3 SHAP signals contribute terms to the query."""
-    r = _make_retriever()
-    event = _make_event()
-    scorer = _make_scorer_output(
-        [
-            "impossible_travel",
-            "velocity_1min",
-            "device_novelty",
-            "geo_novelty",  # 4th — should be ignored
-        ]
-    )
-
-    query = r.build_query(event, scorer)
-
-    # "geo_novelty" is 4th so its term should not appear
-    assert "geographic anomaly new country" not in query
 
 
 # ---------------------------------------------------------------------------

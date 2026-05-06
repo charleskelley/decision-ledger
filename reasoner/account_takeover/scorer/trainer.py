@@ -13,9 +13,9 @@ context, performance, and routing sanity.
 Usage::
 
     from pathlib import Path
-    from app.scorer.trainer import train
+    from reasoner.account_takeover.scorer.trainer import train
 
-    card = train(model_path=Path("app/scorer/models/ato-v1.ubj"))
+    card = train(model_path=Path("reasoner/account_takeover/scorer/models/ato-v1.ubj"))
     print(card.training.test_auc)
 """
 
@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from app.scorer.eval import (
+from reasoner.account_takeover.scorer.eval import (
     TrainingReport,
     confusion_matrix_at_threshold,
     log_loss,
@@ -39,8 +39,8 @@ from app.scorer.eval import (
     roc_auc,
     routing_distribution,
 )
-from app.scorer.model_card import ModelCard
-from app.scorer.scorer import (
+from reasoner.account_takeover.scorer.model_card import ModelCard
+from reasoner.account_takeover.scorer.scorer import (
     FAST_PATH_ALLOW_THRESHOLD,
     FAST_PATH_BLOCK_THRESHOLD,
     FEATURE_NAMES,
@@ -268,7 +268,7 @@ def _persist_dataset(x: np.ndarray, y: np.ndarray, *, path: Path) -> None:
 
     Columns are ``FEATURE_NAMES`` followed by ``label``.
     """
-    df = pd.DataFrame(x, columns=FEATURE_NAMES)  # type: ignore[arg-type]
+    df = pd.DataFrame(x, columns=FEATURE_NAMES)
     df["label"] = y
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
