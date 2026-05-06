@@ -54,6 +54,7 @@ from elasticsearch.helpers import bulk
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
+from app.settings import FrameworkSettings
 from core.gate import PolicyDocument
 
 log = structlog.get_logger(__name__)
@@ -68,8 +69,6 @@ _ES_MAPPING_PATH = _PROJECT_ROOT / "infra" / "elasticsearch" / "policy-chunks.js
 
 _MODEL_NAME = "all-MiniLM-L6-v2"
 _ES_INDEX = "policy-chunks"
-_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
-_ES_URL = "http://localhost:9200"
 
 _CHUNK_MAX_WORDS = 300
 _CHUNK_MIN_WORDS = 30
@@ -353,6 +352,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Build DSN + ES URL from FrameworkSettings so the loader honors whatever
+    # the local .env / docker-compose stack actually configured. Avoids
+    # silently mismatching when POSTGRES_PASSWORD is anything but the
+    # docker-compose default.
+    fw = FrameworkSettings()
+    pg_dsn = fw.postgres_dsn
+    es_url = fw.elasticsearch_url
+
     log.info("corpus_loader.start", reasoner_id=args.reasoner_id, wipe=args.wipe)
 
     # Load embedding model
@@ -397,7 +404,7 @@ def main() -> None:
     log.info("corpus_loader.embedding_done")
 
     # Write to PostgreSQL
-    with psycopg.connect(_PG_DSN) as conn:
+    with psycopg.connect(pg_dsn) as conn:
         register_vector(conn)
 
         if args.wipe:
@@ -431,7 +438,7 @@ def main() -> None:
     log.info("corpus_loader.postgres_done", chunks=len(all_chunks))
 
     # Write to Elasticsearch
-    es = Elasticsearch(_ES_URL)
+    es = Elasticsearch(es_url)
     _ensure_es_index(es)
 
     if args.wipe:
