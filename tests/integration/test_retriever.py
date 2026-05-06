@@ -17,11 +17,15 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
 from app.retrieval.retriever import PolicyRetriever
+from app.settings import FrameworkSettings
 
 pytestmark = pytest.mark.integration
 
-_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
-_ES_URL = "http://localhost:9200"
+# Read the DSN + ES URL from FrameworkSettings so the tests honor whatever
+# the local .env / docker-compose stack actually configured.
+_FW = FrameworkSettings()
+_PG_DSN = _FW.postgres_dsn
+_ES_URL = _FW.elasticsearch_url
 _MODEL_NAME = "all-MiniLM-L6-v2"
 
 

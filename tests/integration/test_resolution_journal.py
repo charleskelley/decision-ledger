@@ -26,6 +26,7 @@ import psycopg
 import pytest
 
 from app.audit.resolution_journal import ResolutionJournal
+from app.settings import FrameworkSettings
 from core.actions import DecisionAction
 from core.resolution import (
     HumanResolutionAttempt,
@@ -36,7 +37,9 @@ from core.resolution import (
 
 pytestmark = pytest.mark.integration
 
-_PG_DSN = "postgresql://decisionledger:decisionledger@localhost:5432/decisionledger"
+# Read the DSN from FrameworkSettings so the test honors whatever credentials
+# the local .env / docker-compose stack actually used to initialize Postgres.
+_PG_DSN = FrameworkSettings().postgres_dsn
 
 
 # ---------------------------------------------------------------------------
