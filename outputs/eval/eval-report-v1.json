@@ -1,0 +1,103 @@
+{
+  "run_id": "f84defaf-be02-403a-b478-4f01364c990e",
+  "created_at": "2026-05-06T18:00:20.632998Z",
+  "overall_passed": true,
+  "dimensions": [
+    {
+      "dimension": "retrieval",
+      "passed": true,
+      "metrics": {
+        "context_precision_at_k": 0.6667,
+        "context_recall_at_k": 0.9167,
+        "mean_reciprocal_rank": 0.9167,
+        "version_resolution_accuracy": 1.0,
+        "jurisdiction_filter_accuracy": 1.0
+      },
+      "threshold_violations": [],
+      "evaluated_at": "2026-05-06T17:59:53.109523Z",
+      "num_samples": 12
+    },
+    {
+      "dimension": "faithfulness",
+      "passed": true,
+      "metrics": {
+        "ragas_faithfulness": 0.6687,
+        "llm_judge_grounding": 0.9062,
+        "citation_rationale_overlap": 0.689,
+        "hallucination_rate": 0.0
+      },
+      "threshold_violations": [],
+      "evaluated_at": "2026-05-06T18:00:20.632881Z",
+      "num_samples": 8
+    },
+    {
+      "dimension": "consistency",
+      "passed": true,
+      "metrics": {
+        "action_stability_rate": 1.0,
+        "confidence_variance": 0.0,
+        "rationale_semantic_similarity": 1.0
+      },
+      "threshold_violations": [],
+      "evaluated_at": "2026-05-06T17:59:53.498352Z",
+      "num_samples": 12
+    },
+    {
+      "dimension": "citation",
+      "passed": true,
+      "metrics": {
+        "citation_relevance_score": 1.0,
+        "claim_citation_entailment": 1.0,
+        "superficial_citation_rate": 0.0
+      },
+      "threshold_violations": [],
+      "evaluated_at": "2026-05-06T17:59:58.615425Z",
+      "num_samples": 4
+    },
+    {
+      "dimension": "robustness",
+      "passed": true,
+      "metrics": {
+        "injection_resistance_rate": 1.0,
+        "schema_violation_handling": 1.0,
+        "novel_pattern_action_accuracy": 1.0,
+        "fallback_behavior_correctness": 1.0
+      },
+      "threshold_violations": [],
+      "evaluated_at": "2026-05-06T17:59:54.317578Z",
+      "num_samples": 12
+    }
+  ],
+  "retrieval": {
+    "k": 5,
+    "context_precision_at_k": 0.6667,
+    "context_recall_at_k": 0.9167,
+    "mean_reciprocal_rank": 0.9167,
+    "version_resolution_accuracy": 1.0,
+    "jurisdiction_filter_accuracy": 1.0
+  },
+  "faithfulness": {
+    "ragas_faithfulness": 0.6687,
+    "llm_judge_grounding": 0.9062,
+    "citation_rationale_overlap": 0.689,
+    "hallucination_rate": 0.0
+  },
+  "consistency": {
+    "num_scenarios": 4,
+    "num_orderings": 3,
+    "action_stability_rate": 1.0,
+    "confidence_variance": 0.0,
+    "rationale_semantic_similarity": 1.0
+  },
+  "citation": {
+    "citation_relevance_score": 1.0,
+    "claim_citation_entailment": 1.0,
+    "superficial_citation_rate": 0.0
+  },
+  "robustness": {
+    "injection_resistance_rate": 1.0,
+    "schema_violation_handling": 1.0,
+    "novel_pattern_action_accuracy": 1.0,
+    "fallback_behavior_correctness": 1.0
+  }
+}
