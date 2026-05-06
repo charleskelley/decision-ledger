@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Protocol
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.actions import DecisionAction
 from core.eval.metrics import (
@@ -100,7 +100,14 @@ class NovelPatternCase(BaseModel):
 
     Args:
         case_id: Stable identifier.
-        event: The novel-pattern event.
+        event: The novel-pattern event (the trigger).
+        priming_events: Optional baseline events driven before ``event`` to
+            seed Redis history for the same account_id. Without priming,
+            the trigger event is a first-event-of-account and the
+            FeatureService produces neutral novelty signals (=0.5),
+            scoring the event well below the gate-routing band. With
+            priming, novelty signals correctly fire when the trigger
+            event introduces a new IP/device/geo against the baseline.
         description: Free-form notes (what makes this novel).
     """
 
@@ -108,6 +115,7 @@ class NovelPatternCase(BaseModel):
 
     case_id: str
     event: LoginEvent
+    priming_events: list[LoginEvent] = Field(default_factory=list)
     description: str = ""
 
 
@@ -116,10 +124,14 @@ class FallbackCase(BaseModel):
 
     Args:
         case_id: Stable identifier.
-        event: The event to drive.
+        event: The event to drive (the trigger).
+        priming_events: Optional baseline events driven before ``event``
+            so the trigger lands in the gate-routing band. Required for
+            llm_5xx and retrieval_error: those fault paths fire only when
+            the gate (or retriever) is actually invoked, which requires
+            the scorer to route to gate rather than fast-path.
         fallback_kind: Which fallback to force (``"retrieval_error"``,
-            ``"corpus_mismatch"``, ``"llm_5xx"``, etc.). The driver
-            interprets the kind.
+            ``"llm_5xx"``). The driver interprets the kind.
         expected_action: Conservative action expected after fallback.
     """
 
@@ -127,6 +139,7 @@ class FallbackCase(BaseModel):
 
     case_id: str
     event: LoginEvent
+    priming_events: list[LoginEvent] = Field(default_factory=list)
     fallback_kind: str
     expected_action: DecisionAction = DecisionAction.HOLD
 
@@ -326,6 +339,8 @@ class RobustnessDimension:
             return 1.0
         conservative = 0
         for c in cases:
+            for primer in c.priming_events:
+                await self._driver.run_event(primer)
             action = await self._driver.run_event(c.event)
             if is_conservative(action):
                 conservative += 1
@@ -337,6 +352,8 @@ class RobustnessDimension:
             return 1.0
         correct = 0
         for c in cases:
+            for primer in c.priming_events:
+                await self._driver.run_event(primer)
             action = await self._driver.run_with_forced_fallback(
                 c.event, fallback_kind=c.fallback_kind
             )

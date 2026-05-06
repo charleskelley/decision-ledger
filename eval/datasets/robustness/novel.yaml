@@ -10,13 +10,50 @@
 # the safety guarantee is "no novel pattern routes to ALLOW," not exact
 # bucketing into HOLD vs BLOCK).
 #
-# Patterns covered:
-#   - Newly-created account, sparse history (likely Tier 3 HOLD).
-#   - Rare auth_method/geo combination (likely Tier 4).
-#   - First-time device + first-time geo simultaneously (Tier 4 candidate).
+# Priming events: each case drives 2 baseline events with the same
+# account_id before the trigger event. Without priming, the trigger is a
+# first-event-of-account and the FeatureService produces neutral novelty
+# signals (=0.5) — the scorer outputs ~0.0 and the event fast-paths to
+# ALLOW, bypassing the enforcement tiers we're testing. With priming, the
+# trigger introduces real novelty (new IP/device/geo against the
+# established baseline) and the score elevates into the routing band.
 
 cases:
   - case_id: novel-001-sparse-account-sso-new-region
+    priming_events:
+      # Established US baseline — same account, two prior events from one
+      # device/IP/region. Each fast-paths to ALLOW (no LLM cost) but
+      # writes feature history to Redis.
+      - event_id: evt-novel-001-prime-1
+        timestamp: 2026-04-13T10:00:00Z
+        account_id: acct-novel-001-just-created
+        session_id: sess_novel_001_p1
+        ip_address: 73.158.42.10
+        geolocation:
+          latitude: 37.7749
+          longitude: -122.4194
+          country: US
+          city: San Francisco
+          asn: AS7922
+        device_fingerprint: "novel001home:novel001home:novel001home:novel001home:novel001home"
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+        auth_method: SSO
+        outcome: SUCCESS
+      - event_id: evt-novel-001-prime-2
+        timestamp: 2026-04-13T18:30:00Z
+        account_id: acct-novel-001-just-created
+        session_id: sess_novel_001_p2
+        ip_address: 73.158.42.10
+        geolocation:
+          latitude: 37.7749
+          longitude: -122.4194
+          country: US
+          city: San Francisco
+          asn: AS7922
+        device_fingerprint: "novel001home:novel001home:novel001home:novel001home:novel001home"
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+        auth_method: SSO
+        outcome: SUCCESS
     event:
       event_id: evt-novel-001
       timestamp: 2026-04-14T08:14:00Z
@@ -34,12 +71,43 @@ cases:
       auth_method: SSO
       outcome: SUCCESS
     description: >
-      Brand-new account (first observed in this run), single-event history,
-      via SSO from a region the account has no prior presence in. The scorer
-      has no learned pattern for this combination — enforcement should
-      route conservatively.
+      US-baseline account suddenly attempts SSO from Sydney AU on a
+      never-seen device. Triple-novel signal (new IP + new device +
+      new country) elevates the scorer into the gate-routing band;
+      enforcement should land conservatively.
 
   - case_id: novel-002-magic-link-from-mobile-asn
+    priming_events:
+      - event_id: evt-novel-002-prime-1
+        timestamp: 2026-04-13T09:00:00Z
+        account_id: acct-novel-002-fresh
+        session_id: sess_novel_002_p1
+        ip_address: 73.158.50.20
+        geolocation:
+          latitude: 47.6062
+          longitude: -122.3321
+          country: US
+          city: Seattle
+          asn: AS7922
+        device_fingerprint: "novel002home:novel002home:novel002home:novel002home:novel002home"
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0"
+        auth_method: PASSWORD
+        outcome: SUCCESS
+      - event_id: evt-novel-002-prime-2
+        timestamp: 2026-04-13T19:15:00Z
+        account_id: acct-novel-002-fresh
+        session_id: sess_novel_002_p2
+        ip_address: 73.158.50.20
+        geolocation:
+          latitude: 47.6062
+          longitude: -122.3321
+          country: US
+          city: Seattle
+          asn: AS7922
+        device_fingerprint: "novel002home:novel002home:novel002home:novel002home:novel002home"
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0"
+        auth_method: PASSWORD
+        outcome: SUCCESS
     event:
       event_id: evt-novel-002
       timestamp: 2026-04-14T11:27:00Z
@@ -57,12 +125,43 @@ cases:
       auth_method: MAGIC_LINK
       outcome: SUCCESS
     description: >
-      Magic-link authentication from a mobile carrier ASN in a new region.
-      The combination is rare in training and SHOULD trigger conservative
-      routing — magic-link compromise is a known credential-stuffing
-      side-channel.
+      US-baseline account attempts magic-link authentication from a
+      Mumbai mobile ASN on a never-seen device. The combination is rare
+      in training and SHOULD trigger conservative routing — magic-link
+      compromise is a known credential-stuffing side-channel.
 
   - case_id: novel-003-passkey-failed-then-success-rapid
+    priming_events:
+      - event_id: evt-novel-003-prime-1
+        timestamp: 2026-04-13T08:00:00Z
+        account_id: acct-novel-003-new
+        session_id: sess_novel_003_p1
+        ip_address: 73.158.60.30
+        geolocation:
+          latitude: 40.7128
+          longitude: -74.0060
+          country: US
+          city: New York
+          asn: AS7018
+        device_fingerprint: "novel003home:novel003home:novel003home:novel003home:novel003home"
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+        auth_method: PASSKEY
+        outcome: SUCCESS
+      - event_id: evt-novel-003-prime-2
+        timestamp: 2026-04-13T20:30:00Z
+        account_id: acct-novel-003-new
+        session_id: sess_novel_003_p2
+        ip_address: 73.158.60.30
+        geolocation:
+          latitude: 40.7128
+          longitude: -74.0060
+          country: US
+          city: New York
+          asn: AS7018
+        device_fingerprint: "novel003home:novel003home:novel003home:novel003home:novel003home"
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) Safari/605.1.15"
+        auth_method: PASSKEY
+        outcome: SUCCESS
     event:
       event_id: evt-novel-003
       timestamp: 2026-04-14T13:48:00Z
@@ -80,7 +179,7 @@ cases:
       auth_method: PASSKEY
       outcome: SUCCESS
     description: >
-      Passkey success from a never-seen device on a never-seen network.
-      The scorer's training distribution is dominated by repeat-device
-      passkey usage; new-device passkey adoption looks anomalous and
-      should land on a conservative action.
+      NY-baseline account attempts passkey auth from Berlin on a
+      never-seen device. Passkey is normally tied to a specific
+      authenticator; cross-device cross-region passkey use is a
+      credential-migration signal that requires conservative handling.
