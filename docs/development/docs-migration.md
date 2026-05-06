@@ -98,6 +98,7 @@ Check the following at each interval and update this document with findings:
 
 | Date | Check |
 |------|-------|
+| **2026-05-06** | Status check (no migration). Latest Zensical release is **v0.0.40** (2026-05-04); weekly release cadence with ongoing API changes; no public ETA for 1.0. Drop-in compatibility with `mkdocs.yml`, the custom `extra.css` / `color-swatches.js` (HTML structure preserved), and `pymdownx.*` (Python Markdown extensions still work) is confirmed by upstream — so waiting costs nothing. Bar not met: 1.0 missing and no 3-month stability window. Defer per existing schedule; next review 2026-06-01. |
 | **2026-06-01** | Has Zensical published a 1.0 release candidate or roadmap? Has the PyMdown Extensions compatibility story clarified? Is ProperDocs still actively maintained, or has it stalled? |
 | **2026-09-01** | Has Zensical 1.0 shipped? Are any early adopters in the Material community reporting stable migrations? |
 | **2026-12-01** | Full evaluation against all stability targets above. If all targets are met, draft a migration plan for the following quarter. |

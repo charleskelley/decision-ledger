@@ -118,7 +118,7 @@ Populates:
 
 **Error handling:** Any failure in context assembly → raise `AssemblerError`, route event to `HOLD`.
 
-See [`docs/design/reasoner-handoff.md`](./reasoner-handoff.md) for the full field-level contract.
+See [`reasoner/reasoner-handoff.md`](reasoner/reasoner-handoff.md) for the full field-level contract.
 
 ---
 

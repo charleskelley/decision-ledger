@@ -608,6 +608,7 @@ dev = [
     { name = "sqlfluff" },
 ]
 docs = [
+    { name = "mkdocs" },
     { name = "mkdocs-material" },
 ]
 
@@ -651,7 +652,10 @@ dev = [
     { name = "ruff", specifier = ">=0.5,<1" },
     { name = "sqlfluff", specifier = ">=3.1,<4" },
 ]
-docs = [{ name = "mkdocs-material", specifier = ">=9.5,<10" }]
+docs = [
+    { name = "mkdocs", specifier = ">=1.6,<2" },
+    { name = "mkdocs-material", specifier = ">=9.5,<10" },
+]
 
 [[package]]
 name = "decorator"

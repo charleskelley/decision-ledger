@@ -100,12 +100,13 @@ dev = [
 ]
 docs = [
     # --- Documentation ---
+    "mkdocs>=1.6,<2",
     "mkdocs-material>=9.5,<10",
 ]
 
 [project.urls]
 Repository = "https://github.com/charleskelley/decision-ledger"
-Documentation = "https://github.com/charleskelley/decision-ledger/tree/main/docs"
+Documentation = "https://charleskelley.github.io/decision-ledger/"
 Issues = "https://github.com/charleskelley/decision-ledger/issues"
 
 # =============================================================================

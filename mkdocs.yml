@@ -61,11 +61,21 @@ nav:
     - Data Model: design/data.md
     - Interfaces: design/interface.md
     - Infrastructure: design/infrastructure.md
+    - Gates: design/gates.md
+    - Policy Corpus: design/policy-corpus.md
+    - Scenarios: design/scenarios.md
     - Evaluation: design/evaluation.md
     - Decisions: design/decisions.md
+  - Reasoners:
+    - Reasoner Abstraction: design/reasoner/reasoner.md
+    - Reasoner Handoff: design/reasoner/reasoner-handoff.md
+    - Account Takeover: design/reasoner/account-takeover.md
+  - Operations:
+    - Secrets: operations/secrets.md
   - Development:
     - Contributing: development/contributing.md
     - Style Guide: development/style.md
+    - Local Runbook: development/runbook-local.md
     - Design Palette: development/design-palette.md
     - Docs Migration: development/docs-migration.md
 

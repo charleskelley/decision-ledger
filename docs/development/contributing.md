@@ -92,7 +92,7 @@ uv run python -m decision_ledger.audit replay --id <bundle_id>
    feat(scorer): add SHAP value extraction to scorer output
    ```
 
-5. **Push and open a PR** against `main`. CI will run lint, tests, and the eval harness automatically.
+5. **Push and open a PR** against `main`. CI runs lint, typecheck, unit tests, and integration/smoke against service containers on every push and PR. The 5D eval harness runs nightly and on demand via `workflow_dispatch` — invoke it manually before a release candidate.
 
 ### What Makes a Good PR
 
@@ -238,18 +238,26 @@ Golden set changes are high-impact and require careful review.
 
 ## CI Pipeline
 
-GitHub Actions runs on every push to `main` and every PR:
+GitHub Actions runs three workflows:
 
-```
-lint (Ruff) → typecheck (pyright) → unit tests → integration tests → eval harness → gate check
-```
+| Workflow             | Trigger                            | What it runs                                                                     |
+|----------------------|------------------------------------|----------------------------------------------------------------------------------|
+| `ci.yaml`            | Push to `main`, PR to `main`       | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
+| `integration.yaml`   | Push to `main`, PR to `main`       | `make test-integration` + `make test-smoke` against service containers           |
+| `eval.yaml`          | `workflow_dispatch` + nightly cron | `make eval` — full 5D harness; uploads the report as a workflow artifact         |
 
-- **Gate check** compares eval scores against defined thresholds. If any dimension regresses below its threshold, the pipeline fails.
-- **Replay test** (part of integration tests): loads 20 random Decision Bundles and replays them. Output must be byte-identical to the original.
+- **Gate check.** The eval harness compares each dimension's score against its
+  threshold. Any regression below threshold fails the workflow.
+- **Replay test** (part of integration tests): loads N Decision Bundles and
+  replays them. Output must be byte-identical to the original.
+- **Pre-push hook.** `make install-hooks` wires `make verify-push` as a
+  pre-push hook, so locally validated state matches what CI sees.
 
-### CI Must Pass Before Merge
+### Quality and Integration Must Pass Before Merge
 
-No exceptions. If CI is broken, fix it before merging anything else. A red main branch blocks everyone.
+No exceptions on `ci.yaml` and `integration.yaml`. The eval workflow is
+nightly — drive it manually via `workflow_dispatch` to validate a release
+candidate before promoting a new baseline.
 
 ---
 

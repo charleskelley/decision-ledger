@@ -1,7 +1,9 @@
 # Evaluation
 
-The 5D evaluation framework that governs every release candidate. All dimensions
-run in CI on every PR to `main`. A failing dimension blocks the merge.
+The 5D evaluation framework that governs every release candidate. The harness
+runs nightly via GitHub Actions and on demand via `workflow_dispatch`; quality
+and integration gates run on every push to `main` and every PR. A failing
+dimension blocks promotion of the eval baseline.
 
 ![Evaluation Harness — 5D Governance Gate](../assets/diagrams/eval-harness.svg)
 
@@ -249,32 +251,35 @@ Fallback Behavior            = 1.0   (zero tolerance — every error must route 
 # Full eval gate (all 5 dimensions)
 make eval
 
-# Individual dimensions
-uv run python -m eval.harness run --dimension retrieval
-uv run python -m eval.harness run --dimension faithfulness
-uv run python -m eval.harness run --dimension consistency
-uv run python -m eval.harness run --dimension citation
-uv run python -m eval.harness run --dimension adversarial
+# Equivalent direct invocation
+uv run python -m eval.runners.harness
 
-# Generate a threshold report
-uv run python -m eval.harness report
+# Write the report to a custom path
+uv run python -m eval.runners.harness --output /tmp/eval-report.json
 ```
+
+The harness builds the default dimension set, runs every dimension against the
+golden datasets under `eval/datasets/`, and writes a structured `EvalReport`
+JSON to `outputs/stage/eval/eval-report.json`. Exit codes: `0` if every
+dimension cleared its threshold, `1` if any dimension failed, `2` for config
+errors (missing API keys, no dimensions registered). The committed baseline
+lives at `outputs/eval/eval-report-v1.json`.
 
 ---
 
 ## CI Integration
 
-The eval gate runs on every PR to `main` via GitHub Actions. The workflow:
+CI is split across three workflows. The 5D harness is **not** invoked on every
+push — it costs money and depends on cross-family LLM API keys.
 
-1. Lint and type check
-2. Unit tests (`make test`)
-3. Integration tests (`make test-integration`) — requires Docker
-4. Replay check — 20 random bundles replayed, byte-identical assertion
-5. Eval gate (`make eval`) — all 5 dimensions against CI thresholds
+| Workflow                                       | Trigger                                | What it runs                                                          |
+|------------------------------------------------|----------------------------------------|-----------------------------------------------------------------------|
+| `.github/workflows/ci.yaml`                    | Push to `main`, PR to `main`           | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
+| `.github/workflows/integration.yaml`           | Push to `main`, PR to `main`           | `make test-integration` + `make test-smoke` against service containers (Redis, pgvector, Elasticsearch) |
+| `.github/workflows/eval.yaml`                  | `workflow_dispatch` + nightly cron     | `make eval` against the live stack; uploads the report as an artifact |
 
-A PR that fails any step cannot be merged. Eval failures produce a structured
-report identifying which dimension failed, which scenario triggered the failure,
-and the delta from the threshold.
+Quality and integration gates block PR merges. The eval harness produces the
+governance baseline that promotes a release candidate.
 
 ### Cost Management
 

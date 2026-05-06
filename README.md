@@ -6,6 +6,11 @@
   <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/ci.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
   <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/integration.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/integration.yaml/badge.svg" alt="Integration"></a>
   <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/eval.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/eval.yaml/badge.svg" alt="Eval"></a>
+  <a href="https://github.com/charleskelley/decision-ledger/actions/workflows/docs.yaml"><img src="https://github.com/charleskelley/decision-ledger/actions/workflows/docs.yaml/badge.svg" alt="Docs"></a>
+</p>
+
+<p align="center">
+  <strong>Live docs:</strong> <a href="https://charleskelley.github.io/decision-ledger">charleskelley.github.io/decision-ledger</a>
 </p>
 
 AI outputs are probabilistic. The accountability required when those outputs
@@ -40,8 +45,7 @@ regressed.
 | 4 | All three GitHub Actions workflows (CI, Integration, Eval) green on `main`             | ⏳     |
 | 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v1.json`](outputs/eval/eval-report-v1.json)) committed + linked | ✅     |
 
-When every row reads ✅, the MVP ships. Tracked in
-[`zoo/mvp-completion-plan.md`](zoo/mvp-completion-plan.md).
+When every row reads ✅, the MVP ships.
 
 ### The Production Problem
 
@@ -148,10 +152,7 @@ make build-policy-index        # Build and embed the policy corpus
 make install-hooks             # Install pre-commit hooks (gitleaks + ruff)
 
 # Run a scenario
-uv run python -m scenarios run --scenario post_breach_ato --count 50
-
-# Replay a decision
-uv run python -m decision_ledger.audit replay --id <decision_id>
+uv run python -m generator run --scenario post_breach_ato --count 50
 
 # Run the 8-scenario smoke test
 make test-smoke
@@ -174,17 +175,17 @@ secrets-handling guidance across local, CI, and production deployment.
 The full documentation site covers architecture, implementation details, and
 design rationale:
 
-**[docs.decisionledger.dev →](https://docs.decisionledger.dev)**
+**[charleskelley.github.io/decision-ledger →](https://charleskelley.github.io/decision-ledger)**
 
 | Section                                                                  | What You'll Find                                             |
 |--------------------------------------------------------------------------|--------------------------------------------------------------|
-| [Architecture](https://docs.decisionledger.dev/design/architecture/)     | C4 diagrams, component dependencies, directory layout        |
-| [Pipeline](https://docs.decisionledger.dev/design/pipeline/)             | Runtime flow, latency budget, fallback paths                 |
-| [Evaluation](https://docs.decisionledger.dev/design/evaluation/)         | 5D framework methodology, metrics, CI thresholds             |
-| [Data Model](https://docs.decisionledger.dev/design/data/)               | Event schema, Decision Bundle structure, policy corpus model |
-| [Design Decisions](https://docs.decisionledger.dev/design/decisions/)    | DR-1 through DR-10 — the significant choices and why         |
-| [Infrastructure](https://docs.decisionledger.dev/design/infrastructure/) | Docker Compose stack, Terraform modules, deployment model    |
-| [Scenarios](https://docs.decisionledger.dev/design/scenarios/)           | Eight named event patterns and what each exercises           |
+| [Architecture](https://charleskelley.github.io/decision-ledger/design/architecture/)     | C4 diagrams, component dependencies, directory layout        |
+| [Pipeline](https://charleskelley.github.io/decision-ledger/design/pipeline/)             | Runtime flow, latency budget, fallback paths                 |
+| [Evaluation](https://charleskelley.github.io/decision-ledger/design/evaluation/)         | 5D framework methodology, metrics, CI thresholds             |
+| [Data Model](https://charleskelley.github.io/decision-ledger/design/data/)               | Event schema, Decision Bundle structure, policy corpus model |
+| [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-25 — the significant choices and why         |
+| [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, schema bootstrap, deployment model     |
+| [Scenarios](https://charleskelley.github.io/decision-ledger/design/scenarios/)           | Eight named event patterns and what each exercises           |
 
  
 ---
@@ -226,7 +227,7 @@ intentional exclusions.
 
 <p align="center">
   <sub>
-    <a href="https://docs.decisionledger.dev">Documentation</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://docs.decisionledger.dev/design/decisions/">Design Decisions</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://docs.decisionledger.dev/design/evaluation/">Evaluation Framework</a>
+    <a href="https://charleskelley.github.io/decision-ledger">Documentation</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://charleskelley.github.io/decision-ledger/design/decisions/">Design Decisions</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://charleskelley.github.io/decision-ledger/design/evaluation/">Evaluation Framework</a>
   </sub>
 </p>
  

@@ -23,32 +23,49 @@ decision-ledger/
 ├── core/                     Framework contracts — domain-agnostic, no infrastructure dependencies
 │   ├── decision/                 Decision schema, action space, Observation protocol, bundle contracts
 │   ├── policy/                   Policy gate contracts, citation schema, corpus model, enforcement rules
+│   ├── llm/                      SDK-agnostic LLMClient protocol (DR-23)
 │   └── eval/                     Eval dimension contracts, metric interfaces
 │
-├── reasoner/                 ATO Reasoner domain layer — pure Python, no infrastructure dependencies
-│   └── account_takeover/         LoginEvent, AtoFeatureVector, ScorerOutput, policy enums, assembler
+├── reasoner/                 Domain reasoners — pure types + domain runtime; one subpackage per domain
+│   └── account_takeover/         The reference reasoner
+│       ├── events.py                Domain event types (LoginEvent, AuthOutcome, ...)
+│       ├── features.py              AtoFeatureVector
+│       ├── scorer/                  Fast ML scorer (XGBoost), training, inference
+│       ├── feature_service.py       Online feature computation (windows, velocity, novelty)
+│       ├── ingestion/               Event intake, idempotency, replay keys
+│       ├── pipeline.py              Domain pipeline orchestrator (calls into app/decide.py)
+│       ├── assembler.py             build_observation() — the framework handoff
+│       ├── api.py                   FastAPI router (mounted by app/main.py)
+│       ├── settings.py              Reasoner-scoped settings
+│       └── registry.py              RegisteredReasoner record
 │
-├── app/                      Runtime pipeline — imports from core/ and reasoner/, adds infrastructure
-│   ├── ingestion/                Event intake, idempotency, replay keys
-│   ├── features/                 Online feature computation (windows, velocity, novelty)
-│   ├── scorer/                   Fast ML risk scorer
+├── app/                      Framework runtime — imports from core/ and reasoner/, adds infrastructure
+│   ├── decide.py                 execute_decision: framework half of the handoff (retrieval → gate → enforcement → audit)
 │   ├── retrieval/                Policy RAG: chunking, embedding, hybrid search, reranking
-│   ├── policy_gate/              LLM reasoning layer
+│   ├── gate/policy/              LLM policy gate
 │   │   └── prompts/                  Versioned YAML prompt templates (immutable once created)
 │   ├── enforcement/              Deterministic rule application, final action resolution
-│   ├── audit/                    Decision Bundle construction, replay store
-│   └── monitoring/               Structured logging, latency tracking
+│   ├── audit/                    Decision Bundle construction, replay store, resolution journal
+│   ├── llm/                      LLMClient adapters (OpenAI, Anthropic) — only files allowed to import an LLM SDK
+│   ├── monitoring/               Structured logging, latency tracking
+│   ├── reasoner_registry.py      Composes mounted reasoners
+│   ├── settings.py               FrameworkSettings (.env-driven)
+│   └── main.py                   Deployment composer — the only file under app/ that imports from reasoner.*
 │
 ├── eval/                     Evaluation harness — imports from core/eval
 │   ├── datasets/                 Golden query sets, adversarial scenarios, consistency tests
-│   ├── harness/                  Evaluation runner: all 5 dimensions
-│   └── gates/                    CI threshold definitions, regression detection
+│   ├── dimensions/               One module per dimension (retrieval, faithfulness, consistency, citation, robustness)
+│   ├── clients/                  Pipeline driver, ragas adapter, judge wrappers
+│   ├── runners/                  harness.py — the make eval entrypoint
+│   └── prompts/                  Judge prompt templates
 │
 ├── generator/                Synthetic event generator — imports from core/ and reasoner/
 │
 ├── corpus/                   Policy corpus source documents (Markdown + YAML frontmatter)
 │
-├── infra/                    Terraform modules (AWS)
+├── infra/                    Local schema bootstrap (Postgres init SQL, Elasticsearch index mapping)
+│
+├── tools/                    Tracked tooling (e.g. capture_baselines)
 │
 └── docs/                     Design documentation
     ├── design/                   Architecture, pipeline, data, interface, evaluation, infrastructure
@@ -91,7 +108,7 @@ Twelve components across the pipeline, organized by phase:
 
 ## C4 Container Diagram
 
-See [Containers Diagram - Level 2](#containers-diagram---level-2) above.
+See [Containers Diagram - Level 2](#containers-diagram-level-2) above.
 
 D2 source: [`docs/design/diagrams/containers.d2`](diagrams/containers.d2)
 
