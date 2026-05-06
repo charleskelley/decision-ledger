@@ -192,27 +192,42 @@ satisfy the contract.
 
 ## Responsibility Boundary
 
-| Responsibility | Domain | Framework |
+| Responsibility | Reasoner | Framework |
 |---|---|---|
-| Raw event schema (`LoginEvent`) | ✓ Owns | — |
-| Feature computation | ✓ Owns | — |
-| Risk scoring (ML model) | ✓ Owns | — |
-| Routing decision (`GateRouting`) | ✓ Produces | Consumes |
+| Raw event schema (`LoginEvent`, `ContentItem`, …) | ✓ Owns | — |
+| Ingestion adapter (Redis Streams, Kafka, etc.) | ✓ Owns | — |
+| Feature computation infra | ✓ Owns | — |
+| ML model artifacts + training | ✓ Owns | — |
+| Risk scoring at inference | ✓ Owns | — |
+| Retrieval-query rendering | ✓ Owns | Consumes string |
+| Routing decision (`GateRoute`) | ✓ Produces | Consumes |
 | `ReasonerContext` assembly | ✓ Assembles | Stores verbatim |
 | `GateContext` assembly | ✓ Assembles | Consumes |
 | `fast_path_rationale` | ✓ Provides (fast path) | Validates + stores |
-| `entity_id` derivation | ✓ Owns (UUID5 from business key) | Uses |
-| Policy corpus retrieval | — | ✓ Owns |
-| LLM policy gate invocation | — | ✓ Owns |
+| `entity_id` derivation (UUID5) | ✓ Owns | Uses |
+| Reasoner registration record | ✓ Owns | Validates against |
+| FastAPI route for the reasoner | ✓ Owns | Mounts via `app.include_router` |
+| Raw-event JSON deserializer | ✓ Provides factory | Stores it on `BundleStore` |
+| Policy corpus retrieval | — | ✓ Owns (filters by `reasoner_id`) |
+| Policy gate invocation | — | ✓ Owns (reasoner-agnostic) |
 | Deterministic enforcement | — | ✓ Owns |
 | Decision Bundle construction | — | ✓ Owns |
 | Idempotency + deduplication | — | ✓ Owns |
-| Audit storage (PostgreSQL) | — | ✓ Owns |
+| Audit storage (Postgres `decisionledger.*`) | — | ✓ Owns |
+| Shared infra config (`postgres_*`, `redis_*`, ES, LLM keys) | — | ✓ Owns |
+| Reasoner-specific config (`ATO_SCORER_MODEL_PATH`, …) | ✓ Owns (`ATO_*` prefix) | Reads via reasoner Settings |
 
-The domain assembler is the only component that crosses the boundary. It is the
-domain's responsibility to ensure the assembled `Observation` is correct and
+The domain pipeline is the only orchestrator that crosses the boundary. It is the
+reasoner's responsibility to ensure the assembled `Observation` is correct and
 complete before submission. The framework trusts the submitted observation — it
 does not re-validate domain-specific logic.
+
+The `app/main.py` lifespan is the deployment composer. It is the **single
+sanctioned `app/` → `reasoner/` import seam**: it imports each registered
+reasoner's router and any factories the reasoner provides (e.g., the raw-event
+deserializer for replay), constructs shared infrastructure (Postgres / Redis /
+ES connections, LLM clients), and injects them. No other framework module
+imports from `reasoner.*` — `tests/test_framework_boundary.py` enforces this.
 
 ---
 
@@ -273,32 +288,93 @@ ScorerOutput → fast_path_rationale  (only when routing ≠ ROUTE_TO_GATE)
 
 ### Implementing a new reasoner
 
-To integrate a new domain reasoner into DecisionLedger:
+A new reasoner ships as a single self-contained package under
+`reasoner/<domain>/`. The framework remains untouched — no `app/` changes
+beyond the deployment composer (`app/main.py`) mounting the new router.
 
-1. **Define your domain types.** Raw event schema, feature vector, scorer output
-   — these live in your `reasoner/<domain>/` package. No framework imports
-   except from `core/`.
+**File-by-file checklist** — using the proposed `content_moderation` reasoner
+as a worked example:
 
-2. **Write your assembler.** A `build_observation(event, features, scorer)`
-   function that produces a type satisfying the `Observation` protocol. The ATO
-   assembler is the reference.
+```
+reasoner/content_moderation/
+├── events.py               # ContentItem (the raw event), domain enums
+├── features.py             # ContentFeatures Pydantic shell
+├── scorer/                 # ML scorer infra + model artifact
+│   ├── output.py           # ContentScorerOutput Pydantic shell
+│   ├── scorer.py           # Inference (e.g. transformers / classifier)
+│   ├── trainer.py          # Training entry point (CLI: python -m ...)
+│   └── models/cm-v1.ubj    # Trained artifact (or .safetensors etc.)
+├── ingestion/              # Adapter for the reasoner's input source
+├── feature_service.py      # Feature computation infra (Redis-backed etc.)
+├── retrieval_query.py      # build_cm_query(event, scorer_output) -> str
+├── assembler.py            # build_observation(event, features, scorer)
+├── pipeline.py             # run_cm_decision(event, …) -> DecisionBundle
+├── api.py                  # FastAPI router for POST /api/v1/cm/decisions
+├── settings.py             # CmSettings (env_prefix="CM_")
+└── registry.py             # CM_REGISTRATION constant
+```
 
-3. **Register a prompt template.** Create a versioned YAML in
-   `app/policy_gate/prompts/<template-id>.yaml`. Define the `{placeholder}`
-   variables your assembler will populate in `template_vars`. The
-   `YamlPromptRegistry` will load it at startup.
+**Steps:**
 
-4. **Set `entity_id` derivation.** Derive `entity_id` deterministically from
-   your domain business key via UUID5 — no registry lookup required. Use a
-   stable, domain-specific UUID5 namespace (as in `_ATO_ACCOUNT_NS`).
+1. **Define your domain types** in `events.py`, `features.py`,
+   `scorer/output.py`. Pure Pydantic — `core/` types and stdlib only.
 
-5. **Map your label.** Set `label_type` + `label_name` + `label_value` to
-   accurately describe your model's output. Both `NUMERICAL` scores and
-   `CATEGORICAL` labels are supported.
+2. **Derive `entity_id`** deterministically from your domain business key via
+   UUID5. Use a fresh namespace UUID (mirror the ATO pattern with
+   `_CM_CONTENT_NS`). The ATO scorer/output need not be modified.
 
-6. **Populate `feature_set` completely.** Every feature the model consumed at
-   inference time should appear here. This is what makes your decisions
-   replayable from the bundle without calling back to your scorer.
+3. **Build your scorer + feature infra** under `scorer/` and
+   `feature_service.py`. Use whatever ML framework, retrieval store, or
+   feature store fits — this is where reasoner-specific infra lives.
+
+4. **Write your assembler** (`assembler.py`). The `build_observation(event,
+   features, scorer)` function returns a type satisfying the `Observation`
+   protocol with `reasoner_context.reasoner_id = "content-moderation-reasoner"`,
+   populated `gate_context`, and a fast-path rationale when applicable.
+
+5. **Render your retrieval query** (`retrieval_query.py`). Map the top scorer
+   signals + raw-event metadata to a natural-language string. The framework
+   retriever consumes this string — it never sees your event schema.
+
+6. **Write your pipeline** (`pipeline.py`). `run_cm_decision(event, services…)`
+   computes features, scores, calls `build_observation`, then delegates to
+   `app.decide.execute_decision(observation, query, …)`.
+
+7. **Mount your FastAPI router** (`api.py`). Define an `APIRouter(prefix=
+   "/api/v1/cm")`, register `POST /decisions`, and pull services from
+   `request.app.state`. Add `app.include_router(cm_router)` to `app/main.py`.
+
+8. **Add your settings class** (`settings.py`). `CmSettings` with
+   `env_prefix="CM_"` for any genuinely reasoner-specific config (model
+   paths, corpus version, domain-tunable thresholds). Shared infra
+   (Postgres, Redis, ES, LLM keys) stays in `FrameworkSettings`.
+
+9. **Register a prompt template** in `app/gate/policy/prompts/<template-id>.yaml`.
+   Define the `{placeholder}` variables your assembler populates in
+   `template_vars`. The `YamlPromptRegistry` loads it at startup.
+
+10. **Add your registration constant** (`registry.py`). `CM_REGISTRATION =
+    ReasonerRegistration(reasoner_id="content-moderation-reasoner", ...)` —
+    the deployment composer collects this with the ATO registration.
+
+11. **Load your policy corpus** with the reasoner-id flag:
+    ```bash
+    uv run python -m app.retrieval.corpus_loader \
+        --reasoner-id content-moderation-reasoner --wipe
+    ```
+
+12. **Wire the deployment composer**. In `app/main.py:lifespan`, construct
+    `CmSettings()` alongside `AtoSettings()`, build the CM scorer + feature
+    service, attach to `application.state`, and call
+    `app.include_router(cm_router)`. This is the **only** `app/` →
+    `reasoner.content_moderation` import; the boundary test will fail if any
+    other framework file imports CM-specific symbols.
+
+The framework's audit ledger, retrieval index, and policy gate are shared
+across reasoners. CM decisions land in the same `decisionledger.decision_bundles`
+table as ATO decisions, distinguished by `reasoner_id = "content-moderation-
+reasoner"`. The retrieval corpus and policy chunks share the index, filtered
+by `reasoner_id` at query time. No schema changes are required.
 
 ---
 

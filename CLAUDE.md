@@ -24,9 +24,17 @@ Everything in `app/`, `eval/`, and `generator/` imports from `core/` and `reason
 
 ### The `reasoner/` Boundary
 
-`reasoner/` contains the ATO Reasoner domain layer: `LoginEvent`, `AtoFeatureVector`, `ScorerOutput`, and policy enums. Like `core/`, it has **zero infrastructure dependencies** — only Pydantic models, enums, and pure functions. The distinction from `core/` is semantic: `core/` is the framework (domain-agnostic decision schema, action space, policy gate contracts); `reasoner/` is the reference implementation domain layer (ATO-specific observation types and scorer contracts).
+`reasoner/<domain>/` packages own the **full** domain implementation — pure types (events, feature vectors, scorer outputs, policy enums), ML inference and training infrastructure, ingestion adapters, the domain pipeline orchestrator, the FastAPI router, and the registration record. The only constraint is that they expose their work to the framework exclusively through the `Observation` handoff (`reasoner/<domain>/assembler.py:build_observation` → `app/decide.py:execute_decision`).
 
-`reasoner/` imports from `core/` but `core/` never imports from `reasoner/`.
+For ATO today: `reasoner/account_takeover/` holds Pydantic types (`events.py`, `features.py`, `scorer/output.py`), runtime infra (`scorer/`, `feature_service.py`, `ingestion/`), the domain pipeline (`pipeline.py`), the FastAPI router (`api.py`), settings (`settings.py`), the registration record (`registry.py`), and the query builder (`retrieval_query.py`).
+
+`reasoner/` imports from `core/` and `app/` but `core/` never imports from `reasoner/`. Adding a second reasoner (e.g., content moderation) means creating `reasoner/content_moderation/` with the same shape — no framework changes required.
+
+### The Framework Boundary
+
+`app/` is framework runtime. It must not import from `reasoner.*` except in `app/main.py` (the deployment composer, which mounts each reasoner's router and supplies reasoner-specific factories like the raw-event deserializer). This rule is enforced by `tests/test_framework_boundary.py`, which also forbids ATO-coded symbols (`LoginEvent`, `AuthOutcome`, hardcoded `account_takeover.*` schema names) anywhere under `app/` outside `main.py`.
+
+DecisionLedger is the framework-owned audit/governance hub. All decision bundles, policy chunks, replay logs, and resolution attempts live in the `decisionledger.*` Postgres schema with `reasoner_id` as the tenant column. Each reasoner's policy corpus is loaded via `python -m app.retrieval.corpus_loader --reasoner-id <id>` and filtered at retrieval time.
 
 ## Tech Stack
 
@@ -48,7 +56,7 @@ See `docs/design/decisions.md` (DR-N records) for the full rationale. Load-beari
 
 ## Reasoner ↔ Framework Handoff Contract
 
-The handoff happens at a single point: `build_observation()` in `reasoner/account_takeover/assembler.py`. Everything before it (raw events, feature computation, ML scoring) is the domain's responsibility; everything after it (policy retrieval, LLM gate, enforcement, audit) is the framework's. See `docs/design/reasoner-handoff.md` for the full contract.
+The handoff happens at a single point: `build_observation()` in `reasoner/<domain>/assembler.py`. The domain pipeline (`reasoner/<domain>/pipeline.py:run_<domain>_decision`) runs feature computation + scoring + assembly, then calls the framework half (`app/decide.py:execute_decision`) which handles retrieval, the policy gate, enforcement, and audit-bundle persistence. See `docs/design/reasoner-handoff.md` for the full contract.
 
 Invariants to know before touching features, scorer, or policy gate:
 
@@ -56,7 +64,8 @@ Invariants to know before touching features, scorer, or policy gate:
 - **`feature_set` in `ReasonerContext` must be complete** — every feature the model consumed at inference time appears here. This is what makes replay self-contained.
 - **`ScorerOutput` lives in `reasoner/`**, never in `core/` or `app/`. The assembler translates it into `ReasonerContext` + `GateContext` + `FastPathRecord`.
 - **Fast-path thresholds** (in assembler): `< 0.20` → FAST_PATH_ALLOW; `> 0.85` → FAST_PATH_BLOCK; otherwise ROUTE_TO_GATE.
-- **Retrieval filter semantics:** `jurisdictions` filters both pgvector and Elasticsearch; `risk_tier` filters pgvector only.
+- **Retrieval filter semantics:** `reasoner_id` filters both pgvector and Elasticsearch (mandatory for tenant isolation); `jurisdictions` filters both; `risk_tier` filters pgvector only.
+- **Audit storage is framework-owned, multi-tenant by row.** All reasoners write to `decisionledger.decision_bundles` with `reasoner_id` as the tenant column. Reasoner-specific business keys (account_id, content_id) live inside the JSONB bundle, not as scalar columns.
 
 ## Common Commands
 
