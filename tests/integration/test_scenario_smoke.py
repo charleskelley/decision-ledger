@@ -101,7 +101,7 @@ async def test_scenario_lands_on_expected_action(
     extreme-confidence routes.
     """
     # Gate-routing scenarios use a setup deliberately calibrated against
-    # the capture script (zoo/scripts/capture_baselines.py): same
+    # the capture script (tools/capture_baselines.py): same
     # account-id format, same 7-min timing, fresh Redis. With those three
     # held constant, EventFactory's seed=42 RNG produces an event sequence
     # whose first event consistently routes to the LLM gate. Drive only

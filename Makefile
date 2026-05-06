@@ -7,7 +7,7 @@
 
 .PHONY: help lint lint-sql typecheck test test-smoke test-integration test-replay \
         eval test-all check verify verify-ready verify-push scenario \
-        build-policy-index install-hooks train eval-model
+        build-policy-index install-hooks train eval-model capture-baselines
 
 # -----------------------------------------------------------------------------
 # Help
@@ -34,6 +34,7 @@ help:
 	@echo ""
 	@echo "  Evaluation"
 	@echo "    eval              Full 5-dimension evaluation harness (slow, costs money)"
+	@echo "    capture-baselines Re-capture faithfulness fixtures from live gate runs"
 	@echo ""
 	@echo "  Scorer"
 	@echo "    train             Train the ATO XGBoost scorer (writes artifact + card + CSVs)"
@@ -113,6 +114,9 @@ test-replay:
 
 eval:
 	uv run python -m eval.runners.harness
+
+capture-baselines:
+	uv run python -m tools.capture_baselines
 
 # -----------------------------------------------------------------------------
 # Scorer training and evaluation
