@@ -27,7 +27,7 @@ The handoff happens at a single point: when the domain assembler calls
 Everything before that call is the domain's responsibility. Everything after
 is the framework's.
 
-![Domain Reasoner Handoff](../assets/diagrams/reasoner-handoff.svg)
+![Domain Reasoner Handoff](../../assets/diagrams/reasoner-handoff.svg)
 
 ---
 

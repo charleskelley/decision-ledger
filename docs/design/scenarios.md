@@ -187,8 +187,8 @@ the framework itself.
 
 ## Cross-references
 
-- **[`account-takeover.md`](./account-takeover.md)** — the ATO reasoner
+- **[`account-takeover.md`](reasoner/account-takeover.md)** — the ATO reasoner
   architecture that consumes the scenarios.
-- **[`reasoner.md`](./reasoner.md)** — abstract reasoner typology.
+- **[`reasoner.md`](reasoner/reasoner.md)** — abstract reasoner typology.
 - **DR-10** — hybrid data strategy (calibration intent and the
   scoping framing this document closes).

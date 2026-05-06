@@ -9,8 +9,8 @@ audit-bundle construction.
 This document covers the **abstract** picture: what a reasoner can be, what
 shapes it can take, and what information it must provide or have available
 to hook into the framework. For the contract specification (the typed
-boundary), see [`reasoner-handoff.md`](./reasoner-handoff.md). For the
-concrete reference implementation, see [`account-takeover.md`](./account-takeover.md).
+boundary), see [`reasoner-handoff.md`](reasoner-handoff.md). For the
+concrete reference implementation, see [`account-takeover.md`](account-takeover.md).
 
 ---
 
@@ -48,7 +48,7 @@ mechanism inside is plug-and-play.
 
 The ATO reasoner uses the ML+LLM hybrid pattern — fast XGBoost for
 high-confidence routing, LLM policy gate for ambiguous cases. See
-[`account-takeover.md`](./account-takeover.md) for the concrete
+[`account-takeover.md`](account-takeover.md) for the concrete
 architecture.
 
 A reasoner can compose multiple shapes inside its own boundary; the
@@ -171,7 +171,7 @@ scales with the quality of attribution.
 The reasoner must know whether it's operating in **governed mode** (full
 gate participation; default for the reference implementation) or
 **shadow/opt-out mode** (registration-time governance decision; rare). See
-[`reasoner-handoff.md`](./reasoner-handoff.md) for the full operating-mode
+[`reasoner-handoff.md`](reasoner-handoff.md) for the full operating-mode
 contract.
 
 ### Assembler
@@ -210,12 +210,12 @@ for any domain reasoner.
 
 ## Cross-references
 
-- **[`reasoner-handoff.md`](./reasoner-handoff.md)** — the typed contract
+- **[`reasoner-handoff.md`](reasoner-handoff.md)** — the typed contract
   at the framework boundary; field-by-field specification.
-- **[`account-takeover.md`](./account-takeover.md)** — the ATO reasoner
+- **[`account-takeover.md`](account-takeover.md)** — the ATO reasoner
   reference architecture, including its hybrid fast/gate routing,
   feature pipeline, and decisions & tradeoffs.
-- **[`scenarios.md`](./scenarios.md)** — calibration provenance for the
+- **[`scenarios.md`](../scenarios.md)** — calibration provenance for the
   ATO reasoner's training-data foundations.
 - **DR-11** — the framework / reasoner package boundary.
 - **DR-14** — `Observation` as the domain-assembled output.

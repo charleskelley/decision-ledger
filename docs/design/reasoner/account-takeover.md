@@ -7,7 +7,7 @@ events — while keeping the implementation small enough to read in a sitting.
 
 For the abstract reasoner contract, see [`reasoner.md`](./reasoner.md). For the
 typed handoff specification, see [`reasoner-handoff.md`](./reasoner-handoff.md).
-For the training-data calibration provenance, see [`scenarios.md`](./scenarios.md).
+For the training-data calibration provenance, see [`scenarios.md`](../scenarios.md).
 
 ---
 
@@ -105,7 +105,7 @@ inspection.
 
 The archetype distributions are *qualitatively informed* by published
 descriptive statistics from Wiefling et al. (ACM TOPS 2022); see
-[`scenarios.md`](./scenarios.md) for the citation-by-citation mapping and
+[`scenarios.md`](../scenarios.md) for the citation-by-citation mapping and
 the polish-phase plan to do raw RBA-dataset analysis.
 
 ### Labels
@@ -164,7 +164,7 @@ not a production fraud detector. Every choice below reflects that scope.
   *architecture pattern*: data → split → train → evaluate → version →
   deploy → integrity-check at load. The data-pipeline depth (real RBA
   ingestion, distribution fitting, validation) is a separate body of work
-  scoped as a polish-phase follow-up in [`scenarios.md`](./scenarios.md).
+  scoped as a polish-phase follow-up in [`scenarios.md`](../scenarios.md).
   Cite DR-10.
 
 - **Hardcoded fast-path thresholds (0.20 / 0.85) over per-deploy
@@ -209,11 +209,11 @@ not a production fraud detector. Every choice below reflects that scope.
 
 ## Cross-references
 
-- **[`reasoner.md`](./reasoner.md)** — abstract reasoner typology and
+- **[`reasoner.md`](reasoner.md)** — abstract reasoner typology and
   required information.
-- **[`reasoner-handoff.md`](./reasoner-handoff.md)** — typed handoff
+- **[`reasoner-handoff.md`](reasoner-handoff.md)** — typed handoff
   contract specification.
-- **[`scenarios.md`](./scenarios.md)** — scenario-generator distribution
+- **[`scenarios.md`](../scenarios.md)** — scenario-generator distribution
   calibration provenance and the polish-phase RBA-calibration plan.
 - **DR-10** — hybrid data strategy.
 - **DR-11** — `core/` / `reasoner/` package boundary.
