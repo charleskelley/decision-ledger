@@ -213,5 +213,5 @@ All runtime configuration via environment variables. No secrets in code or commi
 | `RERANK_ENABLED` | Enable cross-encoder reranking | `true` |
 | `RERANK_TIMEOUT_MS` | Reranker latency budget | `100` |
 | `LOW_CONFIDENCE_THRESHOLD` | Scorer fast-path ALLOW cutoff | `0.20` |
-| `HIGH_CONFIDENCE_THRESHOLD` | Scorer fast-path BLOCK cutoff | `0.85` |
+| `HIGH_CONFIDENCE_THRESHOLD` | Scorer fast-path BLOCK cutoff | `0.95` |
 | `NOVEL_ENTITY_MIN_EVENTS` | Minimum events before full enforcement | `5` |

@@ -123,14 +123,14 @@ The reasoner produces a `GateRoute` value:
 - `ROUTE_TO_GATE` — ambiguous; the framework runs retrieval + gate.
 
 A reasoner that uses ML scores typically maps confidence bands to routes
-(e.g., score < 0.20 → ALLOW, > 0.85 → BLOCK, otherwise GATE). A
+(e.g., score < 0.20 → ALLOW, > 0.95 → BLOCK, otherwise GATE). A
 rule-based reasoner might route directly. An LLM-only reasoner might route
 everything to GATE since the LLM is already its scoring mechanism.
 
 ### Fast-path rationale — `fast_path_rationale`
 
 Required when `route` is `FAST_PATH_*`. Human-readable string explaining
-why the gate was bypassed (e.g., `"risk_score=0.93 > 0.85 → FAST_PATH_BLOCK"`).
+why the gate was bypassed (e.g., `"risk_score=0.97 > 0.95 → FAST_PATH_BLOCK"`).
 This is the audit-trail substitute for the gate's rationale on bypassed
 events.
 

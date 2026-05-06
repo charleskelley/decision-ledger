@@ -54,8 +54,8 @@ two confidence-band thresholds:
 | Risk score band | Route | Pipeline behavior |
 |---|---|---|
 | `< 0.20` | `FAST_PATH_ALLOW` | Skip retrieval + gate; enforcement applies permissive default. |
-| `0.20 – 0.85` | `ROUTE_TO_GATE` | Run retrieval + LLM policy gate; enforcement consumes verdict. |
-| `> 0.85` | `FAST_PATH_BLOCK` | Skip retrieval + gate; enforcement applies blocking default. |
+| `0.20 – 0.95` | `ROUTE_TO_GATE` | Run retrieval + LLM policy gate; enforcement consumes verdict. |
+| `> 0.95` | `FAST_PATH_BLOCK` | Skip retrieval + gate; enforcement applies blocking default. |
 
 The thresholds live as public constants in `reasoner/account_takeover/scorer/scorer.py`
 (`FAST_PATH_ALLOW_THRESHOLD`, `FAST_PATH_BLOCK_THRESHOLD`) and are recorded
@@ -167,12 +167,16 @@ not a production fraud detector. Every choice below reflects that scope.
   scoped as a polish-phase follow-up in [`scenarios.md`](../scenarios.md).
   Cite DR-10.
 
-- **Hardcoded fast-path thresholds (0.20 / 0.85) over per-deploy
+- **Hardcoded fast-path thresholds (0.20 / 0.95) over per-deploy
   calibration.** Keeps the reference implementation reproducible and the
   routing distribution interpretable across runs. The model card captures
   the distribution these thresholds produce on the test set so a future
   reviewer can validate the choice without rerunning the pipeline.
-  Threshold tuning is a production concern post-MVP.
+  Threshold tuning is a production concern post-MVP. The 0.95 upper
+  cutoff (rather than the original 0.85) reflects the binary-classifier
+  scorer's bimodal output distribution — moderately-confident attacks
+  (0.85–0.95) reach the LLM gate for adjudication rather than
+  auto-blocking. See DR-25 for the calibration record.
 
 - **Heuristic labels over hand-labeled data.** Explicitly framed as a
   triage-classifier label, not a fraud-detection label. The scorer's job

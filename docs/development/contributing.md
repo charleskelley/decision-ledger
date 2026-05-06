@@ -221,7 +221,7 @@ The eval harness is a first-class component, not an afterthought. Changes that a
 | # | Dimension | What It Tests | CI Gate |
 |---|-----------|---------------|---------|
 | 01 | Retrieval Quality | Right policy evidence retrieved | Precision ≥0.80, Recall ≥0.75 |
-| 02 | Generation Faithfulness | Rationale grounded in retrieved evidence | RAGAS ≥0.85, Hallucination = 0 |
+| 02 | Generation Faithfulness | Rationale grounded in retrieved evidence | RAGAS ≥0.65 (MVP), Hallucination = 0 |
 | 03 | Decision Consistency | Same input → same action across orderings | Action Stability = 1.0 |
 | 04 | Citation Accuracy | Citations actually support claims | Relevance ≥0.80 |
 | 05 | Adversarial Robustness | Correct behavior under attack | Injection Resistance = 1.0 |

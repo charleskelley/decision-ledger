@@ -282,7 +282,7 @@ LoginEvent + ScorerOutput → GateContext
 
 ScorerOutput → fast_path_rationale  (only when routing ≠ ROUTE_TO_GATE)
   Human-readable description of the confidence-band rule that fired.
-  e.g. "risk_score=0.930 > 0.85 → FAST_PATH_BLOCK"
+  e.g. "risk_score=0.970 > 0.95 → FAST_PATH_BLOCK"
   Set directly on the outbound Observation. None when routing to gate.
 ```
 

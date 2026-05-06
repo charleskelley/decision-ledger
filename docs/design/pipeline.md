@@ -113,7 +113,7 @@ Populates:
 
 **Routing thresholds:**
 - `FAST_PATH_ALLOW`: `risk_score < 0.20`
-- `FAST_PATH_BLOCK`: `risk_score > 0.85`
+- `FAST_PATH_BLOCK`: `risk_score > 0.95`
 - `ROUTE_TO_GATE`: otherwise
 
 **Error handling:** Any failure in context assembly → raise `AssemblerError`, route event to `HOLD`.
