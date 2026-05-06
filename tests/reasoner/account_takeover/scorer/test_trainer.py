@@ -118,7 +118,7 @@ class TestTrainEndToEnd:
         assert card.feature_names == list(FEATURE_NAMES)
         assert card.heuristic_label_version == HEURISTIC_LABEL_VERSION
         assert card.fast_path_allow_threshold == 0.20
-        assert card.fast_path_block_threshold == 0.85
+        assert card.fast_path_block_threshold == 0.95
 
     def test_writes_artifact_and_card(self, tmp_path: Path) -> None:
         artifact = tmp_path / "ato.ubj"

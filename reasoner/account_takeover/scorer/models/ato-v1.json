@@ -1,8 +1,8 @@
 {
   "model_id": "ato-v1",
-  "model_version": "1.0.0",
-  "created_at": "2026-04-29T20:01:59.668537Z",
-  "git_sha": "1ce7d1b6ace1e4061831770064cb667534b5b0a4",
+  "model_version": "1.0.1",
+  "created_at": "2026-05-06T16:16:52.993429Z",
+  "git_sha": "0a9d0d9983632c8a1e119326e53e8904d9f4803a",
   "seed": 42,
   "n_samples": 5000,
   "n_estimators": 100,
@@ -22,33 +22,33 @@
     "user_agent_consistency",
     "sparse_history"
   ],
-  "heuristic_label_version": "1.0",
+  "heuristic_label_version": "1.1",
   "training": {
     "n_train": 4000,
     "n_test": 1000,
     "train_auc": 1.0,
-    "test_auc": 0.9999854594099429,
-    "train_log_loss": 0.004910460240126697,
-    "test_log_loss": 0.008759610237964148,
-    "test_precision_at_0_5": 0.9965635738831615,
-    "test_recall_at_0_5": 0.9965635738831615,
+    "test_auc": 0.9997892459219085,
+    "train_log_loss": 0.004682358189350595,
+    "test_log_loss": 0.02002106471369315,
+    "test_precision_at_0_5": 0.9808306709265175,
+    "test_recall_at_0_5": 0.9935275080906149,
     "test_confusion_matrix": [
       [
-        708,
-        1
+        685,
+        6
       ],
       [
-        1,
-        290
+        2,
+        307
       ]
     ],
     "test_routing_distribution": {
-      "FAST_PATH_ALLOW": 0.704,
-      "ROUTE_TO_GATE": 0.008,
-      "FAST_PATH_BLOCK": 0.288
+      "FAST_PATH_ALLOW": 0.682,
+      "ROUTE_TO_GATE": 0.017,
+      "FAST_PATH_BLOCK": 0.301
     }
   },
   "fast_path_allow_threshold": 0.2,
   "fast_path_block_threshold": 0.85,
-  "artifact_sha256": "7a377427443da07ecaf9bde204fad8b4ba0cbb3f574c7c980b31cb55104b2519"
+  "artifact_sha256": "8dbe5acf19f87380310c1346be968c3f617272f1c0f66b365be5dca50749c64c"
 }

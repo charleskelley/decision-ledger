@@ -21,7 +21,7 @@ Translation mapping:
         model_version         = scorer_output.scorer_version
 
     LoginEvent + ScorerOutput → GateContext
-        prompt_template_id    = "ato-v1"
+        prompt_template_id    = "ato-v2"
         jurisdictions         = resolved from event geo (US_FEDERAL + INTERNAL default)
         risk_tier             = resolved from scorer risk score band
         template_vars         = rendered strings for each {placeholder} in ato-v1.yaml
@@ -49,9 +49,10 @@ if TYPE_CHECKING:
 _REASONER_ID = "ato-reasoner"
 _REASONER_NAME = "ATO Reasoner"
 
-# Confidence-band thresholds that drive fast-path routing.
+# Confidence-band thresholds that drive fast-path routing. Must stay in
+# sync with FAST_PATH_*_THRESHOLD in reasoner/account_takeover/scorer/scorer.py.
 _FAST_PATH_ALLOW_THRESHOLD = 0.20  # risk_score < 0.20 → FAST_PATH_ALLOW
-_FAST_PATH_BLOCK_THRESHOLD = 0.85  # risk_score > 0.85 → FAST_PATH_BLOCK
+_FAST_PATH_BLOCK_THRESHOLD = 0.95  # risk_score > 0.95 → FAST_PATH_BLOCK
 
 # Risk score → risk tier mapping for corpus retrieval filtering.
 _HIGH_VALUE_TIER_THRESHOLD = 0.60
@@ -199,7 +200,7 @@ def _build_gate_context(
     return GateContext(
         gate_id="policy",
         gate_config={
-            "template_id": "ato-v1",
+            "template_id": "ato-v2",
             "template_vars": {
                 "risk_score": f"{scorer.risk_score:.3f}",
                 "risk_tier": _resolve_risk_tier(scorer.risk_score),

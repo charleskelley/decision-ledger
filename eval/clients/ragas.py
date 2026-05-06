@@ -62,20 +62,16 @@ class RagasFaithfulnessAdapter:
         return float(score)
 
     def _get_or_init_metric(self):
-        """Lazy-init the RAGAS faithfulness metric with our LLM/embeddings."""
+        """Lazy-init the RAGAS faithfulness metric with our LLM."""
         if self._metric is not None:
             return self._metric
 
-        from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-        from ragas.embeddings import LangchainEmbeddingsWrapper
+        from langchain_openai import ChatOpenAI
         from ragas.llms import LangchainLLMWrapper
         from ragas.metrics import Faithfulness
 
         llm = LangchainLLMWrapper(ChatOpenAI(model=self._model))
-        embeddings = LangchainEmbeddingsWrapper(
-            OpenAIEmbeddings(model=self._embedding_model)
-        )
-        self._metric = Faithfulness(llm=llm, embeddings=embeddings)
+        self._metric = Faithfulness(llm=llm)
         return self._metric
 
     @staticmethod

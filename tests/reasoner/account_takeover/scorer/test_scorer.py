@@ -123,8 +123,9 @@ def test_route_fast_path_block_for_high_risk(scorer):
 
 def test_route_route_to_gate_for_mid_risk():
     assert _route(0.5) == GateRoute.ROUTE_TO_GATE
+    assert _route(0.90) == GateRoute.ROUTE_TO_GATE
     assert _route(0.15) == GateRoute.FAST_PATH_ALLOW
-    assert _route(0.90) == GateRoute.FAST_PATH_BLOCK
+    assert _route(0.97) == GateRoute.FAST_PATH_BLOCK
 
 
 # ---------------------------------------------------------------------------

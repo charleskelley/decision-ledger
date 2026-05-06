@@ -66,8 +66,13 @@ FEATURE_NAMES: list[str] = [
 FAST_PATH_ALLOW_THRESHOLD: float = 0.20
 """Risk-score threshold below which an event routes FAST_PATH_ALLOW."""
 
-FAST_PATH_BLOCK_THRESHOLD: float = 0.85
-"""Risk-score threshold above which an event routes FAST_PATH_BLOCK."""
+FAST_PATH_BLOCK_THRESHOLD: float = 0.95
+"""Risk-score threshold above which an event routes FAST_PATH_BLOCK.
+
+The XGBoost classifier outputs cluster near 0 or 1 (binary objective), so
+moderately-confident attacks (~0.85-0.95) are surfaced to the LLM gate
+for adjudication rather than auto-blocked. Polish §6 (the calibration
+notebook) will validate this against the RBA dataset and may re-tune."""
 
 _TOP_K_SIGNALS: int = 5
 

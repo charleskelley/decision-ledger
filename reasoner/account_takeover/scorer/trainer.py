@@ -48,11 +48,11 @@ from reasoner.account_takeover.scorer.scorer import (
 
 _SEED: int = 42
 
-HEURISTIC_LABEL_VERSION: str = "1.0"
+HEURISTIC_LABEL_VERSION: str = "1.1"
 """Version tag for the heuristic labeling function. Bump on rule changes."""
 
 DEFAULT_MODEL_ID: str = "ato-v1"
-DEFAULT_MODEL_VERSION: str = "1.0.0"
+DEFAULT_MODEL_VERSION: str = "1.0.1"
 
 
 def _heuristic_label(row: dict[str, float]) -> float:
@@ -99,7 +99,7 @@ def _heuristic_label(row: dict[str, float]) -> float:
     if row["sparse_history"] > 0.5:
         score += 0.15
 
-    score += (1.0 - row["device_consistency_score"]) * 0.10
+    score += (1.0 - row["device_consistency_score"]) * 0.30
     score += (1.0 - row["user_agent_consistency"]) * 0.08
 
     return min(1.0, score)
