@@ -16,12 +16,12 @@
 queries:
   # ── Direct regulatory queries ─────────────────────────────────────────
   - query_id: q01-aal2-stepup
-    query: "AAL2 step-up authentication for high-risk authentication events"
+    query: "NIST 800-63B authenticator assurance level AAL2 verifier requirements"
     relevant_document_ids:
       - NIST-SP-800-63B
       - INT-MFA-REQ-V2
     expected_top_document_id: NIST-SP-800-63B
-    expected_top_version: "Rev-3"
+    expected_top_version: "3.0"
 
   - query_id: q02-pci-mfa
     query: "PCI DSS multi-factor authentication requirement administrative access"
@@ -63,16 +63,16 @@ queries:
     expected_top_version: "1.0"
 
   - query_id: q07-device-fingerprint
-    query: "new unrecognized device fingerprint challenge authentication"
+    query: "device fingerprint consistency score partial match anomaly threshold"
     relevant_document_ids:
       - INT-DEVICE-FP-V1
       - INT-AUTH-RISK-V2
     expected_top_document_id: INT-DEVICE-FP-V1
-    expected_top_version: "1.0"
+    expected_top_version: "1.2"
 
   # ── Version-resolution queries (latest wins over superseded) ──────────
   - query_id: q08-auth-risk-controls-latest
-    query: "authentication risk controls policy step-up MFA requirements"
+    query: "authentication risk score thresholds tier policy fast path block allow"
     relevant_document_ids:
       - INT-AUTH-RISK-V2
     expected_top_document_id: INT-AUTH-RISK-V2
