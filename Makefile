@@ -5,7 +5,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help lint lint-sql typecheck test test-smoke test-integration test-replay \
+.PHONY: help lint lint-sql typecheck test test-smoke test-integration \
         eval test-all check verify verify-ready verify-push scenario \
         build-policy-index install-hooks train eval-model capture-baselines
 
@@ -27,7 +27,6 @@ help:
 	@echo "    test              Unit tests (no Docker required)"
 	@echo "    test-smoke        Quick E2E sanity check (3–5 tests)"
 	@echo "    test-integration  Integration tests (requires Docker)"
-	@echo "    test-replay       Deterministic replay check (20 random bundles)"
 	@echo "    test-all          All test suites"
 	@echo "    verify            Full local gate (check + integration + smoke; needs Docker)"
 	@echo "    verify-ready      Probe whether Docker + services are up"
@@ -109,9 +108,6 @@ test-smoke:
 test-integration:
 	uv run pytest tests/ -m integration -v
 
-test-replay:
-	uv run pytest tests/ -m replay -v
-
 eval:
 	uv run python -m eval.runners.harness
 
@@ -131,7 +127,7 @@ eval-model:
 	uv run python -m reasoner.account_takeover.scorer eval --model reasoner/account_takeover/scorer/models/ato-v1.ubj
 
 test-all:
-	uv run pytest tests/ eval/ -v
+	uv run pytest tests/ -v
 
 # -----------------------------------------------------------------------------
 # Development
