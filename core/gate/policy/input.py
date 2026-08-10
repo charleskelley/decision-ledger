@@ -26,7 +26,7 @@ from core.gate.policy.prompt import (
 class PolicyGateInput(GateInput):
     """Input to the LLM-backed policy gate.
 
-    Args:
+    Attributes:
         gate_id: Discriminator value ``"policy"``.
         model_version: LLM model identifier used for this invocation
             (e.g., ``"gpt-4o-2024-08-06"``).

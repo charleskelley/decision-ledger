@@ -65,7 +65,7 @@ _ENTAILMENT_TEMPLATE_ID = "citation_entailment"
 class CitationCase(BaseModel):
     """One (claim, cited snippet) pair from the golden output set.
 
-    Args:
+    Attributes:
         case_id: Stable identifier (used in failure messages).
         claim: A single rationale claim the citation should support.
         document_id: Cited document's ID.

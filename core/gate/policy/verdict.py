@@ -27,7 +27,7 @@ class PolicyGateVerdict(GateVerdict):
     Adds rationale and citations to the universal verdict. The framework
     does not interpret these fields; they are surfaced to audit consumers.
 
-    Args:
+    Attributes:
         gate_id: Discriminator value ``"policy"``. Pydantic ``Literal``
             narrowing of the universal ``GateVerdict.gate_id`` field —
             drives discriminated-union deserialization at the bundle

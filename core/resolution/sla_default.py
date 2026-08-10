@@ -18,7 +18,7 @@ from core.resolution.attempt import ResolutionAttempt
 class SlaDefaultResolutionAttempt(ResolutionAttempt):
     """Resolution attempt produced by the SLA-expiry default-action timer.
 
-    Args:
+    Attributes:
         resolver_kind: Discriminator value ``"SLA_DEFAULT"``.
         account_tier: The account tier whose default-action policy was
             applied at SLA expiry. Plain string — domain code uses its

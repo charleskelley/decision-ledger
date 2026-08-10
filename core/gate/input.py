@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict
 class GateInput(BaseModel):
     """Universal input contract for a gate invocation.
 
-    Args:
+    Attributes:
         gate_id: Identifier of the gate that ran. Subclasses narrow this
             to ``Literal[...]`` for Pydantic discriminated-union
             deserialization. Mirrors ``raw_event.gate_context.gate_id``

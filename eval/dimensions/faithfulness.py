@@ -79,7 +79,7 @@ _WORD_RE = re.compile(r"\w+")
 class FaithfulnessCase(BaseModel):
     """One scored case: a rationale paired with the contexts it had access to.
 
-    Args:
+    Attributes:
         case_id: Stable identifier.
         rationale: The gate's rationale text.
         contexts: Verbatim text of each retrieved snippet the gate saw.

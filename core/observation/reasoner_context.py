@@ -39,7 +39,7 @@ class Contribution(BaseModel):
     pushes the prediction toward the positive class; negative pushes away),
     while attention scores are typically non-negative.
 
-    Args:
+    Attributes:
         feature_name: Name of the contributing feature (snake_case).
         feature_value: Raw feature value as seen by the model at inference
             time.
@@ -91,7 +91,7 @@ class AttributionSummary(BaseModel):
     The framework stores this verbatim in the DecisionBundle without
     interpreting its contents.
 
-    Args:
+    Attributes:
         feature_contributions: Per-event feature contributions ranked by
             magnitude. Present when the model produces per-observation
             attribution (SHAP, LIME, rule weights, etc.). None when
@@ -128,7 +128,7 @@ class ReasonerContext(BaseModel):
     prediction. This is what makes decisions replayable and auditable from
     the DecisionBundle without calling back to the source reasoner.
 
-    Args:
+    Attributes:
         reasoner_id: Machine identifier for this reasoner, matching the
             DecisionLedger registration record. Used as the stable key for
             cross-bundle queries and comparisons.

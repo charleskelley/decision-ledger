@@ -42,7 +42,7 @@ class TokenCost(BaseModel):
     LLM-specific by definition. Lives under ``core/gate/policy/`` because
     only LLM-backed gates produce token-billing data.
 
-    Args:
+    Attributes:
         prompt_tokens: Number of tokens in the prompt.
         completion_tokens: Number of tokens in the completion.
         total_tokens: Total token count (prompt + completion).
@@ -63,7 +63,7 @@ class TokenCost(BaseModel):
 class PolicyGateOutput(GateOutput):
     """Output from the LLM-backed policy gate.
 
-    Args:
+    Attributes:
         gate_id: Discriminator value ``"policy"``.
         verdict: ``PolicyGateVerdict`` (narrowed from the universal
             ``GateVerdict``) when validation succeeded; ``None`` when the

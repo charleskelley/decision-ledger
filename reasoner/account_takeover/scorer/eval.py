@@ -184,7 +184,7 @@ class TrainingReport(BaseModel):
     Captured by the trainer; included verbatim in the persisted ``ModelCard``.
     All probabilities and rates are in ``[0, 1]`` unless noted.
 
-    Args:
+    Attributes:
         n_train: Number of samples in the training partition.
         n_test: Number of samples in the test partition.
         train_auc: ROC-AUC on the training set.

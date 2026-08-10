@@ -50,7 +50,7 @@ class PolicyDocument(BaseModel):
     can use their own classification enumerations without requiring the framework
     to import domain-specific types.
 
-    Args:
+    Attributes:
         policy_id: Stable identifier (e.g., "NIST-800-63B", "INTERNAL-RISK-v2.1").
         title: Human-readable document title.
         version: Semantic version string (e.g., "2.1", "4.0").

@@ -52,7 +52,7 @@ class JudgeOutput(BaseModel):
     the score per their own rubric (e.g., the citation_relevance prompt asks
     the judge to map a 1-5 rating into [0, 1]).
 
-    Args:
+    Attributes:
         score: Normalized score in ``[0, 1]``.
         reasoning: Free-form rationale for the score.
     """

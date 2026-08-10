@@ -16,7 +16,7 @@ from core.resolution.attempt import ResolutionAttempt
 class HumanResolutionAttempt(ResolutionAttempt):
     """Resolution attempt produced by an analyst review.
 
-    Args:
+    Attributes:
         resolver_kind: Discriminator value ``ResolverKind.HUMAN``. Pydantic-narrowed.
         reviewer_role: Optional role of the reviewer (e.g., ``"analyst"``,
             ``"senior-reviewer"``). Used for queue routing and audit

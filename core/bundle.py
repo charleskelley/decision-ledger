@@ -55,7 +55,7 @@ class DecisionBundle(BaseModel):
           carries the gate's emitted text. Enforcement routes to HOLD via
           the schema-failure tier.
 
-    Args:
+    Attributes:
         decision_id: UUID of this decision record.
         created_at: When the bundle was constructed (UTC).
         raw_event: The validated domain Observation. Carries ``gate_context``

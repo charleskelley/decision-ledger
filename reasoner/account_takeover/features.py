@@ -20,7 +20,7 @@ from reasoner.account_takeover.events import _ATO_ACCOUNT_NS
 class WindowSpec(BaseModel):
     """Sliding window specification used during ATO feature computation.
 
-    Args:
+    Attributes:
         window_minutes: Duration of the window in minutes.
         available: Whether sufficient history existed to compute this window.
             False when the account has fewer events than the window requires.
@@ -45,7 +45,7 @@ class AtoFeatureVector(BaseModel):
     events — downstream components treat sparse-history vectors with lower
     confidence.
 
-    Args:
+    Attributes:
         entity_type: Framework subject classification. Always "account".
         account_id: ATO domain business key for the account.
         computed_at: Timestamp of feature computation (UTC).

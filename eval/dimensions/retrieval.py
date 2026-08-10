@@ -74,7 +74,7 @@ _DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "retrieval"
 class GoldenQuery(BaseModel):
     """A retrieval test case with annotated relevance.
 
-    Args:
+    Attributes:
         query_id: Stable identifier (used in failure messages and replay).
         query: Natural-language query string passed to the retriever.
         jurisdictions: If provided, retriever filter; ALL retrieved snippets

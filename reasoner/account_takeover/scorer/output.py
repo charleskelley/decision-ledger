@@ -25,7 +25,7 @@ class ScorerOutput(BaseModel):
     on the outbound Observation before submitting to the DecisionLedger
     framework.
 
-    Args:
+    Attributes:
         entity_id: Framework UUID of the subject the score was computed for.
         risk_score: Risk probability estimate in [0.0, 1.0].
         top_signals: Top-k signals ranked by absolute SHAP value.

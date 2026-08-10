@@ -46,7 +46,7 @@ class GateContext(BaseModel):
     artifacts. The framework uses ``gate_id`` for dispatch and authorization,
     then passes ``gate_config`` through to the selected gate implementation.
 
-    Args:
+    Attributes:
         gate_id: Identifier for the gate that should process this
             observation (e.g., ``"policy"``). Validated against the
             registration's ``allowed_gate_ids``.

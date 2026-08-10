@@ -33,7 +33,7 @@ class ModelCard(BaseModel):
     between the card and the binary (feature-schema drift, SHA-256 tamper)
     raise at load time rather than producing silent garbage scores.
 
-    Args:
+    Attributes:
         model_id: Stable identifier (e.g., ``"ato-v1"``). Matches the
             artifact filename stem.
         model_version: Semantic version of the model artifact.

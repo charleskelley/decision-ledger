@@ -34,7 +34,7 @@ class EnforcementDecision(BaseModel):
     ``core.resolution``). The enforcement layer's job ends at producing
     this decision; resolution is a separate, append-only artifact.
 
-    Args:
+    Attributes:
         decision_action: The action this decision produces. Immutable.
             For terminal actions (ALLOW, BLOCK) this is the realized
             action; for non-terminal actions (CHALLENGE, HOLD) the

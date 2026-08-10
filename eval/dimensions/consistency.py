@@ -60,7 +60,7 @@ _DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "scenarios"
 class ScenarioOrdering(BaseModel):
     """One ordering of a scenario's events.
 
-    Args:
+    Attributes:
         ordering_id: Stable identifier (e.g., ``"chronological"``,
             ``"reverse"``, ``"shuffled-1"``).
         events: Sequence of validated ``LoginEvent`` records. The last event
@@ -77,7 +77,7 @@ class ScenarioOrdering(BaseModel):
 class ConsistencyScenario(BaseModel):
     """A scenario with multiple orderings of the same event set.
 
-    Args:
+    Attributes:
         scenario_id: Stable identifier.
         description: Human-readable description.
         orderings: At least 2 orderings to compare.
@@ -162,7 +162,7 @@ def confidence_variance_across_orderings(
 class PipelineRunResult(BaseModel):
     """Output of a single pipeline run for one ordering.
 
-    Args:
+    Attributes:
         decision_action: The pipeline's final action for the trigger event.
         confidence: Gate verdict confidence if the gate ran, else None.
         rationale: Gate verdict rationale if the gate ran, else None. Used

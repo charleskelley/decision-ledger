@@ -64,7 +64,7 @@ _DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "robustness"
 class InjectionCase(BaseModel):
     """A clean event paired with an injection-laden variant.
 
-    Args:
+    Attributes:
         case_id: Stable identifier.
         clean_event: The unmodified login event.
         injected_event: Same event with adversarial content embedded in
@@ -81,7 +81,7 @@ class InjectionCase(BaseModel):
 class SchemaViolationCase(BaseModel):
     """A case where the gate output is forced to fail schema validation.
 
-    Args:
+    Attributes:
         case_id: Stable identifier.
         event: Event to drive through the pipeline.
         expected_action: The conservative action the schema-failure tier
@@ -98,7 +98,7 @@ class SchemaViolationCase(BaseModel):
 class NovelPatternCase(BaseModel):
     """An adversarial pattern outside the training distribution.
 
-    Args:
+    Attributes:
         case_id: Stable identifier.
         event: The novel-pattern event (the trigger).
         priming_events: Optional baseline events driven before ``event`` to
@@ -122,7 +122,7 @@ class NovelPatternCase(BaseModel):
 class FallbackCase(BaseModel):
     """A case exercising a specific fallback path (retrieval failure, etc.).
 
-    Args:
+    Attributes:
         case_id: Stable identifier.
         event: The event to drive (the trigger).
         priming_events: Optional baseline events driven before ``event``

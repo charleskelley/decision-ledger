@@ -41,7 +41,7 @@ class PromptSnapshot(BaseModel):
     fully verify that ``rendered_prompt`` was correctly constructed from
     the template without querying the registry.
 
-    Args:
+    Attributes:
         template_id: Stable template identifier (e.g., ``"ato-v1"``).
             Matches ``GateContext.prompt_template_id`` on the Observation.
         version: Semantic version of the template at invocation time
@@ -70,7 +70,7 @@ class PromptTemplate(BaseModel):
     tokens in ``template_text``, excluding the framework-injected
     ``{policy_snippets}`` placeholder (which the gate fills, not the domain).
 
-    Args:
+    Attributes:
         template_id: Stable identifier used as the audit key in
             ``PolicyGateInput.prompt_template_id`` and as the lookup key
             in ``PromptRegistry``. Matches the filename stem of the source

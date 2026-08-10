@@ -82,7 +82,7 @@ class AuthOutcome(StrEnum):
 class Geolocation(BaseModel):
     """Geographic location data attached to a login event.
 
-    Args:
+    Attributes:
         latitude: Latitude in decimal degrees.
         longitude: Longitude in decimal degrees.
         country: ISO 3166-1 alpha-2 country code (e.g., "US", "DE").
@@ -107,7 +107,7 @@ class LoginEvent(BaseModel):
     account_id is retained as a domain attribute for application-layer use
     (Redis keys, log labels, query filters).
 
-    Args:
+    Attributes:
         event_id: Unique identifier for this event instance.
         entity_type: Framework subject classification. Always "account" for
             ATO Reasoner login events.

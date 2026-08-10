@@ -86,7 +86,7 @@ class ResolutionAttempt(BaseModel):
     ``SlaDefaultResolutionAttempt``, …) narrow ``resolver_kind`` to a
     Pydantic ``Literal[...]`` and add kind-specific typed fields.
 
-    Args:
+    Attributes:
         decision_id: UUID string of the parent ``DecisionBundle``.
         attempt_id: UUID string identifying this attempt.
         sequence: Position of this attempt within the decision's attempt

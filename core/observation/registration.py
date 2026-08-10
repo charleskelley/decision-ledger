@@ -29,7 +29,7 @@ class ReasonerRegistration(BaseModel):
     verify that the submitting reasoner is known and that its gate_context
     references only the resources it is authorized to use.
 
-    Args:
+    Attributes:
         reasoner_id: Stable machine identifier. Must match
             ``ReasonerContext.reasoner_id`` on every Observation this
             reasoner submits. Used as the registry lookup key and as the

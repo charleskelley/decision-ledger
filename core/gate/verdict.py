@@ -29,7 +29,7 @@ class GateVerdict(BaseModel):
     Concrete gate-type subclasses (e.g., ``PolicyGateVerdict``) extend
     with explanation artifacts the framework does not interpret.
 
-    Args:
+    Attributes:
         gate_id: Identifier of the gate that produced this verdict.
             Subclasses narrow this to ``Literal[...]`` for Pydantic
             discriminated-union deserialization.

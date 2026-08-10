@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 class Citation(BaseModel):
     """A single policy citation supporting a rationale claim.
 
-    Args:
+    Attributes:
         policy_id: Identifier of the cited policy document.
         snippet: The specific text passage cited (verbatim from the corpus).
         relevance: Human-readable explanation of how this snippet supports

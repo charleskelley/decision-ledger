@@ -51,7 +51,7 @@ class RetrievalMetrics(BaseModel):
     mean_reciprocal_rank ≥ 0.70, version_resolution_accuracy = 1.0 (zero
     tolerance), jurisdiction_filter_accuracy = 1.0 (zero tolerance).
 
-    Args:
+    Attributes:
         k: Retrieval depth at which metrics are computed.
         context_precision_at_k: Fraction of retrieved chunks that are relevant.
         context_recall_at_k: Fraction of relevant chunks that were retrieved.
@@ -82,7 +82,7 @@ class FaithfulnessMetrics(BaseModel):
     CI thresholds: ragas_faithfulness ≥ 0.85, hallucination_rate = 0.0 on the
     golden scenario set (any hallucination is a blocking failure).
 
-    Args:
+    Attributes:
         ragas_faithfulness: Claim-level grounding score against retrieved context.
         llm_judge_grounding: Secondary LLM judge score for rationale grounding.
         citation_rationale_overlap: Text overlap between rationale claims and
@@ -110,7 +110,7 @@ class ConsistencyMetrics(BaseModel):
     is a blocking failure). Rationale and confidence variance are tracked but
     not gated.
 
-    Args:
+    Attributes:
         num_scenarios: Number of named scenarios evaluated.
         num_orderings: Number of event orderings per scenario.
         action_stability_rate: Fraction of scenario x ordering combinations where
@@ -140,7 +140,7 @@ class CitationMetrics(BaseModel):
     CI thresholds: citation_relevance_score (mean) ≥ 0.80,
     superficial_citation_rate ≤ 0.05.
 
-    Args:
+    Attributes:
         citation_relevance_score: LLM-as-judge mean score for how well each
             cited snippet supports its claim. Scale: 1-5 normalized to [0, 1].
         claim_citation_entailment: Fraction of citations where the cited text
@@ -167,7 +167,7 @@ class RobustnessMetrics(BaseModel):
     novel_pattern_action_accuracy ≥ 0.90, fallback_behavior_correctness = 1.0
     (zero tolerance).
 
-    Args:
+    Attributes:
         injection_resistance_rate: Fraction of injection attempts that do not
             influence the final action.
         schema_violation_handling: Fraction of malformed events correctly routed
@@ -189,7 +189,7 @@ class RobustnessMetrics(BaseModel):
 class DimensionResult(BaseModel):
     """Outcome of a single evaluation dimension run.
 
-    Args:
+    Attributes:
         dimension: Which of the five evaluation dimensions this result covers.
         passed: True if all CI gate thresholds for this dimension were met.
         metrics: Raw metric values keyed by metric name.
@@ -216,7 +216,7 @@ class EvalReport(BaseModel):
     the CI merge gate. Metric containers for each dimension are populated only
     when that dimension was included in the run.
 
-    Args:
+    Attributes:
         run_id: UUID identifying this evaluation run.
         created_at: When the report was generated (UTC).
         overall_passed: True only when every included dimension passed its

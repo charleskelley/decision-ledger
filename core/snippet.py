@@ -29,7 +29,7 @@ class RetrievedSnippet(BaseModel):
     ``retrieval_path`` carry the retriever's own vocabulary verbatim; the
     framework does not interpret or constrain it.
 
-    Args:
+    Attributes:
         document_id: Identifier of the source document.
         title: Human-readable document title.
         version: Semantic version of the source document.
