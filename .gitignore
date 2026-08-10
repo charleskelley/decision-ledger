@@ -18,6 +18,10 @@ knowledge/
 # Claude Code
 # ----------------------------------------------------------------------------
 .claude/settings.local.json
+# Personal KB tooling (companions to knowledge/, gitignored above)
+.claude/commands/wiki-*.md
+.claude/scripts/mode-statusline.sh
+CLAUDE.local.md
 
 # ----------------------------------------------------------------------------
 # uv

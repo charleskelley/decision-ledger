@@ -56,7 +56,7 @@ See `docs/design/decisions.md` (DR-N records) for the full rationale. Load-beari
 
 ## Reasoner ↔ Framework Handoff Contract
 
-The handoff happens at a single point: `build_observation()` in `reasoner/<domain>/assembler.py`. The domain pipeline (`reasoner/<domain>/pipeline.py:run_<domain>_decision`) runs feature computation + scoring + assembly, then calls the framework half (`app/decide.py:execute_decision`) which handles retrieval, the policy gate, enforcement, and audit-bundle persistence. See `docs/design/reasoner-handoff.md` for the full contract.
+The handoff happens at a single point: `build_observation()` in `reasoner/<domain>/assembler.py`. The domain pipeline (`reasoner/<domain>/pipeline.py:run_<domain>_decision`) runs feature computation + scoring + assembly, then calls the framework half (`app/decide.py:execute_decision`) which handles retrieval, the policy gate, enforcement, and audit-bundle persistence. See `docs/design/reasoners/reasoner-handoff.md` for the full contract.
 
 Invariants to know before touching features, scorer, or policy gate:
 
@@ -114,18 +114,4 @@ Do NOT implement: drift monitoring, canary/shadow rollout, human review queue UI
 - `docs/development/style.md` — Code style and testing philosophy
 - `docs/development/contributing.md` — Development workflow
 - `docs/design/decisions.md` — Architecture decision records (DR-N)
-- `docs/design/reasoner-handoff.md` — Reasoner ↔ framework handoff contract (read before touching features, scorer, or policy gate)
-
-## Personal Knowledge Base
-
-A gitignored `knowledge/` directory may exist as a personal LLM-maintained wiki (Obsidian-compatible vault). If present, read `knowledge/CLAUDE.md` for its operating schema.
-
-**Working from this project root puts you in *developer mode*.** The status line confirms: `[DEVELOPER] <relpath>`. Codebase and `docs/design/*` are your primary surface; the KB is reference material. When a design question touches a KB-tracked concept (audit replay, hybrid RAG, LLM-as-judge, deterministic enforcement, etc.), read `knowledge/index.md` first and drill into the relevant pages. Pull KB knowledge into reasoning ("this is informed by `[[audit-replay-pattern]]`"); never push code facts into the KB.
-
-**`knowledge/` is read-only in developer mode.** Do not modify wiki files — not even to check off `## Next steps for DecisionLedger` boxes after implementing a researcher-mode synthesis. Status updates come from the user (or a follow-up researcher-mode session), never from developer mode.
-
-The KB is **upstream** of the codebase — it holds the strategies, patterns, and external sources that *inform* design decisions. Do not treat code or `docs/` as superseding KB knowledge. Links from the KB to `docs/design/*` appear only as supporting examples of KB ideas in action; they are never the canonical definition of those ideas.
-
-When the user references a researcher-mode synthesis (typically a path under `knowledge/wiki/syntheses/`), read it, walk the `## Next steps for DecisionLedger` checkboxes in order, and propose each implementation before applying. Do not modify the synthesis page itself.
-
-KB slash commands: `/wiki-man` (full manual covering both modes), `/wiki-mode` (report current mode), `/wiki-ingest <path-or-url>`, `/wiki-lint`. Run `/wiki-man` for the deep workflow reference and the synthesis-handoff format.
+- `docs/design/reasoners/reasoner-handoff.md` — Reasoner ↔ framework handoff contract (read before touching features, scorer, or policy gate)
