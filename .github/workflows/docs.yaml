@@ -35,7 +35,9 @@ jobs:
   build:
     name: Build (mkdocs build --strict)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Main deps include torch/sentence-transformers/xgboost, which
+    # mkdocstrings imports on a cold cache — 5 minutes is too tight.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -51,16 +53,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install docs dependencies
-        run: uv sync --frozen --only-group docs
+        # mkdocstrings imports the project modules to introspect them,
+        # so main deps must be present. --no-dev skips pytest/ragas/etc.
+        run: uv sync --frozen --group docs --no-dev
 
       - name: Build site
-        run: uv run mkdocs build --strict --site-dir _site
+        run: uv run mkdocs build --strict
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: site
 
   deploy:
     name: Deploy to GitHub Pages

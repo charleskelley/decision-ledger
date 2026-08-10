@@ -20,6 +20,9 @@ concurrency:
 jobs:
   integration:
     name: Integration + smoke
+    # Fork PRs cannot see repository secrets (OPENAI/ANTHROPIC keys), so the
+    # suite would fail spuriously — maintainers run it before merge instead.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

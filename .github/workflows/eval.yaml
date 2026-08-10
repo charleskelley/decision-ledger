@@ -1,7 +1,8 @@
 name: Eval
 
-# Full 5-dimension eval harness against the live stack. Manual trigger or
-# nightly cron — not on every push. Cost-bounded by definition.
+# Full 5-dimension eval harness against the live stack. Manual trigger
+# only — cost-bounded by definition; re-enable a cron once the harness is
+# stable and budget is approved.
 #
 # Uses an `eval` GitHub Actions environment so secrets and budget can be
 # scoped separately from CI/integration. Configure required reviewers on
@@ -10,9 +11,6 @@ name: Eval
 
 on:
   workflow_dispatch:
-  schedule:
-    # 07:00 UTC daily
-    - cron: "0 7 * * *"
 
 concurrency:
   group: eval-${{ github.ref }}
