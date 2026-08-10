@@ -3,7 +3,7 @@
 DecisionLedger separates **universal gate contracts** (one set, in `core/gate/`)
 from **per-gate-type concrete contracts** (one subpackage per kind, e.g.
 `core/gate/policy/` for the LLM-backed policy gate). New gate kinds add a
-sibling subpackage. See [DR-20](./decisions.md#dr-20-universal-gate-contracts-per-gate-type-subpackages-closed-discriminated-union-for-mvp)
+sibling subpackage. See [DR-20](../decisions.md#dr-20-universal-gate-contracts-per-gate-type-subpackages-closed-discriminated-union-for-mvp)
 for the design rationale.
 
 This guide walks through adding a new gate kind end-to-end.

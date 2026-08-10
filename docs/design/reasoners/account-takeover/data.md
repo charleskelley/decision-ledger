@@ -271,7 +271,7 @@ discriminated-union deserialization (closed union over framework-known gate
 kinds) to reconstruct the correct subclass when reading a stored bundle. Adding
 a new gate kind extends the union; the bundle's typed surface (
 `gate_input: GateInput | None`) does not change. See
-[`gates.md`](./gates.md) for the gate-implementation guide.
+[`gates.md`](../../gates/implementation.md) for the gate-implementation guide.
 
 ---
 

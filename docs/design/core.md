@@ -89,7 +89,7 @@ The enforcement and audit layers depend only on the universal
 `GateVerdict` base — they do not know or care what produced it.
 
 Per DR-20, each gate kind subclasses the universal contracts in its own
-subpackage (`core/gate/<kind>/`). See [`gates.md`](./gates.md) for the
+subpackage (`core/gate/<kind>/`). See [`gates.md`](gates/implementation.md) for the
 end-to-end implementation guide.
 
 ```python
@@ -128,7 +128,7 @@ class GateProtocol(Protocol):
 
 ### Implementing a new gate
 
-See [`gates.md`](./gates.md) for the full guide. In brief: subclass the
+See [`gates.md`](gates/implementation.md) for the full guide. In brief: subclass the
 universal `GateInput`, `GateOutput`, `GateVerdict` in
 `core/gate/<your-kind>/`. Narrow `gate_id` to a Pydantic
 `Literal[<your-kind>]`. Add typed fields for kind-specific artifacts —
@@ -181,9 +181,6 @@ def resolve(
 ## External API Surface (FastAPI)
 
 The external API is minimal for MVP — it is a thin layer over the pipeline, not a product surface.
-
-<!-- TODO: Document full FastAPI route definitions once the app layer is implemented. -->
-<!-- Planned endpoints: -->
 
 ### Decision Endpoint
 

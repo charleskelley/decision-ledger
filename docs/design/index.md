@@ -12,10 +12,10 @@ framework is reasoner-agnostic.
   with the directory layout and dependency rules), then
   [Pipeline](pipeline.md) for runtime flow and the latency budget.
 - Touching features, scorer, or policy gate: read
-  [Reasoner ↔ framework handoff](reasoner/reasoner-handoff.md) first.
+  [Reasoner ↔ framework handoff](reasoners/reasoner-handoff.md) first.
   That contract is load-bearing — every reasoner-framework interaction
   flows through `build_observation()`.
-- Adding a new reasoner: read [Reasoner abstraction](reasoner/reasoner.md)
+- Adding a new reasoner: read [Reasoner abstraction](reasoners/index.md)
   for the `RegisteredReasoner` shape and the steps to register one.
 - Working on retrieval, prompts, or eval thresholds: read
   [Evaluation](evaluation.md) and the relevant DRs in
@@ -23,21 +23,21 @@ framework is reasoner-agnostic.
 
 ## The map
 
-| Document                                                     | What it covers                                                                              |
-|--------------------------------------------------------------|---------------------------------------------------------------------------------------------|
-| [Architecture](architecture.md)                              | C4 L1–L3 diagrams, framework/reasoner directory layout, dependency rules, twelve components |
-| [Pipeline](pipeline.md)                                      | Runtime flow, fast-path thresholds, fallback paths, latency budget                          |
-| [Data model](data.md)                                        | Event schema, Decision Bundle structure, `decisionledger.*` Postgres schema                 |
-| [Interfaces](interface.md)                                   | `core/` boundary, framework contracts, FastAPI surface                                      |
-| [Infrastructure](infrastructure.md)                          | Docker Compose stack, service containers, schema bootstrap                                  |
-| [Evaluation](evaluation.md)                                  | 5D harness, dimension methodology, CI thresholds                                            |
-| [Decisions](decisions.md)                                    | DR-1 through DR-25 — every load-bearing architecture decision and its rationale             |
-| [Policy corpus](policy-corpus.md)                            | Corpus documents, chunking strategy, jurisdiction model                                     |
-| [Scenarios](scenarios.md)                                    | Eight named event patterns and what each exercises                                          |
-| [Gates](gates.md)                                            | Fast-path routing, LLM gate contract, enforcement resolver                                  |
-| [Reasoner abstraction](reasoner/reasoner.md)                 | Framework abstraction for swappable reasoners                                               |
-| [Reasoner handoff](reasoner/reasoner-handoff.md)             | The `build_observation()` contract — read before touching features, scorer, or gate         |
-| [Account takeover reasoner](reasoner/account-takeover.md)    | Reference reasoner: events, features, scorer, calibration                                   |
+| Document                                                                    | What it covers                                                                              |
+|-----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| [Architecture](architecture.md)                                             | C4 L1–L3 diagrams, framework/reasoner directory layout, dependency rules, twelve components |
+| [Pipeline](pipeline.md)                                                     | Runtime flow, fast-path thresholds, fallback paths, latency budget                          |
+| [Data model](reasoners/account-takeover/data.md)                            | Event schema, Decision Bundle structure, `decisionledger.*` Postgres schema                 |
+| [Interfaces](core.md)                                                       | `core/` boundary, framework contracts, FastAPI surface                                      |
+| [Infrastructure](infrastructure.md)                                         | Docker Compose stack, service containers, schema bootstrap                                  |
+| [Evaluation](evaluation.md)                                                 | 5D harness, dimension methodology, CI thresholds                                            |
+| [Decisions](decisions.md)                                                   | DR-1 through DR-25 — every load-bearing architecture decision and its rationale             |
+| [Policy corpus](gates/policy/policy-corpus.md)                              | Corpus documents, chunking strategy, jurisdiction model                                     |
+| [Scenarios](reasoners/account-takeover/scenarios.md)                        | Eight named event patterns and what each exercises                                          |
+| [Gates](gates/implementation.md)                                                     | Fast-path routing, LLM gate contract, enforcement resolver                                  |
+| [Reasoner abstraction](reasoners/index.md)                                  | Framework abstraction for swappable reasoners                                               |
+| [Reasoner handoff](reasoners/reasoner-handoff.md)                           | The `build_observation()` contract — read before touching features, scorer, or gate         |
+| [Account takeover reasoner](reasoners/account-takeover/account-takeover.md) | Reference reasoner: events, features, scorer, calibration                                   |
 
 ## Diagrams
 

@@ -11,7 +11,7 @@ policy gate architecture.
 
 - [**Design**](design/index.md) — Architecture, pipeline, data model,
   evaluation framework, and the DR-1–DR-25 decision record.
-- [**Reasoners**](design/reasoner/reasoner.md) — How a domain plugs into
+- [**Reasoners**](design/reasoners/index.md) — How a domain plugs into
   the framework via the `build_observation()` handoff.
 - [**Operations**](operations/secrets.md) — Local, CI, and deployment
   secrets handling.

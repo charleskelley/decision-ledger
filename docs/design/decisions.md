@@ -489,7 +489,7 @@ cited from the paper's §4.1 and §4.3.
 
 A polish-phase project that does the proper raw-dataset analysis (EDA →
 distribution fitting → scenario re-tune → empirical validation) is scoped
-in [`scenarios.md`](./scenarios.md). It's intentionally a separate
+in [`scenarios.md`](reasoners/account-takeover/scenarios.md). It's intentionally a separate
 artifact rather than blocking the MVP — the architecture is the point at
 this stage; the data-pipeline depth is a follow-on portfolio piece.
 

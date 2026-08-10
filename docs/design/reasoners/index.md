@@ -10,7 +10,7 @@ This document covers the **abstract** picture: what a reasoner can be, what
 shapes it can take, and what information it must provide or have available
 to hook into the framework. For the contract specification (the typed
 boundary), see [`reasoner-handoff.md`](reasoner-handoff.md). For the
-concrete reference implementation, see [`account-takeover.md`](account-takeover.md).
+concrete reference implementation, see [`account-takeover.md`](account-takeover/account-takeover.md).
 
 ---
 
@@ -48,7 +48,7 @@ mechanism inside is plug-and-play.
 
 The ATO reasoner uses the ML+LLM hybrid pattern — fast XGBoost for
 high-confidence routing, LLM policy gate for ambiguous cases. See
-[`account-takeover.md`](account-takeover.md) for the concrete
+[`account-takeover.md`](account-takeover/account-takeover.md) for the concrete
 architecture.
 
 A reasoner can compose multiple shapes inside its own boundary; the
@@ -212,10 +212,10 @@ for any domain reasoner.
 
 - **[`reasoner-handoff.md`](reasoner-handoff.md)** — the typed contract
   at the framework boundary; field-by-field specification.
-- **[`account-takeover.md`](account-takeover.md)** — the ATO reasoner
+- **[`account-takeover.md`](account-takeover/account-takeover.md)** — the ATO reasoner
   reference architecture, including its hybrid fast/gate routing,
   feature pipeline, and decisions & tradeoffs.
-- **[`scenarios.md`](../scenarios.md)** — calibration provenance for the
+- **[`scenarios.md`](account-takeover/scenarios.md)** — calibration provenance for the
   ATO reasoner's training-data foundations.
 - **DR-11** — the framework / reasoner package boundary.
 - **DR-14** — `Observation` as the domain-assembled output.
