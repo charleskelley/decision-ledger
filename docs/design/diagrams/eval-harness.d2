@@ -43,7 +43,7 @@ datasets: Golden Datasets  ·  eval/datasets/ {
     shape: rectangle
     style.fill: "#f0f0f0"
     style.stroke: "#1c2024"
-    tooltip: "30 curated queries with annotated relevant policy chunks; covers regulatory, version-ambiguous, jurisdiction-scoped, and risk-tier queries."
+    tooltip: "12 curated queries with annotated relevant policy chunks; covers regulatory, version-ambiguous, jurisdiction-scoped, and risk-tier queries."
   }
   ds_faith: faithfulness/golden_outputs.yaml {
     shape: rectangle
@@ -55,7 +55,7 @@ datasets: Golden Datasets  ·  eval/datasets/ {
     shape: rectangle
     style.fill: "#f0f0f0"
     style.stroke: "#1c2024"
-    tooltip: "8 scenarios × 3 orderings (canonical / reversed / shuffled) — same risk signals, different event order."
+    tooltip: "4 scenarios × 3 orderings (canonical / reversed / shuffled) — same risk signals, different event order."
   }
   ds_cite: citations/golden_outputs.yaml {
     shape: rectangle
@@ -93,7 +93,7 @@ harness: Eval Harness  ·  eval/runners/harness.py {
   d_cons: Decision Consistency {
     style.fill: "#fbe6d6"
     style.stroke: "#c9622e"
-    tooltip: "Same risk signals × 3 orderings → must produce identical action 24/24 (zero-tolerance). Confidence variance is informational."
+    tooltip: "Same risk signals × 3 orderings → must produce identical action 12/12 (zero-tolerance). Confidence variance is informational."
   }
   d_cite: Citation Accuracy {
     style.fill: "#fbe6d6"

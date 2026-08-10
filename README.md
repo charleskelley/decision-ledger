@@ -42,7 +42,7 @@ regressed.
 | 1 | `make check` — lint, sqlfluff, typecheck, and unit tests all pass                      | ✅     |
 | 2 | `make test-smoke` — all 8 ATO scenarios pass end-to-end                                | ✅     |
 | 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ✅     |
-| 4 | All three GitHub Actions workflows (CI, Integration, Eval) green on `main`             | ⏳     |
+| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ⏳     |
 | 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v1.json`](outputs/eval/eval-report-v1.json)) committed + linked | ✅     |
 
 When every row reads ✅, the MVP ships.
@@ -92,9 +92,9 @@ DecisionLedger structures runtime decisioning into three layers with fixed
 responsibilities:
 
 **Context** — Event ingestion coalesces into observations with online feature
-*computation, and policy evidence retrieval via hybrid search (dense embeddings +
-*sparse BM25 with cross-encoder reranking) against a versioned policy corpus.
-*Every input to the reasoning layer is snapshotted and traceable.
+computation, and policy evidence retrieval via hybrid search (dense embeddings +
+sparse BM25 with cross-encoder reranking) against a versioned policy corpus.
+Every input to the reasoning layer is snapshotted and traceable.
 
 **Reasoning** — A pluggable layer where any combination of reasoners can
 operate: a fast ML scorer (XGBoost over engineered features, sub-10ms) for
@@ -137,7 +137,8 @@ just model artifacts:
 
 No release candidate passes unless all five dimensions clear defined thresholds.
 Quality and integration gates run on every push to `main`; the 5D eval harness
-runs nightly and on demand via GitHub Actions.
+runs on demand via GitHub Actions (`workflow_dispatch`), with the passing
+baseline report committed as the release receipt.
  
 
 ---
@@ -182,10 +183,10 @@ design rationale:
 | [Architecture](https://charleskelley.github.io/decision-ledger/design/architecture/)     | C4 diagrams, component dependencies, directory layout        |
 | [Pipeline](https://charleskelley.github.io/decision-ledger/design/pipeline/)             | Runtime flow, latency budget, fallback paths                 |
 | [Evaluation](https://charleskelley.github.io/decision-ledger/design/evaluation/)         | 5D framework methodology, metrics, CI thresholds             |
-| [Data Model](https://charleskelley.github.io/decision-ledger/design/data/)               | Event schema, Decision Bundle structure, policy corpus model |
+| [Data Model](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/data/) | Event schema, Decision Bundle structure, policy corpus model |
 | [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-25 — the significant choices and why         |
 | [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, schema bootstrap, deployment model     |
-| [Scenarios](https://charleskelley.github.io/decision-ledger/design/scenarios/)           | Eight named event patterns and what each exercises           |
+| [Scenarios](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/scenarios/) | Eight named event patterns and what each exercises           |
 
  
 ---

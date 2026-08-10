@@ -18,7 +18,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/<username>/decision-ledger.git
+git clone https://github.com/charleskelley/decision-ledger.git
 cd decision-ledger
 
 # Install uv if you don't have it
@@ -228,9 +228,11 @@ The eval harness is a first-class component, not an afterthought. Changes that a
 
 ### Golden Sets
 
-- `eval/datasets/golden_queries.json` — 30 retrieval queries with expected policy snippets
-- `eval/datasets/golden_decisions.json` — 8 scenarios × 3 orderings with expected actions
-- `eval/datasets/adversarial_probes.json` — adversarial event variants with expected handling
+- `eval/datasets/retrieval/golden_queries.yaml` — 12 curated retrieval queries with annotated relevant policy chunks
+- `eval/datasets/scenarios/*.yaml` — 4 scenarios × 3 orderings with expected actions
+- `eval/datasets/faithfulness/golden_outputs.yaml` — reference gate outputs with retrieved-snippet ground truth
+- `eval/datasets/citations/golden_outputs.yaml` — reviewed citations rated for claim support
+- `eval/datasets/robustness/{injection,malformed,novel,fallback}.yaml` — adversarial event variants with expected handling
 
 Golden set changes are high-impact and require careful review.
 

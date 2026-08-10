@@ -118,7 +118,7 @@ Populates:
 
 **Error handling:** Any failure in context assembly → raise `AssemblerError`, route event to `HOLD`.
 
-See [`reasoner/reasoner-handoff.md`](reasoner/reasoner-handoff.md) for the full field-level contract.
+See [`reasoner/reasoner-handoff.md`](reasoners/reasoner-handoff.md) for the full field-level contract.
 
 ---
 
@@ -193,7 +193,7 @@ If no trigger fires, the enforcement layer applies the `permitted_actions` from 
 
 ### C9 — Decision Bundle Construction
 
-Every decision produces a complete `DecisionBundle`, written to the PostgreSQL audit store. See [Data — Decision Bundle](./data.md#decision-bundle) for the full schema.
+Every decision produces a complete `DecisionBundle`, written to the PostgreSQL audit store. See [Data — Decision Bundle](reasoners/account-takeover/data.md#decision-bundle) for the full schema.
 
 **Replay:** Given a bundle ID, the replay command loads all logged intermediate states and re-executes `enforcement.resolve()` against them. It does not re-invoke the LLM — the logged LLM output is fed directly to enforcement. The replay guarantee is: identical enforcement inputs → identical `decision_action`.
 
@@ -209,10 +209,11 @@ The realized action of a decision is computed at read time by folding the attemp
 
 ## Latency Budget
 
-<!-- TODO: Fill in with measured P50/P95 numbers from Week 5 build. -->
-<!-- Document per-component allocation and total pipeline budget. -->
-<!-- Key decision: LLM inference dominates. Document tradeoffs considered: -->
-<!-- smaller model, reduced context, async gate, streaming output. -->
+These are design targets, not measured SLOs — MVP scope excludes
+production latency hardening. The full path is dominated by the LLM gate
+call, which is bounded only by the LLM client's per-request timeout
+(30 s default in `app/llm/openai.py`); every other component has a
+millisecond-scale budget.
 
 | Component | Target P95 | Notes |
 |-----------|-----------|-------|
@@ -220,13 +221,11 @@ The realized action of a decision is computed at read time by folding the attemp
 | Feature computation | <15ms | Redis sorted set reads |
 | ML scoring | <10ms | XGBoost inference |
 | Policy retrieval | <100ms | Hybrid search + reranking (with bypass) |
-| LLM policy gate | TBD | Dominates; depends on model and context length |
+| LLM policy gate | ≤30s (client timeout) | Dominates; depends on model and context length |
 | Enforcement | <5ms | Pure rule evaluation |
 | Bundle write | <20ms | PostgreSQL insert |
 | **Total (fast path)** | **<55ms** | No LLM invocation |
-| **Total (full path)** | **TBD** | LLM latency dominates |
-
-_Actual measured numbers will be filled in during Week 5._
+| **Total (full path)** | **LLM-bound** | Retrieval + gate call dominate; all other stages <155ms combined |
 
 ---
 

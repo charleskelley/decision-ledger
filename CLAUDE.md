@@ -63,7 +63,7 @@ Invariants to know before touching features, scorer, or policy gate:
 - **`GateContext` is the assembler's job, and is required on ALL observations** — including fast-path, which still needs it for shadow evaluation.
 - **`feature_set` in `ReasonerContext` must be complete** — every feature the model consumed at inference time appears here. This is what makes replay self-contained.
 - **`ScorerOutput` lives in `reasoner/`**, never in `core/` or `app/`. The assembler translates it into `ReasonerContext` + `GateContext` + `FastPathRecord`.
-- **Fast-path thresholds** (in assembler): `< 0.20` → FAST_PATH_ALLOW; `> 0.85` → FAST_PATH_BLOCK; otherwise ROUTE_TO_GATE.
+- **Fast-path thresholds** (in assembler): `< 0.20` → FAST_PATH_ALLOW; `> 0.95` → FAST_PATH_BLOCK; otherwise ROUTE_TO_GATE (see DR-25).
 - **Retrieval filter semantics:** `reasoner_id` filters both pgvector and Elasticsearch (mandatory for tenant isolation); `jurisdictions` filters both; `risk_tier` filters pgvector only.
 - **Audit storage is framework-owned, multi-tenant by row.** All reasoners write to `decisionledger.decision_bundles` with `reasoner_id` as the tenant column. Reasoner-specific business keys (account_id, content_id) live inside the JSONB bundle, not as scalar columns.
 

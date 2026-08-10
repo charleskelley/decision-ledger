@@ -51,8 +51,8 @@ well-formatted rationale citing whatever it received.
 
 ### Measurement
 
-Evaluated against a golden query set of 30 queries, each with annotated relevant
-policy chunks. The golden set covers:
+Evaluated against a golden query set of 12 curated queries, each with annotated
+relevant policy chunks. The golden set covers:
 
 - Direct regulatory queries ("NIST AAL2 requirements for authentication")
 - Version-ambiguous queries (where v1.0 and v2.1 give different guidance)
