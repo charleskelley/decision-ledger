@@ -42,7 +42,7 @@ regressed.
 | 1 | `make check` — lint, sqlfluff, typecheck, and unit tests all pass                      | ✅     |
 | 2 | `make test-smoke` — all 8 ATO scenarios pass end-to-end                                | ✅     |
 | 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ✅     |
-| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ⏳     |
+| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ✅     |
 | 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v1.json`](outputs/eval/eval-report-v1.json)) committed + linked | ✅     |
 
 When every row reads ✅, the MVP ships.
