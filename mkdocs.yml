@@ -8,7 +8,7 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
-  logo: assets/decision-ledger-fullmark-mono-white-scalable.svg
+  logo: assets/logo.svg
   favicon: assets/favicon.svg
 
   font:
@@ -58,26 +58,41 @@ nav:
     - Overview: design/index.md
     - Architecture: design/architecture.md
     - Pipeline: design/pipeline.md
-    - Data Model: design/data.md
-    - Interfaces: design/interface.md
+    - Interfaces: design/core.md
     - Infrastructure: design/infrastructure.md
-    - Gates: design/gates.md
-    - Policy Corpus: design/policy-corpus.md
-    - Scenarios: design/scenarios.md
+    - Gates:
+      - design/gates/index.md
+      - Implementation: design/gates/implementation.md
+      - Policy:
+        - design/gates/policy/index.md
+        - Corpus: design/gates/policy/policy-corpus.md
+    - Reasoners:
+      - design/reasoners/index.md
+      - Handoff: design/reasoners/reasoner-handoff.md
+      - Account Takeover:
+        - Overview: design/reasoners/account-takeover/account-takeover.md
+        - Data Model: design/reasoners/account-takeover/data.md
+        - Scenarios: design/reasoners/account-takeover/scenarios.md
     - Evaluation: design/evaluation.md
     - Decisions: design/decisions.md
-  - Reasoners:
-    - Reasoner Abstraction: design/reasoner/reasoner.md
-    - Reasoner Handoff: design/reasoner/reasoner-handoff.md
-    - Account Takeover: design/reasoner/account-takeover.md
+  - Reference:
+    - reference/index.md
+    - core: reference/core.md
+    - app: reference/app.md
+    - reasoner: reference/reasoner.md
+    - eval: reference/eval.md
+    - generator: reference/generator.md
+    - tools: reference/tools.md
   - Operations:
     - Secrets: operations/secrets.md
   - Development:
     - Contributing: development/contributing.md
     - Style Guide: development/style.md
     - Local Runbook: development/runbook-local.md
-    - Design Palette: development/design-palette.md
-    - Docs Migration: development/docs-migration.md
+
+not_in_nav: |
+  development/design-palette.md
+  development/docs-migration.md
 
 markdown_extensions:
   - admonition
@@ -101,3 +116,25 @@ markdown_extensions:
 
 plugins:
   - search
+  - mkdocstrings:
+      default_handler: python
+      custom_templates: overrides
+      handlers:
+        python:
+          paths: ["."]
+          options:
+            docstring_style: google
+            docstring_section_style: list
+            members_order: source
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_submodules: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            filters: ["!^_"]
+            extensions:
+              - griffe_pydantic

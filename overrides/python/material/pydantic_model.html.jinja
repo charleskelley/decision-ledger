@@ -1,0 +1,14 @@
+{% extends "_base/pydantic_model.html.jinja" %}
+
+{# Suppress griffe-pydantic's "Fields:" section.
+
+The class docstring's "Attributes:" section already documents every
+field with its type, description, and constraints. Re-rendering the
+same fields under a separate "Fields:" heading is pure duplication.
+
+The other griffe-pydantic blocks (bases, config, validators, source)
+stay — Bases shows inheritance, Config is additive (model_config),
+Validators isn't covered by docstrings, and Source is the inline
+collapsible code view.
+#}
+{% block fields %}{% endblock %}

@@ -11,7 +11,7 @@ name = "decision-ledger"
 version = "0.1.0"
 description = "A model-agnostic governed decision framework for AI systems."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
     { name = "Charles Kelley" },
@@ -28,7 +28,7 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -102,6 +102,12 @@ docs = [
     # --- Documentation ---
     "mkdocs>=1.6,<2",
     "mkdocs-material>=9.5,<10",
+    # --- API reference (mkdocstrings, one page per top-level package) ---
+    "mkdocstrings[python]>=0.27,<1",
+    "griffe-pydantic>=1.0,<2",
+    # mkdocstrings auto-formats rendered signatures with ruff if present.
+    # Listed here so CI's --no-dev install still picks it up.
+    "ruff>=0.5,<1",
 ]
 
 [project.urls]
@@ -229,7 +235,6 @@ markers = [
     "evaluation: full evaluation harness tests (slow, LLM calls, costs money)",
     "slow: tests that take >10s for reasons other than integration or eval",
     "smoke: minimal end-to-end sanity check (subset of integration, fast)",
-    "replay: deterministic replay correctness check (requires populated audit store)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:sentence_transformers.*",
