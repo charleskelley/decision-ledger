@@ -3,96 +3,196 @@
 #
 # The widest view: who and what interacts with DecisionLedger.
 #
-# - Domain reasoner (e.g., the ATO Reasoner) submits Observations and
-#   receives back a typed EnforcementDecision plus a persisted bundle ID.
-# - LLM provider serves the policy gate's structured-output calls.
-# - Decision analyst inspects bundles and runs the eval harness.
+# - Domain reasoners submit observations and receive the final action plus a
+#   decision ID back. Account Takeover is the shipped reference reasoner;
+#   Content Moderation, Customer Lifetime Value, and "+ Next Reasoner" are
+#   illustrative, showing that any domain plugs into the same contract.
+# - The LLM or ML service powers the decision gate: it recommends a verdict
+#   for ambiguous cases, and DecisionLedger's deterministic enforcement makes
+#   the final call.
+# - The decision analyst queries recorded decisions.
 #
-# Render:  d2 --theme 0 --layout elk system-context.d2 ../../assets/diagrams/system-context.svg
+# Layout: the reasoner group is pinned above the analyst → DecisionLedger →
+# LLM row with `near: top-center`, so its edges draw as straight lines that
+# fan into DecisionLedger. The `returns` cell keeps the return arrow clear of
+# that fan; "+ Next Reasoner" balances the row so the cell sits over
+# DecisionLedger. The tighter elk spacing flags keep the canvas narrow enough
+# to stay legible at the docs column width.
+#
+# Edge labels: d2 masks an edge only behind its label's text box. Multi-line
+# labels keep their middle line short, and trailing " " lines extend the mask
+# on the fan and return labels, so no dash touches the text.
+#
+# Render:  d2 --theme 0 --layout elk --elk-nodeNodeBetweenLayers 40 \
+#            --elk-edgeNodeBetweenLayers 20 \
+#            system-context.d2 ../../assets/diagrams/system-context.svg
 # Ref:     docs/design/architecture.md
 ###############################################################################
 
-title: System Context — DecisionLedger {
-  near: top-center
-  shape: text
-  style.font-size: 28
-  style.bold: true
+vars: {
+  # Small pad (siblings use the default 100) maximizes scale at column width
+  d2-config: {pad: 16}
 }
 
+# Lays analyst → DecisionLedger → LLM out as one row
 direction: right
 
 ###############################################################################
 # Palette (kept consistent across the diagram set)
-#   Domain        indigo  fill #e8eef9 / stroke #5b6abf
-#   Framework     teal    fill #e8f5f3 / stroke #0d9488
-#   LLM provider  violet  fill #f5e8f5 / stroke #b45dc9
-#   Person        neutral fill #f0f0f0 / stroke #1c2024
+#   Domain        indigo  fill #e8eef9 / stroke #5b6abf / text #3f4b96
+#   Framework     teal    fill #e8f5f3 / stroke #0d9488 / text #0b6e65
+#   LLM or ML     violet  fill #f5e8f5 / stroke #b45dc9 / text #7a3590
+#   Person        neutral fill #f0f0f0 / stroke #1c2024 / text #1c2024
+#   Boundary and  grey    fill #ffffff / stroke #8c93a3 / text #5f6670
+#     placeholder
+# Text colors are darkened stroke hues that clear WCAG AA (4.5:1) on the
+# fills. Edges take the color of the element that initiates them.
 ###############################################################################
 
-###############################################################################
-# Actors and external systems
-###############################################################################
+classes: {
+  # C4 element box: a bold name row over a "[Type] + description" row.
+  # In a grid, grid-gap doubles as inner padding: 12px at the sides, while
+  # vertical-gap 0 drops the space between the rows.
+  box: {
+    grid-rows: 2
+    grid-gap: 12
+    vertical-gap: 0
+  }
+  row-name: {
+    width: 310
+    height: 44
+    style: {fill: transparent; stroke: transparent; font-size: 28; bold: true}
+  }
+  row-body: {
+    width: 310
+    style: {fill: transparent; stroke: transparent; font-size: 24; bold: false}
+  }
 
-reasoner: Domain Reasoner {
-  shape: rectangle
-  style.fill: "#e8eef9"
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
-  style.font-size: 14
-  tooltip: "Any domain-specific reasoner that ingests raw events, computes features, scores risk, and assembles a typed Observation. The ATO Reasoner is the reference implementation."
+  domain: {style: {fill: "#e8eef9"; stroke: "#5b6abf"; stroke-width: 3; border-radius: 16}}
+  framework: {style: {fill: "#e8f5f3"; stroke: "#0d9488"; stroke-width: 3; border-radius: 16; multiple: true}}
+  llm: {style: {fill: "#f5e8f5"; stroke: "#b45dc9"; stroke-width: 3; border-radius: 16}}
+  person: {shape: c4-person; style: {fill: "#f0f0f0"; stroke: "#1c2024"; stroke-width: 3}}
+  placeholder: {style: {fill: "#ffffff"; stroke: "#8c93a3"; stroke-width: 2; stroke-dash: 4; border-radius: 16}}
+  boundary: {style: {fill: transparent; stroke: "#8c93a3"; stroke-width: 2; stroke-dash: 4; border-radius: 12; font-size: 28; font-color: "#5f6670"}}
+
+  ink-domain: {style.font-color: "#3f4b96"}
+  ink-framework: {style.font-color: "#0b6e65"}
+  ink-llm: {style.font-color: "#7a3590"}
+  ink-person: {style.font-color: "#1c2024"}
+  ink-placeholder: {style.font-color: "#5f6670"}
+
+  from-domain: {style: {stroke: "#5b6abf"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#3f4b96"; italic: false}}
+  from-framework: {style: {stroke: "#0d9488"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#0b6e65"; italic: false}}
+  from-llm: {style: {stroke: "#b45dc9"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#7a3590"; italic: false}}
+  from-person: {style: {stroke: "#1c2024"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#1c2024"; italic: false}}
 }
 
-analyst: Decision Analyst {
-  shape: person
-  style.fill: "#f0f0f0"
-  style.stroke: "#1c2024"
-  style.stroke-width: 2
-  tooltip: "Inspects persisted Decision Bundles, replays decisions, and runs the 5-dimension evaluation harness."
-}
+###############################################################################
+# Upper band: title and the domain reasoner group
+###############################################################################
 
-llm: LLM Provider {
-  shape: cloud
-  style.fill: "#f5e8f5"
-  style.stroke: "#b45dc9"
-  style.stroke-width: 2
-  tooltip: "OpenAI or Anthropic API. Serves the policy gate's structured-output calls and the eval harness's LLM-as-judge calls."
+upper: "" {
+  near: top-center
+  grid-rows: 3
+  # No side padding, so the band is no wider than the reasoner row
+  grid-gap: 0
+  vertical-gap: 24
+  style: {fill: transparent; stroke: transparent}
+
+  # The title lives in this band because a second `near: top-center` object
+  # would stack against it
+  title: "System Context — DecisionLedger" {
+    height: 48
+    style: {fill: transparent; stroke: transparent; font-size: 34; bold: true; font-color: "#1c2024"}
+  }
+
+  reasoners: "Decision Domain Reasoners" {
+    class: boundary
+    grid-columns: 5
+    grid-gap: 20
+    horizontal-gap: 28
+
+    ato: "" {
+      class: [box; domain]
+      n: "Account Takeover" {class: [row-name; ink-domain]}
+      b: "[Software System]\n\nScores login attempts, flags\nclear-cut ones, and collects\ncontext for ambiguous cases" {class: [row-body; ink-domain]}
+    }
+
+    clv: "" {
+      class: [box; domain]
+      n: "Customer Lifetime Value" {class: [row-name; ink-domain]}
+      b: "[ML Model]\n\nEstimates customer lifetime\nvalue in batch runs and\nflags retention candidates" {class: [row-body; ink-domain]}
+    }
+
+    # Final actions flow back into the reasoner group through this cell
+    returns: "Final\naction +\ndecision ID\n " {
+      class: ink-framework
+      width: 120
+      label.near: bottom-center
+      style: {fill: transparent; stroke: transparent; font-size: 24; bold: false}
+    }
+
+    cm: "" {
+      class: [box; domain]
+      n: "Content Moderation" {class: [row-name; ink-domain]}
+      b: "[Software System]\n\nScreens forum posts, flags\nclear-cut violations, and\ncollects review context" {class: [row-body; ink-domain]}
+    }
+
+    next: "" {
+      class: [box; placeholder]
+      n: "+ Next Reasoner" {class: [row-name; ink-placeholder]}
+      b: "[Software System]\n\nPlugs into the same\nobservation contract with\nno framework changes" {class: [row-body; ink-placeholder]}
+    }
+  }
+
+  # Vertical room for the fan of reasoner edges and their labels
+  spacer: "" {
+    height: 110
+    style: {fill: transparent; stroke: transparent}
+  }
 }
 
 ###############################################################################
-# The system under design
+# Lower band: analyst, the system under design, and the LLM or ML service
 ###############################################################################
 
-dl: DecisionLedger {
-  shape: rectangle
-  style.fill: "#e8f5f3"
-  style.stroke: "#0d9488"
-  style.stroke-width: 3
-  style.font-size: 16
-  style.bold: true
-  tooltip: "Governed decision framework: hybrid policy retrieval + LLM policy gate + deterministic enforcement, with append-only Decision Bundles for full audit replay."
+# c4-person sizes its head from the shape's width (radius = 22% of width) and
+# starts the body 1.8 radii down, so the person's rows are narrower than the
+# 310px used elsewhere to keep the head and overall height in proportion.
+analyst: "" {
+  class: [box; person]
+  grid-rows: 3
+  # Keeps the analyst edges on the lower shoulder: elk centers them on the
+  # full shape height, head included, so less clearance pushes them up
+  # toward the head
+  head: "" {width: 230; height: 40; style: {fill: transparent; stroke: transparent}}
+  n: "Decision Analyst" {class: [row-name; ink-person]; width: 230}
+  b: "[Person]\n\nData, risk, or audit\nanalyst who reviews\nbusiness decisions" {class: [row-body; ink-person]; width: 230}
+}
+
+dl: "" {
+  class: [box; framework]
+  n: "DecisionLedger" {class: [row-name; ink-framework]}
+  b: "[Software System]\n\nMakes and records critical\ndecisions with\ndeterministic replay" {class: [row-body; ink-framework]}
+}
+
+llm: "" {
+  class: [box; llm]
+  n: "LLM or ML Service" {class: [row-name; ink-llm]}
+  b: "[Software System]\n\nPowers the decision gate:\nrecommends a verdict for\nambiguous cases" {class: [row-body; ink-llm]}
 }
 
 ###############################################################################
 # Relationships
 ###############################################################################
 
-reasoner -> dl: "submits Observation\n(ReasonerContext + GateContext)" {
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
-}
+upper.reasoners.ato -> dl: "Real-time login\nrisk scores and\ncontext\n " {class: from-domain}
+upper.reasoners.clv -> dl: "Customer value\nscores from\nbatch runs\n " {class: from-domain}
+upper.reasoners.cm -> dl: "Real-time post\nviolation scores and\nbatch review flags\n " {class: from-domain}
+dl -> upper.reasoners.returns: "" {class: from-framework}
 
-dl -> reasoner: "EnforcementDecision\n+ decision_id" {
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-}
+analyst -> dl: "Queries for specific\ndecision\ninformation" {class: from-person}
+dl -> analyst: "Entity-level decision\ndata matching\nthe query" {class: from-framework}
 
-dl -> llm: "policy gate prompt\n→ structured JSON verdict" {
-  style.stroke: "#b45dc9"
-  style.stroke-width: 2
-  style.stroke-dash: 4
-}
-
-analyst -> dl: "inspects bundles, replays\ndecisions, runs eval gate" {
-  style.stroke: "#1c2024"
-  style.stroke-width: 2
-}
+dl -> llm: "Decision context\nand prompt\nor features" {class: from-framework}
+llm -> dl: "Prompt completion\nor model\nprediction" {class: from-llm}

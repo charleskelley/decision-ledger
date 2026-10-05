@@ -4,7 +4,9 @@ DecisionLedger uses C4-model-based architecture.
 
 ## System Diagram - Level 1
 
-![System Diagram - Level 1](../assets/diagrams/system-context.svg)
+![C4 system context: domain reasoners send scores and context to DecisionLedger, which asks an LLM or ML service for a recommended verdict on ambiguous cases, decides the final action, returns it with a decision ID, and answers analyst queries](../assets/diagrams/system-context.svg)
+
+Every reasoner submits an *observation* (its scores plus the context behind them) through the same contract, and DecisionLedger returns the final action to whichever reasoner submitted it. Account Takeover is the shipped reference reasoner; Content Moderation, Customer Lifetime Value, and the dashed "+ Next Reasoner" are illustrative. The LLM or ML service only recommends a verdict; deterministic enforcement inside DecisionLedger makes the call. At Levels 2 and 3 that service appears as the concrete LLM Provider. Arrow color marks the element that starts each exchange.
 
 ## Containers Diagram - Level 2
 
