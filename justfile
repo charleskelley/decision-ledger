@@ -9,7 +9,7 @@ default:
 # ─── Environment ─────────────────────────────────────────────────────────────
 setup:
     mise install
-    uv sync --all-extras
+    uv sync
     direnv allow
 
 sync:
@@ -36,13 +36,14 @@ typecheck:
     uv run pyright
 
 test *args:
-    uv run pytest tests/ {{args}}
+    uv run pytest {{args}}
 
 check: lint format-check typecheck test
 
 # ─── Training ───────────────────────────────────────────────────────────────
-train *args:
-    uv run python -m reasoner.account_takeover.scorer train {{args}}
+# Per-reasoner targets live in reasoners/*/reasoner.mk (see `make help`).
+train:
+    make train-account_takeover
 
 # ─── Infrastructure ──────────────────────────────────────────────────────────
 up:

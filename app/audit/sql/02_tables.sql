@@ -20,9 +20,9 @@
 -- outcome is recorded later in decision_resolution_attempts; this column
 -- stays as written.
 --
--- reasoner_id: tenant column (e.g., "ato-reasoner"). Reasoner-specific
---              business keys (account_id, content_id, …) live inside the
---              JSONB bundle, not as scalar columns.
+-- reasoner_id: tenant column holding the composing reasoner's id. A
+--              reasoner's own business keys live inside the JSONB bundle,
+--              not as scalar columns.
 -- entity_id:   framework UUID derived deterministically from the
 --              reasoner's domain business key via UUID5.
 -- ---------------------------------------------------------------------------
@@ -63,12 +63,18 @@ on decisionledger.decision_bundles (decision_action);
 -- risk_tier is nullable: null means the chunk applies to all tiers.
 -- Populated chunks are filtered by reasoner_id, jurisdiction, and risk_tier
 -- at retrieval time before the HNSW index is queried.
+--
+-- title is the owning document's human-readable title, denormalized onto
+-- every chunk so the retriever can build a citation without reading the
+-- corpus directory. Defaults to '' so rows written before the column
+-- existed stay valid.
 -- ---------------------------------------------------------------------------
 create table if not exists decisionledger.policy_chunks (
     chunk_id uuid primary key default gen_random_uuid(),
     reasoner_id text not null,
     policy_id text not null,
     policy_version text not null,
+    title text not null default '',
     jurisdiction text not null,
     risk_tier text,
     section_path text not null,
@@ -76,6 +82,10 @@ create table if not exists decisionledger.policy_chunks (
     embedding vector(384) not null,
     created_at timestamptz not null default now()
 );
+
+-- Idempotent migration for volumes created before title existed.
+alter table decisionledger.policy_chunks
+add column if not exists title text not null default '';
 
 create index if not exists idx_policy_chunks_hnsw
 on decisionledger.policy_chunks

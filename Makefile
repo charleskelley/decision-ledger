@@ -5,9 +5,20 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help lint lint-sql typecheck test test-smoke test-integration \
-        eval test-all check verify verify-ready verify-push scenario \
-        build-policy-index install-hooks train eval-model capture-baselines
+# Per-reasoner targets. Each reasoners/<domain>/reasoner.mk defines suffixed
+# targets (train-<domain>, prepare-<domain>, eval-<domain>, ...) and appends
+# them to the REASONER_*_TARGETS aggregates below. This file never names a
+# reasoner.
+REASONER_TRAIN_TARGETS   :=
+REASONER_INDEX_TARGETS   :=
+REASONER_PREPARE_TARGETS :=
+REASONER_EVAL_TARGETS    :=
+REASONER_HELP            :=
+-include $(wildcard reasoners/*/reasoner.mk)
+
+.PHONY: help sync lint lint-sql typecheck test test-smoke test-integration \
+        eval test-all check verify verify-ready verify-push \
+        build-policy-index install-hooks train prepare-reasoners
 
 # -----------------------------------------------------------------------------
 # Help
@@ -31,17 +42,17 @@ help:
 	@echo "    verify            Full local gate (check + integration + smoke; needs Docker)"
 	@echo "    verify-ready      Probe whether Docker + services are up"
 	@echo ""
-	@echo "  Evaluation"
-	@echo "    eval              Full 5-dimension evaluation harness (slow, costs money)"
-	@echo "    capture-baselines Re-capture faithfulness fixtures from live gate runs"
+	@echo "  Reasoners (aggregates over every reasoners/*/reasoner.mk)"
+	@echo "    train               Train every reasoner's model"
+	@echo "    build-policy-index  Embed and index every reasoner's policy corpus"
+	@echo "    prepare-reasoners   Index corpora + train missing models (pre-integration)"
+	@echo "    eval                Evaluation harness for every reasoner (slow, costs money)"
 	@echo ""
-	@echo "  Scorer"
-	@echo "    train             Train the ATO XGBoost scorer (writes artifact + card + CSVs)"
-	@echo "    eval-model        Evaluate the trained scorer on a fresh-seed test set"
+	@echo "  Per-reasoner targets"
+	@for line in $(REASONER_HELP); do echo "$$line"; done
 	@echo ""
 	@echo "  Development"
-	@echo "    scenario          Generate 10 baseline_normal events (quick smoke)"
-	@echo "    build-policy-index  Embed and index the policy corpus"
+	@echo "    sync              Install the framework + every workspace reasoner (uv sync)"
 	@echo "    install-hooks     Install pre-commit git hooks"
 	@echo ""
 
@@ -54,7 +65,7 @@ lint:
 	uv run ruff format .
 
 lint-sql:
-	uv run sqlfluff lint --dialect postgres infra/
+	uv run sqlfluff lint --dialect postgres app/audit/sql/
 
 typecheck:
 	uv run pyright
@@ -76,8 +87,8 @@ verify-ready:
 	@echo "✓ Docker daemon up; compose services running."
 
 # verify: full local gate. Strict — fails loudly if Docker isn't ready.
-# Use this manually before pushing changes that touch infra/, app/audit/,
-# app/retrieval/, or scenario YAMLs.
+# Use this manually before pushing changes that touch app/audit/,
+# app/retrieval/, docker-compose.yml, or a reasoner's package.
 verify: verify-ready check test-integration test-smoke
 	@echo "✓ verify: all local gates green"
 
@@ -99,45 +110,33 @@ verify-push:
 # Testing
 # -----------------------------------------------------------------------------
 
+# pytest testpaths covers tests/ and reasoners/*/tests.
 test:
-	uv run pytest tests/ -m "not integration and not evaluation and not slow and not smoke" -v
+	uv run pytest -m "not integration and not evaluation and not slow and not smoke" -v
 
 test-smoke:
-	uv run pytest tests/ -m smoke -v
+	uv run pytest -m smoke -v
 
 test-integration:
-	uv run pytest tests/ -m integration -v
-
-eval:
-	uv run python -m eval.runners.harness
-
-capture-baselines:
-	uv run python -m tools.capture_baselines
-
-# -----------------------------------------------------------------------------
-# Scorer training and evaluation
-# -----------------------------------------------------------------------------
-
-train:
-	uv run python -m reasoner.account_takeover.scorer train \
-		--output reasoner/account_takeover/scorer/models/ato-v1.ubj \
-		--samples 5000
-
-eval-model:
-	uv run python -m reasoner.account_takeover.scorer eval --model reasoner/account_takeover/scorer/models/ato-v1.ubj
+	uv run pytest -m integration -v
 
 test-all:
-	uv run pytest tests/ -v
+	uv run pytest -v
 
 # -----------------------------------------------------------------------------
 # Development
 # -----------------------------------------------------------------------------
 
-scenario:
-	uv run python -m generator run --scenario baseline_normal --count 10
+sync:
+	uv sync
 
-build-policy-index:
-	uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
+train: $(REASONER_TRAIN_TARGETS)
+
+build-policy-index: $(REASONER_INDEX_TARGETS)
+
+prepare-reasoners: $(REASONER_PREPARE_TARGETS)
+
+eval: $(REASONER_EVAL_TARGETS)
 
 install-hooks:
 	uv run pre-commit install

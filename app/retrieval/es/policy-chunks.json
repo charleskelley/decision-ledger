@@ -12,11 +12,14 @@
   },
   "mappings": {
     "_meta": {
-      "description": "BM25 sparse index over the ATO Reasoner policy corpus.",
-      "analyzer_strategy": "DR-13: text uses dual-analyzer multi-fields. text (english analyzer) handles natural language queries with stemming. text.keyword_search (standard analyzer) handles exact regulatory identifiers (AAL2, NIST 800-63B §5.2.3, INTERNAL-RISK-v2.1). Retriever must query both fields. See docs/design/decisions.md DR-13."
+      "description": "BM25 sparse index over every reasoner's policy corpus. Shared by all reasoners; documents are tenant-filtered at query time by the reasoner_id keyword field.",
+      "analyzer_strategy": "DR-13: text uses dual-analyzer multi-fields. text (english analyzer) handles natural language queries with stemming. text.keyword_search (standard analyzer) handles exact identifiers such as section numbers, control ids, or policy ids (e.g., 3.2.1, CTRL-7, POLICY-A-v2.1). Retriever must query both fields. See docs/design/decisions.md DR-13."
     },
     "properties": {
       "chunk_id": {
+        "type": "keyword"
+      },
+      "reasoner_id": {
         "type": "keyword"
       },
       "policy_id": {

@@ -1,13 +1,16 @@
 # Docker Compose V2 — no version key (deprecated; omit entirely for Compose V2)
 #
-# Brings up the full local development stack for DecisionLedger:
-#   Redis 7      — shared event queue (Streams) + sliding window feature store
-#                  Reasoners share the instance and namespace by key prefix
-#                  (e.g., `ato:*`).
+# Brings up the framework-owned local stack for DecisionLedger:
 #   PostgreSQL 16 + pgvector — shared vector store (dense retrieval) + audit
 #                  store. All reasoners share the database; tenant separation
-#                  is row-level via `reasoner_id`.
+#                  is row-level via `reasoner_id`. The init scripts are the
+#                  canonical DDL shipped in app/audit/sql/.
 #   Elasticsearch 8 — shared BM25 sparse retrieval for the policy corpus.
+#
+# Reasoner-owned infrastructure lives in each reasoner's own compose file and
+# is pulled in with `include:` (Compose >= 2.20):
+#   reasoners/account_takeover/compose.yaml — Redis 7 (ATO feature windows,
+#                  dedup store, login-event stream).
 #
 # M1 Max (ARM64) compatible: all images publish linux/arm64 manifests.
 #
@@ -16,24 +19,10 @@
 #   docker compose down         Stop services (volumes preserved)
 #   docker compose down -v      Full reset — removes all volumes
 
-services:
-  # ---------------------------------------------------------------------------
-  # Redis — event queue (Streams) + dedup store + feature sliding windows
-  # ---------------------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --save 60 1
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
+include:
+  - reasoners/account_takeover/compose.yaml
 
+services:
   # ---------------------------------------------------------------------------
   # PostgreSQL 16 + pgvector — dense vector store + Decision Bundle audit store
   # ---------------------------------------------------------------------------
@@ -47,8 +36,8 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - ./infra/postgres/02_tables.sql:/docker-entrypoint-initdb.d/02_tables.sql:ro
+      - ./app/audit/sql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./app/audit/sql/02_tables.sql:/docker-entrypoint-initdb.d/02_tables.sql:ro
     healthcheck:
       test:
         [
@@ -89,6 +78,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  redis_data:
   postgres_data:
   es_data:
