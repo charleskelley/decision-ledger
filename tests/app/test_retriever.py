@@ -1,21 +1,18 @@
-"""Unit tests for PolicyRetriever pure functions.
+"""Unit tests for PolicyRetriever pure functions and row mapping.
 
-Tests for rrf_fuse and rerank do not require Docker — infrastructure
-dependencies are mocked at construction time. Domain-specific query
-construction lives in ``reasoner/account_takeover/retrieval_query.py``
-and is exercised by ``tests/reasoner/account_takeover/test_retrieval_query.py``.
+Tests for rrf_fuse, rerank, and the row/source → snippet conversions do not
+require Docker — infrastructure dependencies are mocked at construction
+time. The retriever reads no corpus files: every chunk row carries its
+document ``title``. Domain-specific query construction lives with each
+reasoner (``reasoner/<domain>/retrieval_query.py``) and is tested there.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.retrieval.retriever import PolicyRetriever
 from core.snippet import RetrievedSnippet
-
-_CORPUS_DIR = Path(__file__).parents[2] / "corpus"
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,7 +25,6 @@ def _make_retriever() -> PolicyRetriever:
         pg_conn=MagicMock(),
         es=MagicMock(),
         model=MagicMock(),
-        corpus_dir=_CORPUS_DIR,
     )
 
 
@@ -148,7 +144,6 @@ def test_rerank_reorders_by_cross_encoder_score():
         es=MagicMock(),
         model=MagicMock(),
         cross_encoder=mock_ce,
-        corpus_dir=_CORPUS_DIR,
     )
     candidates = [
         _make_snippet("DOC-A"),
@@ -173,7 +168,6 @@ def test_rerank_updates_relevance_score_and_retrieval_path():
         es=MagicMock(),
         model=MagicMock(),
         cross_encoder=mock_ce,
-        corpus_dir=_CORPUS_DIR,
     )
     candidates = [_make_snippet("DOC-A", relevance_score=0.3)]
 
@@ -193,7 +187,6 @@ def test_rerank_truncates_to_k():
         es=MagicMock(),
         model=MagicMock(),
         cross_encoder=mock_ce,
-        corpus_dir=_CORPUS_DIR,
     )
     candidates = [_make_snippet(f"DOC-{i}") for i in range(5)]
 
@@ -220,7 +213,6 @@ def test_rerank_falls_back_to_rrf_on_timeout():
         model=MagicMock(),
         cross_encoder=mock_ce,
         rerank_timeout_ms=200.0,
-        corpus_dir=_CORPUS_DIR,
     )
     candidates = [_make_snippet("DOC-A"), _make_snippet("DOC-B")]
 
@@ -231,3 +223,91 @@ def test_rerank_falls_back_to_rrf_on_timeout():
 
     assert path == "rrf_only"
     assert result == candidates[:2]
+
+
+# ---------------------------------------------------------------------------
+# Row / source → snippet mapping (title comes from the stores, not the corpus)
+# ---------------------------------------------------------------------------
+
+
+def test_row_to_snippet_reads_title_from_the_row():
+    """The dense leg cites the title stored on the chunk row."""
+    r = _make_retriever()
+    row = {
+        "policy_id": "DOC-A",
+        "policy_version": "2.0",
+        "title": "Document A Title",
+        "jurisdiction": "REGION_A",
+        "section_path": "Overview",
+        "chunk_text": "Body.",
+        "relevance_score": 0.42,
+    }
+
+    snippet = r._row_to_snippet(row, retrieval_path="rrf_only")
+
+    assert snippet.title == "Document A Title"
+    assert snippet.document_id == "DOC-A"
+    assert snippet.relevance_score == 0.42
+
+
+def test_row_to_snippet_falls_back_to_document_id_for_pre_migration_rows():
+    """Rows written before the title column existed carry '' → use the id."""
+    r = _make_retriever()
+    row = {
+        "policy_id": "DOC-OLD",
+        "policy_version": "1.0",
+        "title": "",
+        "jurisdiction": "REGION_A",
+        "section_path": "Overview",
+        "chunk_text": "Body.",
+        "relevance_score": 0.1,
+    }
+
+    snippet = r._row_to_snippet(row, retrieval_path="rrf_only")
+
+    assert snippet.title == "DOC-OLD"
+
+
+def test_dense_search_selects_title_column_and_filters_by_reasoner():
+    """The dense SQL reads title from Postgres and scopes by reasoner_id."""
+    pg = MagicMock()
+    cursor = pg.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [
+        {
+            "policy_id": "DOC-A",
+            "policy_version": "2.0",
+            "title": "Document A Title",
+            "jurisdiction": "REGION_A",
+            "section_path": "Overview",
+            "chunk_text": "Body.",
+            "relevance_score": 0.9,
+        }
+    ]
+    model = MagicMock()
+    model.encode.return_value = [[0.0] * 3]
+    r = PolicyRetriever(pg_conn=pg, es=MagicMock(), model=model)
+
+    snippets = r.dense_search("query", k=1, reasoner_id="some-reasoner")
+
+    sql, params = cursor.execute.call_args.args
+    assert "title" in sql.split("FROM")[0]
+    assert "reasoner_id = %s" in sql
+    assert "some-reasoner" in params
+    assert snippets[0].title == "Document A Title"
+
+
+def test_source_to_snippet_reads_title_from_the_es_document():
+    """The sparse leg cites the title stored on the Elasticsearch document."""
+    r = _make_retriever()
+    source = {
+        "policy_id": "DOC-B",
+        "title": "Document B Title",
+        "version": "1.0",
+        "jurisdiction": "REGION_B",
+        "section_path": "Scope",
+        "text": "Body.",
+    }
+
+    snippet = r._source_to_snippet(source, retrieval_path="rrf_only")
+
+    assert snippet.title == "Document B Title"

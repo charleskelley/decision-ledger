@@ -1,7 +1,7 @@
 """Behavioral tests for Observation protocol conformance.
 
 These tests verify DR-11's structural subtyping contract: domain types satisfy
-framework protocols without inheritance. A LoginEvent IS an Observation. If
+framework protocols without inheritance. A StubEvent IS an Observation. If
 these assertions break, the entire framework/domain boundary has been violated.
 
 Why there is no test_observation.py:
@@ -19,48 +19,48 @@ from core.observation import Observation
 from core.routes import GateRoute
 
 
-def test_login_event_satisfies_observation_protocol(login_event):
-    assert isinstance(login_event, Observation)
+def test_stub_event_satisfies_observation_protocol(observation):
+    assert isinstance(observation, Observation)
 
 
-def test_observation_requires_event_id(login_event):
+def test_observation_requires_event_id(observation):
     class MissingEventId:
-        entity_id = login_event.entity_id
-        entity_type = "account"
+        entity_id = observation.entity_id
+        entity_type = "widget"
         timestamp = datetime.now(UTC)
 
     assert not isinstance(MissingEventId(), Observation)
 
 
-def test_observation_requires_entity_id(login_event):
+def test_observation_requires_entity_id(observation):
     class MissingEntityId:
         event_id = "evt-001"
-        entity_type = "account"
+        entity_type = "widget"
         timestamp = datetime.now(UTC)
 
     assert not isinstance(MissingEntityId(), Observation)
 
 
-def test_observation_requires_entity_type(login_event):
+def test_observation_requires_entity_type(observation):
     class MissingEntityType:
         event_id = "evt-001"
-        entity_id = login_event.entity_id
+        entity_id = observation.entity_id
         timestamp = datetime.now(UTC)
 
     assert not isinstance(MissingEntityType(), Observation)
 
 
-def test_observation_requires_timestamp(login_event):
+def test_observation_requires_timestamp(observation):
     class MissingTimestamp:
         event_id = "evt-001"
-        entity_id = login_event.entity_id
-        entity_type = "account"
+        entity_id = observation.entity_id
+        entity_type = "widget"
 
     assert not isinstance(MissingTimestamp(), Observation)
 
 
 def test_observation_satisfied_by_any_conforming_type(
-    login_event, gate_context, reasoner_context
+    observation, gate_context, reasoner_context
 ):
     # Any object with all required Observation fields satisfies the protocol,
     # regardless of inheritance. This is structural subtyping (PEP 544).
@@ -69,7 +69,7 @@ def test_observation_satisfied_by_any_conforming_type(
 
     class MinimalObservation:
         event_id = "minimal-001"
-        entity_id = login_event.entity_id
+        entity_id = observation.entity_id
         entity_type = "vendor"
         timestamp = datetime.now(UTC)
         route = GateRoute.ROUTE_TO_GATE

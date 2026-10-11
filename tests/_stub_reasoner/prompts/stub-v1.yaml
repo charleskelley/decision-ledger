@@ -1,0 +1,24 @@
+template_id: stub-v1
+version: 1.0.0
+description: >
+  Stub reasoner policy gate template. Exists so framework tests can load a
+  prompt registry and render a template without any real reasoner's files.
+  No `system:` key — the framework default system text applies.
+
+template: |
+  Evaluate the widget observation below against the retrieved policy evidence.
+
+  ## Widget Observation
+
+  Widget score: {widget_score}
+  Thin history: {thin_history}
+  Region: {region}
+
+  ## Retrieved Policy Evidence
+
+  {policy_snippets}
+
+  ## Decision Instructions
+
+  Respond with a JSON object containing permitted_actions, required_controls,
+  rationale, citations, confidence, escalate_to_human, and escalation_reason.
