@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
@@ -37,6 +36,7 @@ from eval.judge import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from core.llm import LLMClient
 
@@ -52,7 +52,6 @@ THRESHOLD_SUPERFICIAL_RATE_MAX = 0.05  # ≤ 5% may be superficial
 # scores ≤ 2/5 = 0.4 are flagged).
 SUPERFICIAL_BOUNDARY = 0.4
 
-_DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "citations"
 _RELEVANCE_TEMPLATE_ID = "citation_relevance"
 _ENTAILMENT_TEMPLATE_ID = "citation_entailment"
 
@@ -154,18 +153,6 @@ class CitationDimension:
         self._cases = cases
         self._registry = prompt_registry or JudgePromptRegistry()
         self._sem = asyncio.Semaphore(max_concurrency)
-
-    @classmethod
-    def from_default_dataset(
-        cls,
-        *,
-        client: LLMClient,
-        max_concurrency: int = 4,
-    ) -> CitationDimension:
-        """Construct using the bundled ``golden_outputs.yaml`` dataset."""
-        path = _DATASETS_DIR / "golden_outputs.yaml"
-        cases = load_citation_cases(path) if path.exists() else []
-        return cls(client=client, cases=cases, max_concurrency=max_concurrency)
 
     async def evaluate(self) -> DimensionRun:
         """Run both judges on every case and assemble the dimension run."""

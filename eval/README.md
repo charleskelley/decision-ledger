@@ -3,13 +3,40 @@
 The 5-dimension evaluation harness for DecisionLedger. Run with:
 
 ```bash
-make eval
+make eval                         # one harness run per installed reasoner
+make eval-account_takeover        # just the ATO reasoner
+# or, for any installed reasoner:
+uv run python -m eval.runners.harness --reasoner-id <reasoner-id>
 ```
 
-This invokes `eval/runners/harness.py:main`, which constructs the default
-dimension set, runs each dimension concurrently, assembles an
-`EvalReport`, writes it to disk, and exits with a code reflecting
-threshold pass/fail.
+This invokes `eval/runners/harness.py:main`, which loads the named
+reasoner's eval adapter, constructs the default dimension set, runs each
+dimension concurrently, assembles an `EvalReport`, writes it to disk, and
+exits with a code reflecting threshold pass/fail.
+
+## Reasoner eval adapters
+
+The harness is reasoner-agnostic. Everything reasoner-specific comes from
+an `EvalAdapter` (`eval/adapter.py`) that the reasoner publishes under the
+`decisionledger.eval_adapters` entry point group, named by its
+`reasoner_id`:
+
+| Adapter field | Used for |
+|---|---|
+| `reasoner_id` | Tenant filter for the retrieval dimension; must equal the entry point name |
+| `event_type` | Pydantic model the consistency and robustness datasets are validated against |
+| `datasets_dir` | Root of the golden datasets: `retrieval/`, `faithfulness/`, `scenarios/`, `citations/`, `robustness/` |
+| `build_driver(settings)` | Returns an `EvalDriver` into the reasoner's live pipeline |
+
+The reasoner is chosen with `--reasoner-id` or the
+`DECISIONLEDGER_EVAL_REASONER` env var. A missing or unknown id exits 2
+and lists the installed adapters.
+
+The ATO reasoner's adapter is `ato_reasoner.eval.adapter:ADAPTER`; its
+driver (`ato_reasoner/eval/driver.py`), golden datasets
+(`ato_reasoner/eval/datasets/`), and fixture re-capture script
+(`make capture-baselines-account_takeover`) all live in
+`reasoners/account_takeover/src/ato_reasoner/eval/`.
 
 ## Output paths
 
@@ -17,6 +44,15 @@ threshold pass/fail.
 |---|---|---|
 | `outputs/stage/eval/eval-report.json` | Default — overwritten by every `make eval` | gitignored |
 | `outputs/eval/eval-report-v<N>.json` | Tracked baselines, explicitly promoted from staging | tracked |
+
+Every run writes the same default path, so when `make eval` covers more
+than one reasoner, the last run's report wins; pass `--output` per
+reasoner to keep each.
+
+The tracked `eval-report-v1.json` (2026-05-06) predates DR-26: it was
+produced with the `ato-v2` prompt and an unfiltered retrieval dimension.
+It has not been regenerated since the switch to `ato-v3` and the
+`reasoner_id`-filtered retrieval path.
 
 Override the default with `--output PATH` or `EVAL_OUTPUT_PATH=…`; the
 flag wins when both are set.
@@ -35,13 +71,13 @@ git add outputs/eval/eval-report-v<N>.json
 |---|---|
 | 0 | All dimensions passed thresholds (`overall_passed=true`) |
 | 1 | One or more dimensions failed thresholds |
-| 2 | No dimensions registered (config error; no report file written) |
+| 2 | Config error: no reasoner named, no eval adapter for it, missing API keys, or no dimensions registered (no report file written) |
 
 ## Required env vars
 
-`OPENAI_API_KEY` — required after MVP plan Step 3 wires the
-faithfulness and citation dimensions. Currently no env vars are
-required (no dimensions wired; harness exits 2).
+`OPENAI_API_KEY` (the policy gate inside the reasoner's pipeline) and
+`ANTHROPIC_API_KEY` (the faithfulness and citation judges). The harness
+exits 2 when either is missing.
 
 ## EvalReport JSON schema
 

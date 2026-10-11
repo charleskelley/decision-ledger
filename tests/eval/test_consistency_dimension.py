@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from core.actions import DecisionAction
 from core.eval.metrics import ConsistencyMetrics, EvalDimension
@@ -29,12 +30,7 @@ from eval.dimensions.consistency import (
     is_stable,
     load_scenarios,
 )
-from reasoner.account_takeover.events import (
-    AuthMethod,
-    AuthOutcome,
-    Geolocation,
-    LoginEvent,
-)
+from tests._stub_reasoner.events import StubEvent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -44,24 +40,13 @@ if TYPE_CHECKING:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-_GEO = Geolocation(
-    latitude=37.7749, longitude=-122.4194, country="US", city="SF", asn="AS15169"
-)
 
-
-def _event(event_id: str, account_id: str = "acct-1") -> LoginEvent:
-    """Construct a minimal LoginEvent for ordering tests."""
-    return LoginEvent(
+def _event(event_id: str, widget_id: str = "widget-1") -> StubEvent:
+    """Construct a minimal stub-reasoner event for ordering tests."""
+    return StubEvent(
         event_id=event_id,
         timestamp=datetime(2026, 4, 28, tzinfo=UTC),
-        account_id=account_id,
-        session_id=f"sess-{event_id}",
-        ip_address="10.0.0.1",
-        geolocation=_GEO,
-        device_fingerprint="dev-1",
-        user_agent="ua/1.0",
-        auth_method=AuthMethod.PASSWORD,
-        outcome=AuthOutcome.SUCCESS,
+        widget_id=widget_id,
     )
 
 
@@ -76,7 +61,7 @@ class _StubDriver:
         self._by_trigger = by_trigger
         self.calls: list[list[str]] = []
 
-    async def run(self, events: Sequence[LoginEvent]) -> PipelineRunResult:
+    async def run(self, events: Sequence[StubEvent]) -> PipelineRunResult:
         ids = [e.event_id for e in events]
         self.calls.append(ids)
         trigger = ids[-1]
@@ -145,7 +130,7 @@ class TestConfidenceVariance:
 class TestLoadScenarios:
     def test_round_trip_yaml(self, tmp_path: Path) -> None:
         fixture = tmp_path / "scenarios.yaml"
-        # Build YAML using the real LoginEvent JSON dump for exact-shape match.
+        # Build YAML using the event model's JSON dump for exact-shape match.
         e1_json = _event("e1").model_dump_json()
         e2_json = _event("e2").model_dump_json()
         # YAML happens to accept JSON, so embedding the JSON dumps works.
@@ -160,13 +145,47 @@ class TestLoadScenarios:
             f"        events: [{e2_json}, {e1_json}]\n",
             encoding="utf-8",
         )
-        scenarios = load_scenarios(fixture)
+        scenarios = load_scenarios(fixture, event_type=StubEvent)
         assert len(scenarios) == 1
         s = scenarios[0]
         assert s.scenario_id == "s1"
         assert len(s.orderings) == 2
         assert {o.ordering_id for o in s.orderings} == {"chronological", "reverse"}
         assert {e.event_id for e in s.orderings[0].events} == {"e1", "e2"}
+
+    def test_loaded_events_are_instances_of_the_supplied_event_type(
+        self, tmp_path: Path
+    ) -> None:
+        fixture = tmp_path / "scenarios.yaml"
+        e1_json = _event("e1").model_dump_json()
+        fixture.write_text(
+            "scenarios:\n"
+            "  - scenario_id: s1\n"
+            "    description: typed\n"
+            "    orderings:\n"
+            f"      - {{ordering_id: a, events: [{e1_json}]}}\n"
+            f"      - {{ordering_id: b, events: [{e1_json}]}}\n",
+            encoding="utf-8",
+        )
+        scenarios = load_scenarios(fixture, event_type=StubEvent)
+        events = [e for o in scenarios[0].orderings for e in o.events]
+        assert all(type(e) is StubEvent for e in events)
+
+    def test_events_that_do_not_match_the_event_type_are_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        fixture = tmp_path / "scenarios.yaml"
+        fixture.write_text(
+            "scenarios:\n"
+            "  - scenario_id: s1\n"
+            "    description: wrong shape\n"
+            "    orderings:\n"
+            "      - {ordering_id: a, events: [{event_id: e1}]}\n"
+            "      - {ordering_id: b, events: [{event_id: e1}]}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValidationError):
+            load_scenarios(fixture, event_type=StubEvent)
 
 
 # ---------------------------------------------------------------------------
