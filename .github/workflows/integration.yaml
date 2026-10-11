@@ -1,7 +1,8 @@
 name: Integration
 
-# Integration + smoke tests against live Redis + Postgres+pgvector +
-# Elasticsearch. Trunk-based development: also runs on direct push to
+# Integration + smoke tests against live Postgres+pgvector + Elasticsearch
+# (framework services) plus each matrix reasoner's own infrastructure (Redis
+# for account_takeover). Trunk-based development: also runs on direct push to
 # main so solo trunk pushes are validated even without a PR cycle.
 # OpenAI/Anthropic spend stays bounded because the smoke suite hits the
 # fast-path scorer; only gate-routed events make LLM calls.
@@ -19,14 +20,22 @@ concurrency:
 
 jobs:
   integration:
-    name: Integration + smoke
+    name: Integration + smoke (${{ matrix.reasoner }})
     # Fork PRs cannot see repository secrets (OPENAI/ANTHROPIC keys), so the
     # suite would fail spuriously — maintainers run it before merge instead.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # One job per reasoner workspace member (reasoners/<name>). Framework
+    # integration tests run once per entry; fine while there is one reasoner.
+    strategy:
+      fail-fast: false
+      matrix:
+        reasoner: [account_takeover]
+
     services:
+      # Reasoner infrastructure (mirrors reasoners/account_takeover/compose.yaml).
       redis:
         image: redis:7-alpine
         ports:
@@ -40,13 +49,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: account_takeover
-          POSTGRES_PASSWORD: account_takeover
-          POSTGRES_DB: account_takeover
+          POSTGRES_USER: decisionledger
+          POSTGRES_PASSWORD: decisionledger
+          POSTGRES_DB: decisionledger
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U account_takeover -d account_takeover"
+          --health-cmd "pg_isready -U decisionledger -d decisionledger"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
@@ -73,11 +82,10 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: 5432
-      POSTGRES_USER: account_takeover
-      POSTGRES_PASSWORD: account_takeover
-      POSTGRES_DB: account_takeover
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
+      POSTGRES_USER: decisionledger
+      POSTGRES_PASSWORD: decisionledger
+      POSTGRES_DB: decisionledger
+      ATO_REDIS_URL: redis://localhost:6379
       ELASTICSEARCH_URL: http://localhost:9200
 
     steps:
@@ -101,24 +109,17 @@ jobs:
       # way docker-compose does, so apply Postgres init SQL explicitly.
       - name: Initialize Postgres schema (pgvector + tables)
         env:
-          PGPASSWORD: account_takeover
+          PGPASSWORD: decisionledger
         run: |
-          psql -h localhost -U account_takeover -d account_takeover \
-            -f infra/postgres/01_init.sql
-          psql -h localhost -U account_takeover -d account_takeover \
-            -f infra/postgres/02_tables.sql
+          psql -h localhost -U decisionledger -d decisionledger \
+            -f app/audit/sql/01_init.sql
+          psql -h localhost -U decisionledger -d decisionledger \
+            -f app/audit/sql/02_tables.sql
 
-      - name: Train scorer if artifact missing
-        run: |
-          if [ ! -f reasoner/account_takeover/scorer/models/ato-v1.ubj ]; then
-            echo "Scorer artifact not in repo — training a small model for CI."
-            uv run python -m reasoner.account_takeover.scorer train \
-              --output reasoner/account_takeover/scorer/models/ato-v1.ubj \
-              --samples 2000
-          fi
-
-      - name: Build policy index (pgvector + Elasticsearch)
-        run: make build-policy-index
+      # Index the reasoner's policy corpus and train its model if missing
+      # (reasoners/<name>/reasoner.mk).
+      - name: Prepare reasoner (policy index + model)
+        run: make prepare-${{ matrix.reasoner }}
 
       - name: Integration tests
         run: make test-integration
