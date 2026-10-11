@@ -46,7 +46,7 @@ class Observation(Protocol):
 
     Attributes:
         event_id: Domain-assigned unique identifier for the raw event
-            (e.g., a login event ID, transaction ID, or claim ID).
+            (e.g., a transaction ID, claim ID, or content ID).
             Must be unique per event instance. Used by the framework
             for deduplication, bundle idempotency, structured log
             correlation, and feature-store windowing. Distinct from

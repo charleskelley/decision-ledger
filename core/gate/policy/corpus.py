@@ -1,9 +1,9 @@
 """Policy corpus metadata schema and document classification enum.
 
-Jurisdiction and RiskTier enums are domain-specific and live in
-reasoner/account_takeover/. PolicyDocument uses plain strings for those fields
-so that any domain's classification vocabulary is accepted without coupling
-the framework to ATO-specific enumerations.
+Jurisdiction and risk-tier enums are domain-specific and live in each
+reasoner's own package. PolicyDocument uses plain strings for those fields so
+that any domain's classification vocabulary is accepted without coupling the
+framework to any one reasoner's enumerations.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class DocumentType(StrEnum):
         REGULATION: Legally binding rule with penalties for non-compliance
             (e.g., GDPR, GLBA, CCPA). Highest retrieval authority.
         GUIDANCE: Non-binding best-practice document issued by a regulatory
-            body or standards organization (e.g., NIST SP 800-63B, FFIEC).
+            body or standards organization.
         INTERNAL_POLICY: Organization-specific policy document. Superseded
             by REGULATION or STANDARD where they conflict.
         STANDARD: Technical or operational standard (e.g., ISO 27001,
@@ -51,7 +51,7 @@ class PolicyDocument(BaseModel):
     to import domain-specific types.
 
     Attributes:
-        policy_id: Stable identifier (e.g., "NIST-800-63B", "INTERNAL-RISK-v2.1").
+        policy_id: Stable identifier (e.g., "REG-123", "POLICY-A-v2.1").
         title: Human-readable document title.
         version: Semantic version string (e.g., "2.1", "4.0").
         jurisdiction: Regulatory jurisdiction this document applies to.

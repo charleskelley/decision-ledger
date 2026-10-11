@@ -37,8 +37,10 @@ class ResolverKind(StrEnum):
     Attributes:
         HUMAN: Analyst review (MVP).
         SLA_DEFAULT: System-driven default action applied at SLA expiry (MVP).
-        STEP_UP_AUTH: MFA / step-up authentication challenge outcome.
-        AUTOMATED_OUTREACH: Email or SMS verification with the account holder.
+        STEP_UP_AUTH: Outcome of an additional verification challenge issued
+            to the subject of the decision.
+        AUTOMATED_OUTREACH: Automated verification (email, SMS, …) with the
+            entity's owner.
         SECOND_OPINION: Heavyweight model or additional gate evaluation.
         EXTERNAL_TICKET: External case-management system (Jira, ServiceNow).
         SELF_SERVICE: End-user verification through the application.

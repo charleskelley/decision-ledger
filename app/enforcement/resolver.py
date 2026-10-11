@@ -6,8 +6,14 @@ in override_log regardless of whether it fired, so the full decision trail is
 available for audit without re-running enforcement.
 
 Fast-path observations (FAST_PATH_ALLOW / FAST_PATH_BLOCK) return immediately
-with no tier evaluation — the domain reasoner was confident enough to bypass
-the gate.
+with no tier evaluation — the reasoner was confident enough to bypass the gate.
+
+The resolver is reasoner-agnostic. The two tiers that depend on what a
+reasoner measures (Tier 3, novel entity) or which policy jurisdictions it
+spans (Tier 5, jurisdiction conflict) read their profile from the
+``ReasonerRegistration`` passed by the caller — ``novel_entity_feature`` and
+``jurisdiction_conflict_groups`` respectively. A registration that leaves
+either unset disables the corresponding structural check.
 
 The enforcement layer produces the bundle's ``decision_action``. For
 non-terminal actions (CHALLENGE, HOLD) the realized outcome is determined
@@ -17,7 +23,6 @@ not concerned with that downstream lifecycle.
 Tier constants (tune without changing resolver logic):
     LOW_CONFIDENCE_THRESHOLD  — below this, gate output confidence is considered
                                  insufficient for high-stakes actions.
-    NOVEL_ENTITY_FEATURE      — feature_set key that signals insufficient history.
     ADVERSARIAL_CONTROL       — required_controls sentinel the gate emits when it
                                  detects a prompt injection or adversarial probe.
     JURISDICTION_CONFLICT_CTL — required_controls sentinel for detected conflicts.
@@ -35,7 +40,7 @@ from core.routes import GateRoute
 
 if TYPE_CHECKING:
     from core.gate import GateVerdict
-    from core.observation import Observation
+    from core.observation import Observation, ReasonerRegistration
     from core.snippet import RetrievedSnippet
 
 log = structlog.get_logger(__name__)
@@ -45,7 +50,6 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 LOW_CONFIDENCE_THRESHOLD: float = 0.60
-NOVEL_ENTITY_FEATURE: str = "sparse_history"
 ADVERSARIAL_CONTROL: str = "adversarial_probe_detected"
 JURISDICTION_CONFLICT_CTL: str = "jurisdiction_conflict"
 
@@ -55,9 +59,6 @@ _SEVERITY_ORDER = [
     DecisionAction.HOLD,
     DecisionAction.BLOCK,
 ]
-
-_US_JURISDICTIONS = frozenset({"US_FEDERAL", "US_STATE"})
-_EU_JURISDICTIONS = frozenset({"EU_GDPR"})
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,7 @@ def resolve(
     *,
     snippets: list[RetrievedSnippet],
     decision_id: str,
+    registration: ReasonerRegistration,
 ) -> EnforcementDecision:
     """Resolve a decision action from the gate's typed verdict and observation context.
 
@@ -79,7 +81,7 @@ def resolve(
     audit traceability.
 
     Args:
-        obs: The assembled Observation from the domain reasoner.
+        obs: The assembled Observation from the reasoner.
         gate_output: Validated gate verdict (a ``GateVerdict``), or ``None``
             if the gate response failed schema validation or the gate was
             not invoked.
@@ -87,6 +89,11 @@ def resolve(
             observation. Used for jurisdiction-conflict detection (Tier 5).
         decision_id: The ``decision_id`` of the bundle being assembled.
             Carried in the structured log context.
+        registration: The submitting reasoner's registration. Supplies the
+            enforcement profile: ``novel_entity_feature`` (Tier 3) and
+            ``jurisdiction_conflict_groups`` (Tier 5). Required — passing
+            it explicitly keeps "this reasoner has no novel-entity signal"
+            a deliberate declaration rather than a silent omission.
 
     Returns:
         An immutable ``EnforcementDecision`` with the decision action, the
@@ -99,7 +106,7 @@ def resolve(
         "route": obs.route.value,
     }
 
-    # Fast-path: domain reasoner was high-confidence — no tier evaluation.
+    # Fast-path: reasoner was high-confidence — no tier evaluation.
     if obs.route == GateRoute.FAST_PATH_ALLOW:
         log.debug("enforcement.fast_path_allow", **log_ctx)
         return EnforcementDecision(
@@ -153,15 +160,20 @@ def resolve(
         )
     override_log.append("tier2_adversarial_probe: not fired")
 
-    # --- Tier 3: Novel entity (sparse history) ---
-    feature_set = obs.reasoner_context.feature_set if obs.reasoner_context else {}
-    is_sparse = bool(feature_set.get(NOVEL_ENTITY_FEATURE, False))
-    if is_sparse:
-        return _make_hold(
-            "tier3_novel_entity",
-            "Insufficient account history for confident decision — HOLD for review",
+    # --- Tier 3: Novel entity (insufficient history) ---
+    novel_feature = registration.novel_entity_feature
+    if novel_feature is None:
+        override_log.append(
+            "tier3_novel_entity: not fired — no novel-entity feature configured"
         )
-    override_log.append("tier3_novel_entity: not fired — history sufficient")
+    else:
+        feature_set = obs.reasoner_context.feature_set if obs.reasoner_context else {}
+        if bool(feature_set.get(novel_feature, False)):
+            return _make_hold(
+                "tier3_novel_entity",
+                "Insufficient account history for confident decision — HOLD for review",
+            )
+        override_log.append("tier3_novel_entity: not fired — history sufficient")
 
     # --- Tier 4: Low confidence + high-risk action ---
     conservative = _most_conservative(gate_output.permitted_actions)
@@ -181,7 +193,9 @@ def resolve(
     )
 
     # --- Tier 5: Jurisdiction conflict ---
-    if _has_jurisdiction_conflict(gate_output, snippets):
+    if _has_jurisdiction_conflict(
+        gate_output, snippets, registration.jurisdiction_conflict_groups
+    ):
         return _make_hold(
             "tier5_jurisdiction_conflict",
             "Conflicting policy requirements across jurisdictions — HOLD for review",
@@ -220,8 +234,16 @@ def _most_conservative(actions: list[DecisionAction]) -> DecisionAction:
 def _has_jurisdiction_conflict(
     gate_output: GateVerdict,
     snippets: list[RetrievedSnippet],
+    conflict_groups: tuple[frozenset[str], ...],
 ) -> bool:
-    """Return True if a jurisdiction conflict is signalled."""
+    """Return True if a jurisdiction conflict is signaled.
+
+    Two detection paths: the gate flags it explicitly (via the
+    ``JURISDICTION_CONFLICT_CTL`` control or a conflict-worded escalation),
+    or the retrieved snippets structurally span at least two distinct
+    ``conflict_groups``. An empty ``conflict_groups`` disables the
+    structural path.
+    """
     # Gate explicitly flagged it.
     if JURISDICTION_CONFLICT_CTL in gate_output.required_controls:
         return True
@@ -234,8 +256,8 @@ def _has_jurisdiction_conflict(
         )
     ):
         return True
-    # Structural detection: both US and EU policy chunks present in top results.
+    # Structural detection: top results span two or more distinct conflict
+    # groups declared on the reasoner's registration.
     jurisdictions = {s.jurisdiction for s in snippets}
-    return bool(jurisdictions & _US_JURISDICTIONS) and bool(
-        jurisdictions & _EU_JURISDICTIONS
-    )
+    groups_touched = {g for g in conflict_groups if jurisdictions & g}
+    return len(groups_touched) >= 2

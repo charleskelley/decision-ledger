@@ -35,9 +35,9 @@ class RetrievedSnippet(BaseModel):
         version: Semantic version of the source document.
         jurisdiction: Regulatory jurisdiction of the source document.
             Plain string — domain code uses its own jurisdiction enum for
-            type-safe construction (e.g., reasoner/account_takeover/).
+            type-safe construction (a ``StrEnum`` in the reasoner package).
         section_path: Hierarchical path within the document
-            (e.g., "5.2.3 — Authenticator Assurance Level 2").
+            (e.g., "3.2 — Scope").
         text: Chunk text as retrieved (verbatim from the corpus).
         relevance_score: Score produced by the retriever for this chunk
             against the query, in the retriever's own scoring scheme.

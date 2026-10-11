@@ -37,3 +37,27 @@ class ObservationContractError(Exception):
         self.reasoner_id = reasoner_id
         self.violation = violation
         super().__init__(f"Observation contract violation [{reasoner_id}]: {violation}")
+
+
+class ReasonerPluginError(Exception):
+    """Raised when the framework cannot discover or validate a reasoner plugin.
+
+    This is a deployment-composition error, distinct from a runtime contract
+    violation: the installed set of reasoner plugins is malformed (a plugin
+    fails to load, does not satisfy the ``ReasonerPlugin`` protocol, declares
+    an entry-point name that differs from its ``reasoner_id``, or collides
+    with another plugin's ``reasoner_id``). Raised at startup so a broken
+    deployment fails fast rather than silently running without a reasoner.
+    The eval harness raises it for the same faults in a reasoner's eval
+    adapter (missing, unloadable, non-conforming, or mismatched id).
+
+    Args:
+        plugin_name: The entry-point name (or best available identifier) of
+            the offending plugin.
+        reason: Human-readable description of what went wrong.
+    """
+
+    def __init__(self, plugin_name: str, reason: str) -> None:  # noqa: D107
+        self.plugin_name = plugin_name
+        self.reason = reason
+        super().__init__(f"Reasoner plugin error [{plugin_name}]: {reason}")

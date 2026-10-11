@@ -42,13 +42,17 @@ class PromptSnapshot(BaseModel):
     the template without querying the registry.
 
     Attributes:
-        template_id: Stable template identifier (e.g., ``"ato-v1"``).
+        template_id: Stable template identifier (e.g., ``"example-v1"``).
             Matches ``GateContext.prompt_template_id`` on the Observation.
         version: Semantic version of the template at invocation time
             (e.g., ``"1.0.0"``).
         template_text: Full template content at invocation time. Contains
             ``{placeholder}`` tokens for domain variables and
             ``{policy_snippets}`` for retrieved policy context.
+        system_text: The system message sent alongside the rendered
+            template at invocation time. Defaults to ``""`` so bundles
+            persisted before the system prompt moved into the template
+            remain loadable; new bundles always carry the live value.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -56,6 +60,7 @@ class PromptSnapshot(BaseModel):
     template_id: str
     version: str
     template_text: str
+    system_text: str = ""
 
 
 class PromptTemplate(BaseModel):
@@ -74,7 +79,7 @@ class PromptTemplate(BaseModel):
         template_id: Stable identifier used as the audit key in
             ``PolicyGateInput.prompt_template_id`` and as the lookup key
             in ``PromptRegistry``. Matches the filename stem of the source
-            YAML (e.g., ``"ato-v1"`` from ``ato-v1.yaml``). Immutable once
+            YAML (e.g., ``"example-v1"`` from ``example-v1.yaml``). Immutable once
             deployed — changing this value requires a new file.
         version: Semantic version of this template (e.g., ``"1.0.0"``).
             Recorded alongside ``template_id`` for fine-grained audit
@@ -85,6 +90,11 @@ class PromptTemplate(BaseModel):
             ``{policy_snippets}`` where the gate injects retrieved policy
             chunks. May contain any number of ``{var_name}`` placeholders
             for domain-provided variables.
+        system_text: The system message the gate sends alongside the
+            rendered ``template_text``. Owned by the template (and so by
+            the reasoner that ships it) rather than by the gate, so the
+            framework carries no domain wording. Sent verbatim — no
+            placeholder substitution.
         required_vars: Variable names that must be present in
             ``GateContext.gate_config["template_vars"]`` when this
             template is rendered. Derived from placeholders in
@@ -98,6 +108,7 @@ class PromptTemplate(BaseModel):
     version: str
     description: str
     template_text: str
+    system_text: str
     required_vars: frozenset[str]
 
 
