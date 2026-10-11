@@ -258,7 +258,7 @@ keep correct without typed support. At that point the migration is:
    discriminated-union deserialization picks the concrete subclass by
    `gate_id`.
 5. The reasoner-side assembler (e.g.,
-   `reasoner/account_takeover/assembler.py:build_observation`)
+   `ato_reasoner/assembler.py:build_observation`)
    constructs the appropriate concrete config — this introduces the
    coupling the dict was avoiding, but it makes the contract type-safe
    and IDE-discoverable.
@@ -285,7 +285,9 @@ Both are DR-grade decisions, not casual refactors.
 
 If post-MVP you build features like A/B-testing two policy-gate
 prompts, region-specific gate variants, or canary deployments, the
-extension point is at the orchestrator (`app/main.py`) — pick which
+extension point is the orchestrator (`app/decide.py:execute_decision`,
+which receives the gate instance as an argument, and
+`app/bootstrap.py:build_framework_services`, which builds it) — pick which
 gate instance to invoke per request. The contracts in `core/gate/` don't
 need to change. Multiple gate *instances* of the same *kind* still share
 the same `gate_id` and concrete subclass; instance selection is an

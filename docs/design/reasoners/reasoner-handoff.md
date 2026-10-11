@@ -16,6 +16,11 @@ implementation, the ATO Reasoner is responsible for: ingesting login events,
 computing sliding-window behavioural features, and scoring risk with an
 XGBoost model.
 
+Physically, a reasoner is a uv workspace member under `reasoners/<name>/` with
+its own `pyproject.toml` and import package (ATO: `reasoners/account_takeover/`,
+import package `ato_reasoner`). The framework discovers it through Python entry
+points and never imports it (DR-26).
+
 The **DecisionLedger framework** takes over from there: policy retrieval, LLM
 policy gate reasoning, deterministic enforcement, and Decision Bundle
 construction. The framework is domain-agnostic — it has no knowledge of login
@@ -47,8 +52,9 @@ Two routing paths exist within governed mode:
   the LLM to produce a structured decision.
 - **Fast Path** — the domain's score is in a high-confidence band
   (`FAST_PATH_ALLOW` or `FAST_PATH_BLOCK`). The framework bypasses live gate
-  invocation and enforces the fast-path action directly. A `FastPathRecord` is
-  required; `GateContext` is still required (for shadow evaluation).
+  invocation and enforces the fast-path action directly. A
+  `fast_path_rationale` is required; `GateContext` is still required (for
+  shadow evaluation).
 
 ### Audit-Only Mode (future — not implemented in MVP)
 
@@ -65,7 +71,7 @@ upstream, or operates in a risk area with no applicable policy corpus).
 
 ## The Handoff Contract
 
-### `Observation` Protocol (`core/decision/observation.py`)
+### `Observation` Protocol (`core/observation/observation.py`)
 
 The framework accepts any type satisfying this protocol (structural subtyping,
 PEP 544). The ATO Reasoner satisfies it via `LoginEvent`.
@@ -76,14 +82,14 @@ PEP 544). The ATO Reasoner satisfies it via `LoginEvent`.
 | `entity_id` | `UUID` | Always | Framework UUID — derived from domain business key via UUID5 |
 | `entity_type` | `str` | Always | Subject classification (e.g., `"account"`) |
 | `timestamp` | `datetime` | Always | When the event occurred (UTC) |
-| `routing` | `GateRouting` | Always | `ROUTE_TO_GATE`, `FAST_PATH_ALLOW`, or `FAST_PATH_BLOCK` |
+| `route` | `GateRoute` | Always | `ROUTE_TO_GATE`, `FAST_PATH_ALLOW`, or `FAST_PATH_BLOCK` |
 | `reasoner_context` | `ReasonerContext \| None` | Governed mode | `None` only in intermediate pipeline stages pre-assembly |
 | `fast_path_rationale` | `str \| None` | Fast path only | Required when routing is fast path — human-readable explanation of why the policy gate was bypassed. `None` when routing to gate. `ObservationContractError` raised if absent on fast-path submission. |
 | `gate_context` | `GateContext` | Governed mode | Required on all observations — including fast path |
 
 ---
 
-### `ReasonerContext` (`core/decision/reasoner_context.py`)
+### `ReasonerContext` (`core/observation/reasoner_context.py`)
 
 The domain-agnostic record of what the ML model computed. The framework stores
 this verbatim in the Decision Bundle. It is the evidence that makes any
@@ -105,7 +111,7 @@ ReasonerContext
 │   This is what makes replay self-contained.
 │
 └── attribution: AttributionSummary | None
-    ├── observation_signals: list[Signal] | None   per-event SHAP values
+    ├── feature_contributions: list[Contribution] | None   per-event SHAP (or other) values
     ├── feature_importance: dict[str, float] | None   global model weights
     └── narrative: str | None                      free-form explanation
 ```
@@ -126,40 +132,49 @@ does not break the pipeline but reduces explainability in the Decision Bundle.
 
 ---
 
-### `GateContext` (`core/decision/gate_context.py`)
+### `GateContext` (`core/observation/gate_context.py`)
 
-The domain-assembled context for policy gate operation. The framework uses
-`jurisdictions` and `risk_tier` as retrieval filters, and uses
-`prompt_template_id` + `template_vars` to render the LLM prompt.
+The domain-assembled dispatch envelope for the gate. `gate_id` selects the
+gate implementation and is checked against the registration's
+`allowed_gate_ids`. `gate_config` is a dict the framework transports
+without interpreting; the selected gate reads the keys it needs. The
+reference policy gate uses these well-known keys:
 
 ```
 GateContext
-├── prompt_template_id: str        "ato-v1"
-│   Audit key — recorded verbatim in DecisionBundle.
-│   Used to look up the template from PromptRegistry.
-│   Immutable once deployed; changes require a new version.
+├── gate_id: str                    "policy"
+│   Gate dispatch key; validated against allowed_gate_ids.
 │
-├── template_vars: dict[str, str]  {"risk_score": "0.870", "auth_method": "PASSWORD", ...}
-│   Pre-rendered strings substituted into the prompt template.
-│   Domain assembler renders typed values to human-readable strings.
-│   Must satisfy the template's required_vars.
-│
-├── jurisdictions: list[str]       ["US_FEDERAL", "INTERNAL"]
-│   Corpus retrieval filter — applied to both pgvector HNSW and Elasticsearch.
-│   Empty list = no jurisdiction filter (all documents are candidates).
-│
-├── risk_tier: str | None          "HIGH_VALUE"
-│   Corpus retrieval filter — applied to pgvector HNSW only.
-│   None = no tier filter (all tiers are candidates).
-│
-└── target_model: str | None       "gpt-4o-2024-08-06"
-    Optional LLM model hint. Framework may honor or override per governance policy.
+└── gate_config: dict | None
+    ├── template_id: str            "ato-v3"
+    │   Audit key — recorded verbatim in the DecisionBundle.
+    │   Used to look up the template from the PromptRegistry.
+    │   Validated against allowed_prompt_template_ids.
+    │   Immutable once deployed; changes require a new version.
+    │
+    ├── template_vars: dict[str, str]  {"risk_score": "0.870", "auth_method": "PASSWORD", ...}
+    │   Pre-rendered strings substituted into the prompt template.
+    │   Domain assembler renders typed values to human-readable strings.
+    │   Must satisfy the template's required_vars.
+    │
+    ├── jurisdictions: list[str]    ["US_FEDERAL", "INTERNAL"]
+    │   Corpus retrieval filter — applied to both pgvector HNSW and Elasticsearch.
+    │   Validated against allowed_jurisdictions.
+    │   Empty list = no jurisdiction filter (all documents are candidates).
+    │
+    ├── risk_tier: str | None       "HIGH_VALUE"
+    │   Corpus retrieval filter — applied to pgvector HNSW only.
+    │   None = no tier filter (all tiers are candidates).
+    │
+    └── target_model: str | None    "gpt-4o-2024-08-06"
+        Optional LLM model hint. Framework may honor or override per governance policy.
 ```
 
 **Retrieval filter behaviour:**
 
 | Filter | pgvector (dense) | Elasticsearch (sparse) |
 |---|---|---|
+| `reasoner_id` (from `ReasonerContext`; mandatory) | ✓ `WHERE reasoner_id = %s` | ✓ `{"term": {"reasoner_id": ...}}` on a `keyword` field |
 | `jurisdictions` | ✓ `WHERE jurisdiction = ANY(%s)` | ✓ `{"terms": {"jurisdiction": [...]}}` |
 | `risk_tier` | ✓ `WHERE risk_tier = %s OR risk_tier IS NULL` | ✗ not applied |
 
@@ -168,20 +183,31 @@ See Shadow Evaluation below.
 
 ---
 
-### Intake Validation (`core/decision/observation.py`)
+### Intake Validation (`core/observation/observation.py`)
 
-The framework calls `validate_observation(obs)` at submission before any
-routing or policy gate invocation. This is the authoritative enforcement point
-for the Observation contract — it applies to every domain reasoner
+`app/decide.py:execute_decision` calls
+`validate_observation(observation, registry=registry)` before any routing or
+gate invocation, with the deployment's reasoner registry (built from the
+discovered plugins' registrations). This is the authoritative enforcement
+point for the Observation contract — it applies to every domain reasoner
 implementation regardless of the concrete type.
 
-Two contracts are checked:
+Shape contracts, checked unconditionally:
 
 1. **`reasoner_context` must not be `None`** in governed mode. All framework
    pipeline operations require a populated `ReasonerContext`.
-2. **`fast_path_rationale` must be present when `routing` is `FAST_PATH_*`.**
+2. **`fast_path_rationale` must be present when `route` is `FAST_PATH_*`.**
    The policy gate was bypassed — the rationale is the mandatory audit trail
    explaining why.
+
+Registration contracts, checked against the registry:
+
+3. **`reasoner_context.reasoner_id` must be registered**, otherwise
+   `UnregisteredReasonerError`.
+4. **`gate_context.gate_id` must be in `allowed_gate_ids`.**
+5. **`gate_config["template_id"]` and `gate_config["jurisdictions"]`**, when
+   present, must be in `allowed_prompt_template_ids` and
+   `allowed_jurisdictions` (an empty allowed set means no restriction).
 
 Violations raise `ObservationContractError`, which names the responsible
 reasoner (from `reasoner_context.reasoner_id`) and describes the specific
@@ -205,29 +231,46 @@ satisfy the contract.
 | `GateContext` assembly | ✓ Assembles | Consumes |
 | `fast_path_rationale` | ✓ Provides (fast path) | Validates + stores |
 | `entity_id` derivation (UUID5) | ✓ Owns | Uses |
-| Reasoner registration record | ✓ Owns | Validates against |
-| FastAPI route for the reasoner | ✓ Owns | Mounts via `app.include_router` |
-| Raw-event JSON deserializer | ✓ Provides factory | Stores it on `BundleStore` |
+| Reasoner registration record + enforcement profile | ✓ Owns | Validates against; enforcement reads the profile |
+| Plugin object + entry points (`decisionledger.reasoners`, `decisionledger.eval_adapters`) | ✓ Declares | Discovers |
+| FastAPI route for the reasoner | ✓ Owns | Mounts the plugin's `router` in `create_app` |
+| Raw-event JSON deserializer | ✓ Provides factory | `BundleStore` dispatches by `reasoner_id` |
+| Prompt templates (`prompts/*.yaml`, incl. `system:`) | ✓ Owns | Loads from the plugin's `prompts_dir` |
+| Policy corpus documents | ✓ Owns | Indexes from the plugin's `corpus_dir` |
+| Reasoner-only infrastructure (ATO: Redis) | ✓ Owns (`compose.yaml`, `<PREFIX>_` settings) | — |
+| Eval adapter, driver, golden datasets | ✓ Owns | Harness runs the five dimensions |
 | Policy corpus retrieval | — | ✓ Owns (filters by `reasoner_id`) |
 | Policy gate invocation | — | ✓ Owns (reasoner-agnostic) |
 | Deterministic enforcement | — | ✓ Owns |
 | Decision Bundle construction | — | ✓ Owns |
-| Idempotency + deduplication | — | ✓ Owns |
 | Audit storage (Postgres `decisionledger.*`) | — | ✓ Owns |
-| Shared infra config (`postgres_*`, `redis_*`, ES, LLM keys) | — | ✓ Owns |
-| Reasoner-specific config (`ATO_SCORER_MODEL_PATH`, …) | ✓ Owns (`ATO_*` prefix) | Reads via reasoner Settings |
+| Shared infra config (`postgres_*`, ES, LLM keys, `DECISIONLEDGER_REASONERS`) | — | ✓ Owns |
+| Reasoner-specific config (`ATO_REDIS_URL`, `ATO_SCORER_MODEL_PATH`, …) | ✓ Owns (`ATO_*` prefix, read by `AtoSettings`) | — |
 
 The domain pipeline is the only orchestrator that crosses the boundary. It is the
 reasoner's responsibility to ensure the assembled `Observation` is correct and
 complete before submission. The framework trusts the submitted observation — it
 does not re-validate domain-specific logic.
 
-The `app/main.py` lifespan is the deployment composer. It is the **single
-sanctioned `app/` → `reasoner/` import seam**: it imports each registered
-reasoner's router and any factories the reasoner provides (e.g., the raw-event
-deserializer for replay), constructs shared infrastructure (Postgres / Redis /
-ES connections, LLM clients), and injects them. No other framework module
-imports from `reasoner.*` — `tests/test_framework_boundary.py` enforces this.
+There is no import seam between the framework and a reasoner. Each reasoner
+publishes one object satisfying `app/plugin.py:ReasonerPlugin` under the
+`decisionledger.reasoners` entry-point group, named after its `reasoner_id`
+(ATO: `ato-reasoner = "ato_reasoner.plugin:PLUGIN"`). The plugin carries the
+`registration`, the FastAPI `router`, `prompts_dir`, `corpus_dir`, the
+`raw_event_factory` replay uses, and `build_services(framework)`.
+
+`app/main.py:create_app` discovers the installed plugins
+(`app/plugins.py:discover_plugins`, optionally filtered by
+`DECISIONLEDGER_REASONERS`) and mounts their routers. Its lifespan builds the
+shared infrastructure once (`app/bootstrap.py:build_framework_services`:
+Postgres, Elasticsearch, retriever, prompt registry fed by every plugin's
+`prompts_dir`, gate, bundle store fed by every plugin's `raw_event_factory`,
+and the registry of every plugin's `registration`), stores it on
+`app.state.framework`, then calls each plugin's `build_services(framework)`
+and stores the result on `app.state.reasoners[reasoner_id]`. The reasoner's
+router reads its own services from there. No module under `app/`, `core/`,
+or `eval/` imports from a reasoner package, `app/main.py` included —
+`tests/test_framework_boundary.py` enforces this.
 
 ---
 
@@ -257,7 +300,7 @@ incomplete.
 ## The Assembler Pattern (ATO Reference Implementation)
 
 The ATO Reasoner implements the handoff via `build_observation()` in
-`reasoner/account_takeover/assembler.py`. The function takes the three domain
+`ato_reasoner/assembler.py`. The function takes the three domain
 artifacts and returns a fully-populated `LoginEvent` satisfying `Observation`.
 
 ### Translation mapping
@@ -272,13 +315,15 @@ ScorerOutput → ReasonerContext
   label_name            = "risk_score"
   label_value           ← scorer_output.risk_score
   feature_set           ← AtoFeatureVector fields as a flat dict
-  attribution           ← AttributionSummary(observation_signals=top_signals)
+  attribution           ← AttributionSummary(feature_contributions=top_signals)
 
 LoginEvent + ScorerOutput → GateContext
-  prompt_template_id    = "ato-v1"
-  jurisdictions         ← resolved from event.geo.country (US → US_FEDERAL + INTERNAL)
-  risk_tier             ← resolved from risk score band (≥ 0.60 → HIGH_VALUE)
-  template_vars         ← rendered strings for each {placeholder} in ato-v1.yaml
+  gate_id               = "policy"
+  gate_config:
+    template_id         = "ato-v3"
+    jurisdictions       ← resolved from event geo (US → US_FEDERAL + INTERNAL)
+    risk_tier           ← resolved from risk score band (≥ 0.60 → HIGH_VALUE)
+    template_vars       ← rendered strings for each {placeholder} in ato-v3.yaml
 
 ScorerOutput → fast_path_rationale  (only when routing ≠ ROUTE_TO_GATE)
   Human-readable description of the confidence-band rule that fired.
@@ -288,93 +333,177 @@ ScorerOutput → fast_path_rationale  (only when routing ≠ ROUTE_TO_GATE)
 
 ### Implementing a new reasoner
 
-A new reasoner ships as a single self-contained package under
-`reasoner/<domain>/`. The framework remains untouched — no `app/` changes
-beyond the deployment composer (`app/main.py`) mounting the new router.
+A new reasoner ships as a new uv workspace member under `reasoners/<domain>/`.
+The framework remains untouched: no edits under `core/`, `app/`, or `eval/`,
+and no edits to the root `Makefile`. The root `pyproject.toml` changes only in
+the deployment-composition lines (the `reasoners` dependency group and its
+workspace source) that decide whether this checkout installs the new member.
 
-**File-by-file checklist** — using the proposed `content_moderation` reasoner
-as a worked example:
+**File-by-file checklist** — using a hypothetical `content_moderation`
+reasoner as a worked example (it does not exist in the repository):
 
 ```
-reasoner/content_moderation/
-├── events.py               # ContentItem (the raw event), domain enums
-├── features.py             # ContentFeatures Pydantic shell
-├── scorer/                 # ML scorer infra + model artifact
-│   ├── output.py           # ContentScorerOutput Pydantic shell
-│   ├── scorer.py           # Inference (e.g. transformers / classifier)
-│   ├── trainer.py          # Training entry point (CLI: python -m ...)
-│   └── models/cm-v1.ubj    # Trained artifact (or .safetensors etc.)
-├── ingestion/              # Adapter for the reasoner's input source
-├── feature_service.py      # Feature computation infra (Redis-backed etc.)
-├── retrieval_query.py      # build_cm_query(event, scorer_output) -> str
-├── assembler.py            # build_observation(event, features, scorer)
-├── pipeline.py             # run_cm_decision(event, …) -> DecisionBundle
-├── api.py                  # FastAPI router for POST /api/v1/cm/decisions
-├── settings.py             # CmSettings (env_prefix="CM_")
-└── registry.py             # CM_REGISTRATION constant
+reasoners/content_moderation/
+├── pyproject.toml              # dist "cm-reasoner"; depends on decision-ledger; two entry points
+├── ruff.toml                   # extend = "../../pyproject.toml"; known-first-party += cm_reasoner
+├── reasoner.mk                 # train-content_moderation, prepare-content_moderation, eval-content_moderation, ...
+├── compose.yaml                # infrastructure only this reasoner uses (optional)
+├── README.md
+├── src/cm_reasoner/
+│   ├── plugin.py               # PLUGIN: ReasonerPlugin (runtime entry-point target)
+│   ├── events.py               # ContentItem (the raw event), domain enums
+│   ├── features.py             # ContentFeatures Pydantic shell
+│   ├── feature_service.py      # Feature computation infra
+│   ├── ingestion/              # Adapter for the reasoner's input source (optional)
+│   ├── scorer/                 # ML scorer infra + model artifact
+│   │   ├── output.py           # ContentScorerOutput Pydantic shell
+│   │   ├── scorer.py           # Inference
+│   │   ├── trainer.py          # Training entry point
+│   │   └── models/cm-v1.ubj    # Trained artifact (or .safetensors etc.)
+│   ├── retrieval_query.py      # build_cm_query(event, scorer_output) -> str
+│   ├── assembler.py            # build_observation(event, features, scorer)
+│   ├── pipeline.py             # run_cm_decision(...) -> DecisionBundle
+│   ├── api.py                  # APIRouter(prefix="/api/v1/cm"): POST /decisions
+│   ├── settings.py             # CmSettings (env_prefix="CM_")
+│   ├── registry.py             # CM_REGISTRATION (identity, allowed resources, enforcement profile)
+│   ├── prompts/cm-v1.yaml      # template_id, system:, template
+│   ├── corpus/                 # Policy documents (Markdown + YAML frontmatter)
+│   └── eval/
+│       ├── adapter.py          # ADAPTER: EvalAdapter (eval entry-point target)
+│       ├── driver.py           # in-process EvalDriver
+│       └── datasets/           # retrieval/, faithfulness/, scenarios/, citations/, robustness/
+└── tests/                      # no __init__.py; collected by the root pytest run
 ```
 
 **Steps:**
 
-1. **Define your domain types** in `events.py`, `features.py`,
-   `scorer/output.py`. Pure Pydantic — `core/` types and stdlib only.
+1. **Create the package skeleton and `pyproject.toml`.** Src layout, a
+   distinct top-level import package (`cm_reasoner`), a dependency on
+   `decision-ledger` with `[tool.uv.sources] decision-ledger = { workspace =
+   true }`, your own ML and infrastructure dependencies, and two entry points
+   whose name equals your `reasoner_id`:
+   ```toml
+   [project.entry-points."decisionledger.reasoners"]
+   cm-reasoner = "cm_reasoner.plugin:PLUGIN"
 
-2. **Derive `entity_id`** deterministically from your domain business key via
-   UUID5. Use a fresh namespace UUID (mirror the ATO pattern with
-   `_CM_CONTENT_NS`). The ATO scorer/output need not be modified.
+   [project.entry-points."decisionledger.eval_adapters"]
+   cm-reasoner = "cm_reasoner.eval.adapter:ADAPTER"
+   ```
 
-3. **Build your scorer + feature infra** under `scorer/` and
-   `feature_service.py`. Use whatever ML framework, retrieval store, or
-   feature store fits — this is where reasoner-specific infra lives.
+2. **Define your domain types and model infra** in `events.py`,
+   `features.py`, `feature_service.py`, and `scorer/`. Use whatever ML
+   framework or feature store fits — this is where reasoner-specific infra
+   lives. Derive `entity_id` deterministically from your business key via
+   UUID5 with a fresh namespace UUID (mirror the ATO pattern).
 
-4. **Write your assembler** (`assembler.py`). The `build_observation(event,
-   features, scorer)` function returns a type satisfying the `Observation`
-   protocol with `reasoner_context.reasoner_id = "content-moderation-reasoner"`,
-   populated `gate_context`, and a fast-path rationale when applicable.
+3. **Write your assembler** (`assembler.py`). `build_observation(event,
+   features, scorer)` returns a type satisfying the `Observation` protocol
+   with `reasoner_context.reasoner_id = "cm-reasoner"`, a populated
+   `gate_context` (`gate_id="policy"`, `gate_config` with `template_id`,
+   `template_vars`, `jurisdictions`, `risk_tier`), and a fast-path rationale
+   when applicable.
 
-5. **Render your retrieval query** (`retrieval_query.py`). Map the top scorer
+4. **Render your retrieval query** (`retrieval_query.py`). Map the top scorer
    signals + raw-event metadata to a natural-language string. The framework
    retriever consumes this string — it never sees your event schema.
 
-6. **Write your pipeline** (`pipeline.py`). `run_cm_decision(event, services…)`
-   computes features, scores, calls `build_observation`, then delegates to
-   `app.decide.execute_decision(observation, query, …)`.
+5. **Write your pipeline** (`pipeline.py`). `run_cm_decision(*, event,
+   services, framework, ...)` computes features, scores, calls
+   `build_observation`, then delegates to
+   `app.decide.execute_decision(observation=..., query=...,
+   retriever=framework.retriever, gate=framework.gate,
+   store=framework.store, registry=framework.registry, ...)`.
 
-7. **Mount your FastAPI router** (`api.py`). Define an `APIRouter(prefix=
-   "/api/v1/cm")`, register `POST /decisions`, and pull services from
-   `request.app.state`. Add `app.include_router(cm_router)` to `app/main.py`.
+6. **Write your FastAPI router** (`api.py`). Define an `APIRouter(prefix=
+   "/api/v1/cm")` and register `POST /decisions`. Read your services from
+   `request.app.state.reasoners["cm-reasoner"]` and the shared ones from
+   `request.app.state.framework`. Do not edit `app/main.py`; `create_app`
+   mounts the router from your plugin.
 
-8. **Add your settings class** (`settings.py`). `CmSettings` with
-   `env_prefix="CM_"` for any genuinely reasoner-specific config (model
-   paths, corpus version, domain-tunable thresholds). Shared infra
-   (Postgres, Redis, ES, LLM keys) stays in `FrameworkSettings`.
+7. **Add your settings class** (`settings.py`). `CmSettings` with
+   `env_prefix="CM_"` for everything reasoner-specific (model paths, corpus
+   version, connection URLs for infrastructure only you use). Shared infra
+   (Postgres, Elasticsearch, LLM keys) stays in `FrameworkSettings` and
+   reaches you through `FrameworkServices`.
 
-9. **Register a prompt template** in `app/gate/policy/prompts/<template-id>.yaml`.
-   Define the `{placeholder}` variables your assembler populates in
-   `template_vars`. The `YamlPromptRegistry` loads it at startup.
+8. **Ship your prompt templates** in `prompts/<template-id>.yaml`. Define the
+   `{placeholder}` variables your assembler populates in `template_vars`, and
+   put your domain's LLM framing in a top-level `system:` key (without one,
+   the gate uses the framework's generic `DEFAULT_SYSTEM_TEXT`). Template ids
+   are global across the deployment: reusing another reasoner's id fails
+   startup.
 
-10. **Add your registration constant** (`registry.py`). `CM_REGISTRATION =
-    ReasonerRegistration(reasoner_id="content-moderation-reasoner", ...)` —
-    the deployment composer collects this with the ATO registration.
+9. **Add your registration constant** (`registry.py`).
+   `CM_REGISTRATION = ReasonerRegistration(reasoner_id="cm-reasoner", ...)`
+   with your allowed gate ids, template ids, and jurisdictions, plus the
+   enforcement profile: `novel_entity_feature` (the `feature_set` key that
+   marks a subject with too little history, or `None`) and
+   `jurisdiction_conflict_groups` (groups of jurisdiction tags whose
+   policies conflict with each other, or `()`).
 
-11. **Load your policy corpus** with the reasoner-id flag:
+10. **Publish the plugin and the eval adapter.** `plugin.py` exposes `PLUGIN`
+    with `registration`, `router`, `prompts_dir`, `corpus_dir`,
+    `raw_event_factory` (rebuilds your event from the stored `raw_event`
+    JSON for replay), and `build_services(framework)` (opens your own
+    connections, loads your model, returns an object with `close()`).
+    `eval/adapter.py` exposes `ADAPTER` with `reasoner_id`, `event_type`,
+    `datasets_dir`, and `build_driver(settings)`.
+
+11. **Add your policy corpus** under `corpus/`, then index it. The loader
+    resolves `corpus_dir` from your plugin by id:
     ```bash
-    uv run python -m app.retrieval.corpus_loader \
-        --reasoner-id content-moderation-reasoner --wipe
+    uv run python -m app.retrieval.corpus_loader --reasoner-id cm-reasoner --wipe
     ```
 
-12. **Wire the deployment composer**. In `app/main.py:lifespan`, construct
-    `CmSettings()` alongside `AtoSettings()`, build the CM scorer + feature
-    service, attach to `application.state`, and call
-    `app.include_router(cm_router)`. This is the **only** `app/` →
-    `reasoner.content_moderation` import; the boundary test will fail if any
-    other framework file imports CM-specific symbols.
+12. **Add `reasoner.mk` and, if needed, `compose.yaml`.** `reasoner.mk`
+    defines targets suffixed with your directory name and appends them to
+    the root aggregates (`REASONER_TRAIN_TARGETS`, `REASONER_INDEX_TARGETS`,
+    `REASONER_PREPARE_TARGETS`, `REASONER_EVAL_TARGETS`); the root
+    `Makefile` picks it up with `-include $(wildcard reasoners/*/reasoner.mk)`.
+    `compose.yaml` holds infrastructure only you use; add it to the
+    `include:` list in the root `docker-compose.yml`, the one deployment
+    file that names reasoners.
+
+13. **Install it.** Add `"cm-reasoner"` to the root `reasoners` dependency
+    group with a `{ workspace = true }` source, then run `uv sync`. Entry
+    points are written at install time, so re-run `uv sync` after any
+    change to your `pyproject.toml`. Confirm discovery with
+    `uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"`.
 
 The framework's audit ledger, retrieval index, and policy gate are shared
 across reasoners. CM decisions land in the same `decisionledger.decision_bundles`
-table as ATO decisions, distinguished by `reasoner_id = "content-moderation-
-reasoner"`. The retrieval corpus and policy chunks share the index, filtered
-by `reasoner_id` at query time. No schema changes are required.
+table as ATO decisions, distinguished by `reasoner_id = "cm-reasoner"`. The
+retrieval corpus and policy chunks share the index, filtered by `reasoner_id`
+at query time. No schema changes are required.
+
+### Zero framework diff
+
+A new reasoner is correct when it needs no edit under `core/`, `app/`, or
+`eval/`. `tests/test_framework_boundary.py` checks the parts of that a
+machine can check:
+
+- No `.py` file under `app/`, `core/`, or `eval/` imports `reasoner`,
+  `reasoners`, or `ato_reasoner` (there is no `app/main.py` exception).
+- No `.py`, `.yaml`, or `.sql` under those trees, nor the packaged ES
+  mapping, contains an ATO token (`LoginEvent`, `ato-reasoner`, `ato-v3`,
+  `sparse_history`, `US_FEDERAL`, the word "ATO", and so on). Nothing is
+  allowlisted; a leak is fixed by rewording.
+- `core/` does not import `app/`.
+- The root `pyproject.toml` lists no reasoner dependency (nor xgboost,
+  pandas, redis, sqlalchemy, alembic) in `[project] dependencies`, declares
+  no entry points of its own, and builds a wheel of only `core`, `app`,
+  `eval`.
+- Every member under `reasoners/*` declares its own runtime and eval entry
+  points, pointing into its own import package.
+
+The executable proof is `tests/_stub_reasoner/`: a second, minimal reasoner
+(`stub-reasoner`, with its own event type, registration and enforcement
+profile, router at `/api/v1/stub`, `stub-v1` prompt, and two-document corpus)
+that the framework test suite composes with `create_app(plugins=[...])`,
+discovers through an in-test entry point, indexes with the corpus loader,
+and replays through the bundle store, without any framework module knowing
+it exists. When adding a reasoner, also extend the integration and eval CI
+matrices (`matrix.reasoner`) with your directory name.
 
 ---
 
@@ -392,7 +521,7 @@ A Decision Bundle is considered complete and replayable if and only if:
    contracts per DR-19). Replay re-runs enforcement against
    `gate_output.verdict` — the gate is not re-invoked, regardless of its
    implementation.
-5. `raw_event.gate_context` carries `prompt_template_id` and `template_vars`
+5. `raw_event.gate_context.gate_config` carries `template_id` and `template_vars`
    (enables reconstruction of the exact prompt that was rendered, and shadow
    evaluation of any fast-path decision).
 

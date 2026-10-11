@@ -2,12 +2,15 @@
 
 The runtime decision path from event ingestion to final action, with component contracts, latency budget, and fallback behavior.
 
+The path has two halves. Everything up to and including the assembler (C3–C5 and `build_observation()`) is reasoner code: for the reference reasoner it lives in the `ato_reasoner` package, a uv workspace member at `reasoners/account_takeover/`, and its entry point is `ato_reasoner/pipeline.py:run_ato_decision`. Everything after the assembler (C6–C9) is framework code in `app/`, entered through `app/decide.py:execute_decision`, which first validates the observation against the deployment's reasoner registry. A different reasoner replaces the first half and reuses the second unchanged (see [Reasoner Handoff](reasoners/reasoner-handoff.md)).
+
 ---
 
 ## Decision Path Overview
 
 ```
-Event Stream (Redis Streams)
+── Reasoner half (ato_reasoner) ─────────────────────────────────────────
+Event Stream (Redis Streams, ATO-owned)  or  POST /api/v1/ato/decisions
     ↓
 [C3] Idempotent Ingestion
      dedup via idempotency key, bounded lateness, dead-letter routing
@@ -20,7 +23,10 @@ Event Stream (Redis Streams)
     ↓
 [Assembler] Reasoner Assembler  ← domain → framework boundary
      build_observation(LoginEvent, AtoFeatureVector, ScorerOutput) → Observation
-     Populates: ReasonerContext + GateContext + FastPathRecord
+     Populates: ReasonerContext + GateContext (+ fast_path_rationale on the fast path)
+── Framework half (app/decide.py:execute_decision) ──────────────────────
+    ↓
+     validate_observation(observation, registry)  — registered reasoner? allowed gate/template/jurisdictions?
     ↓  ─── FAST_PATH_ALLOW / FAST_PATH_BLOCK ───→ [C8] Enforcement (fast path)
     ↓  ROUTE_TO_GATE
 [C6] Policy RAG Retriever
@@ -44,7 +50,7 @@ Event Stream (Redis Streams)
 
 ### C3 — Idempotent Ingestion
 
-**Input:** Raw event from producer (scenario generator or live source), pushed to Redis Streams.
+**Input:** Raw event from producer (scenario generator or live source), pushed to the ATO reasoner's Redis Streams (`ato:login-events`). Redis is ATO infrastructure, defined in `reasoners/account_takeover/compose.yaml`; the framework does not use it.
 
 **Processing:**
 - Computes idempotency key: `hash(user_id + device_id + event_type + timestamp_bucket)`
@@ -102,14 +108,14 @@ Event Stream (Redis Streams)
 
 **Input:** `LoginEvent` + `AtoFeatureVector` + `ScorerOutput`.
 
-**Processing:** Translates three domain artifacts into the framework's `Observation` contract. This is `build_observation()` in `reasoner/account_takeover/assembler.py` — the only function that crosses the domain → framework boundary.
+**Processing:** Translates three domain artifacts into the framework's `Observation` contract. This is `build_observation()` in `ato_reasoner/assembler.py` (`reasoners/account_takeover/src/`) — the only function that crosses the domain → framework boundary.
 
 Populates:
 - `ReasonerContext` — model version, inference latency, risk score label, full feature snapshot, SHAP attribution
-- `GateContext` — `prompt_template_id`, jurisdiction and risk_tier filters (for retrieval), `template_vars` (pre-rendered strings for the prompt)
-- `FastPathRecord` — provenance record for fast-path decisions (routing, threshold rule, feature hash); `None` on `ROUTE_TO_GATE`
+- `GateContext` — `gate_id="policy"` and `gate_config` with `template_id` (`ato-v3`), `jurisdictions` and `risk_tier` filters (for retrieval), and `template_vars` (pre-rendered strings for the prompt)
+- `fast_path_rationale` — why the scorer decided without the gate; set only on `FAST_PATH_*` routes
 
-**Output:** `LoginEvent` satisfying the `Observation` protocol, with `routing`, `reasoner_context`, `gate_context`, and `fast_path_record` populated.
+**Output:** `LoginEvent` satisfying the `Observation` protocol, with `route`, `reasoner_context`, `gate_context`, and (on the fast path) `fast_path_rationale` populated.
 
 **Routing thresholds:**
 - `FAST_PATH_ALLOW`: `risk_score < 0.20`
@@ -118,13 +124,13 @@ Populates:
 
 **Error handling:** Any failure in context assembly → raise `AssemblerError`, route event to `HOLD`.
 
-See [`reasoner/reasoner-handoff.md`](reasoners/reasoner-handoff.md) for the full field-level contract.
+See [Reasoner Handoff](reasoners/reasoner-handoff.md) for the full field-level contract.
 
 ---
 
 ### C6 — Policy RAG Retriever
 
-**Input:** `GateContext` from the assembled `Observation` — specifically `jurisdictions` and `risk_tier` for retrieval filtering, and the retrieval query is constructed from `template_vars` signals (e.g., velocity, device novelty, geo anomaly keywords).
+**Input:** The observation's `reasoner_id` (a mandatory tenant filter on both stores), the `jurisdictions` and `risk_tier` filters from `gate_config`, and a query string the reasoner builds for itself (ATO: `ato_reasoner/retrieval_query.py`, from scorer signals such as velocity, device novelty, and geo anomaly keywords) and passes to `execute_decision`.
 
 **Processing — Hybrid Retrieval:**
 
@@ -144,7 +150,7 @@ See [`reasoner/reasoner-handoff.md`](reasoners/reasoner-handoff.md) for the full
 
 **Input:** `GateContext` (from the assembled `Observation`) + `list[RetrievedSnippet]` (from C6).
 
-**Processing:** Resolves the versioned YAML prompt template via `YamlPromptRegistry` using `gate_context.prompt_template_id`. Renders the template with `gate_context.template_vars` (pre-rendered domain strings: risk score, auth method, travel speed, etc.) and the retrieved policy snippets. The gate never reads domain field names directly — all domain context arrives pre-rendered in `template_vars`.
+**Processing:** Resolves the versioned YAML prompt template via `YamlPromptRegistry` using `gate_config["template_id"]`. The registry loads each composed reasoner's `prompts/` directory, so ATO's templates come from `ato_reasoner/prompts/`. The template also supplies the system message (its `system:` key, or the framework's generic default). Renders the template with `gate_config["template_vars"]` (pre-rendered domain strings: risk score, auth method, travel speed, etc.) and the retrieved policy snippets. The gate never reads domain field names directly — all domain context arrives pre-rendered in `template_vars`.
 
 Calls LLM API (OpenAI GPT-4o or equivalent) with structured output mode. Parses and validates response against `GateVerdict` Pydantic schema.
 
@@ -165,7 +171,7 @@ LLM-specific artifacts (`model_version`, `prompt_template_id`, `corpus_version`,
 
 **Schema failure handling:** Pydantic validation failure on the LLM response → `GateOutput.verdict = None` and `GateOutput.response_text` carries the raw LLM string. Enforcement routes the event to `HOLD` via the schema-failure tier. Never silently pass an unvalidated verdict to enforcement.
 
-**Prompt versioning:** Prompt files are immutable once created. A change to prompt behavior requires a new version file (`v2.yaml`, `v3.yaml`, etc.). The active prompt version is recorded in every Decision Bundle. CI blocks merges that activate a new prompt version without a passing eval gate run against that version.
+**Prompt versioning:** Prompt files are immutable once created. A change to prompt behavior requires a new version file in the reasoner's `prompts/` directory (`ato-v2.yaml`, `ato-v3.yaml`, etc.). The active prompt version is recorded in every Decision Bundle. CI blocks merges that activate a new prompt version without a passing eval gate run against that version.
 
 ---
 
@@ -178,10 +184,10 @@ LLM-specific artifacts (`model_version`, `prompt_template_id`, `corpus_version`,
 | Trigger | Condition | Result |
 |---------|-----------|--------|
 | Schema failure | Gate response failed Pydantic validation (`gate_output.verdict is None`) | `HOLD` |
-| Novel entity | Fewer than N historical events for this account | `HOLD` |
+| Novel entity | The feature named by the registration's `novel_entity_feature` is truthy in `feature_set` (ATO: `sparse_history`); never fires when the registration names none | `HOLD` |
 | Adversarial flag | Preprocessing detected injection attempt | `BLOCK` |
 | Low confidence + high-risk action | `confidence < threshold` AND action is `BLOCK` or `HOLD` | `HOLD` |
-| Jurisdiction conflict | Retrieved policy includes conflicting guidance | `HOLD` |
+| Jurisdiction conflict | The gate flags a conflict, or the retrieved snippets' jurisdictions touch two or more of the registration's `jurisdiction_conflict_groups` (ATO: US vs. EU) | `HOLD` |
 
 If no trigger fires, the enforcement layer applies the `permitted_actions` from the policy gate output, resolving to the most conservative permissible action.
 

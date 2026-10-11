@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-21.** The next record is DR-22.
+**Current head: DR-26.** The next record is DR-27.
 
 ### Status values
 
@@ -501,10 +501,22 @@ this stage; the data-pipeline depth is a follow-on portfolio piece.
 **Category:** Pipeline & System Design
 
 > **Implementation note:** When this decision was written, the domain layer was
-> described as `core/account_takeover/`. It was subsequently placed in a
-> top-level `reasoner/` package (e.g. `reasoner/account_takeover/`) to make the
-> boundary unambiguous at the package level — domain types are not subpackages of
-> the framework. All references below reflect the current `reasoner/` location.
+> described as `core/account_takeover/` and the framework contracts lived in
+> `core/decision/` and `core/policy/`. The domain layer then moved to a
+> top-level `reasoner/` package (`reasoner/account_takeover/`) so that domain
+> types were not subpackages of the framework, and DR-20/DR-21 regrouped the
+> contracts into `core/observation/`, `core/gate/`, and `core/resolution/`.
+>
+> **Implementation note (DR-26, 2026-10):** The domain layer is now a uv
+> workspace member, `reasoners/account_takeover/` (src layout, import package
+> `ato_reasoner`, distribution `ato-reasoner`). The framework is exactly three
+> directories, `core/`, `app/`, and `eval/`, and none of them imports a
+> reasoner. `app/` no longer "wires the domain types into the pipeline": it
+> discovers reasoners through the `decisionledger.reasoners` entry-point group.
+> `tests/_stub_reasoner/` is a second, test-only reasoner that the framework
+> tests run against, so framework tests no longer depend on ATO.
+> `tests/test_framework_boundary.py` enforces the rule. Paths below reflect
+> the current layout.
 
 ### Context
 
@@ -526,7 +538,7 @@ not be reflected in the package structure.
 
 Separate into three layers:
 
-**Framework contracts** (`core/decision/`, `core/policy/`, `core/eval/`) define
+**Framework contracts** (`core/observation/`, `core/gate/`, `core/eval/`) define
 what the DecisionLedger framework guarantees for *any* reasoner domain:
 - `Observation` — a Protocol specifying the minimum contract for any input
   event submitted to the framework: `event_id`, `entity_id`, and `timestamp`.
@@ -534,34 +546,34 @@ what the DecisionLedger framework guarantees for *any* reasoner domain:
   audit, gate, and evaluation contracts that reference `Observation` rather
   than domain types.
 
-**Domain layer** (`reasoner/account_takeover/`) contains ATO-specific types that
-satisfy the framework protocols: `LoginEvent` (implements `Observation`),
-`AtoFeatureVector`, `ScorerOutput`, `Jurisdiction`,
-`RiskTier`. This is a top-level package — not a subdirectory of `core/` — so
-that the boundary is unambiguous at the package level.
+**Domain layer** (`ato_reasoner`, in `reasoners/account_takeover/src/`)
+contains ATO-specific types that satisfy the framework protocols: `LoginEvent`
+(implements `Observation`), `AtoFeatureVector`, `ScorerOutput`,
+`Jurisdiction`, `RiskTier`. It is a separate package, not a subdirectory of
+`core/`, so the boundary is unambiguous at the package level.
 
-The import rule is one-directional and absolute: framework modules in `core/`
-may not import from `reasoner/` or any other domain package. Domain packages
-import from `core/`. `app/`, `eval/`, and `generator/` import from both layers
-as needed.
+The import rule is one-directional and absolute: framework modules in
+`core/`, `app/`, and `eval/` may not import from `ato_reasoner` or any other
+domain package. Domain packages import from `core/` (and from `app/` for the
+framework services they call).
 
-A new reasoner domain is added as `reasoner/<domain>/` implementing `Observation`.
-The `app/` layer wires the domain types into the pipeline.
-No framework module changes are required.
+A new reasoner domain is added as a new workspace member,
+`reasoners/<domain>/`, implementing `Observation` and publishing a plugin
+through an entry point (DR-26). No framework module changes are required.
 
 ### Consequences
 
-- The import boundary is mechanically enforceable — an import linter rule on
-  `core/decision/`, `core/policy/`, and `core/eval/` verifies that no framework
-  module imports from a domain subpackage. Adding a second reasoner requires
-  zero changes to the framework modules.
+- The import boundary is mechanically enforceable —
+  `tests/test_framework_boundary.py` and `tests/core/test_import_boundary.py`
+  verify that no framework module imports from a domain package. Adding a
+  second reasoner requires zero changes to the framework modules.
 - Framework contracts (`Observation`, `DecisionBundle`) evolve
   independently of any domain. A change to how ATO features are computed does
   not touch the audit record contract.
-- Existing imports across `app/`, `tests/`, `generator/`, and `eval/` must be
-  updated: ATO-specific types now resolve from `reasoner/account_takeover/`, not
-  `core/decision/` or `core/policy/`. This migration is mechanical and
-  performed once at the time this boundary is introduced.
+- Existing imports across `app/`, `tests/`, the generator, and `eval/` had to
+  be updated once, when this boundary was introduced, so that ATO-specific
+  types resolved from the domain package instead of the framework contracts.
+  The migration was mechanical.
 - Protocol-based structural subtyping (PEP 544) is used rather than abstract
   base classes. Domain types satisfy `Observation` implicitly —
   no inheritance required, no coupling to a base class.
@@ -578,6 +590,13 @@ No framework module changes are required.
 
 **Status:** Accepted
 **Category:** Pipeline & System Design
+
+> **Implementation note (DR-26, 2026-10):** The same principle now covers the
+> resolution layer. `SlaDefaultResolutionAttempt` carried a required
+> `account_tier` field, which put an ATO business concept into a `core/`
+> contract. It is now `entity_tier` (`core/resolution/sla_default.py`). Domain
+> types live in the reasoner's package (`ato_reasoner` for ATO), not under
+> `core/<domain>/` as the text below says.
 
 ### Context
 
@@ -603,8 +622,8 @@ the framework's universal subject identity primitive.
 `entity_id` is a stable, platform-issued UUID assigned to any subject that
 decisions are made about. It is not a business key. Domain-specific identifiers
 (`account_id`, `customer_id`, `vendor_id`) are fields on domain types in
-`core/<domain>/` — they are domain attributes, not the framework's identity
-field. In `core/account_takeover/`, `LoginEvent.entity_id` carries the account under
+the reasoner's own package — they are domain attributes, not the framework's
+identity field. In `ato_reasoner`, `LoginEvent.entity_id` carries the account under
 evaluation; `account_id` is retained as a domain attribute for
 application-layer use.
 
@@ -666,7 +685,7 @@ A single analyzer cannot serve both patterns without sacrificing one.
 
 ### Decision
 
-The `text` field in `infra/elasticsearch/policy-chunks.json` is mapped with
+The `text` field in `app/retrieval/es/policy-chunks.json` is mapped with
 two analyzers via Elasticsearch multi-fields:
 
 - `text` — `english` analyzer (stemming + stopword removal). Used for
@@ -702,6 +721,16 @@ Neither analyzer path is authoritative — fusion handles the blend.
 
 **Status:** Accepted
 **Category:** Pipeline & System Design
+
+> **Implementation note (DR-26, 2026-10):** Intake validation is now enforced
+> at runtime. `app/decide.py:execute_decision` takes the deployment's
+> `ReasonerRegistry` and calls `validate_observation()` before anything else,
+> so an observation from an unregistered reasoner, or one that names a gate,
+> prompt template, or jurisdiction its registration does not allow, is
+> rejected before retrieval or the gate run. Before DR-26 the validator
+> existed and was tested but nothing called it. Paths in this record: the
+> gate lives in `app/gate/policy/` (DR-20), the framework contracts in
+> `core/observation/` (DR-21), and the domain types in `ato_reasoner`.
 
 ### Context
 
@@ -789,23 +818,27 @@ Observation → ingest/dedup → [routing dispatch]
 ```
 
 Feature computation, scoring, and gate context assembly are domain concerns
-that happen before the framework receives the Observation. In `app/`, the ATO
-Reasoner pipeline is: ingest raw event → compute features → score → assemble
-Observation → submit to framework.
+that happen before the framework receives the Observation. In the ATO
+reasoner's package, the pipeline is: ingest raw event → compute features →
+score → assemble Observation → submit to framework.
 
 ### Consequences
 
-- The policy gate is 100% generic. `app/policy_gate/` has no imports from
-  `core/account_takeover/`. Adding a second domain requires zero changes to
+- The policy gate is 100% generic. `app/gate/policy/` has no imports from
+  the domain package. Adding a second domain requires zero changes to
   framework code — only a new prompt template and a domain context assembler.
 - `DecisionBundle` loses typed top-level fields for `feature_snapshot`,
   `scorer_output`, and `scorer_model_version`. These move into the Observation
   (via `fast_path_record` and the rendered `gate_context.template_vars`). The
   bundle retains full auditability because it stores `raw_event: Observation`,
   which contains all domain-specific provenance.
-- `ScorerOutput` moves from `core/decision/` to `core/account_takeover/` — it
-  is an ATO domain type, not a framework contract. `Signal` and `FastPathRecord`
-  remain in `core/decision/` as framework contracts.
+- `ScorerOutput` moves out of the framework contracts into the domain package
+  (today `ato_reasoner/scorer/output.py`) — it is an ATO domain type, not a
+  framework contract. The separate `Signal` and `FastPathRecord` contracts
+  this record originally described no longer exist: fast-path provenance is
+  now carried by the framework's `ReasonerContext`
+  (`core/observation/reasoner_context.py`: score, feature set, attribution)
+  plus `Observation.fast_path_rationale`.
 - Shadow evaluation is architecturally available from day one: because
   `gate_context` is populated on fast-path observations, any historical batch
   can be replayed through the gate without re-running the domain pipeline.
@@ -878,6 +911,30 @@ flows better than ELK for that diagram).
 **Status:** Accepted
 **Category:** Pipeline & System Design
 
+> **Implementation note (DR-26, 2026-10):** The decisions below still hold,
+> but the composition changed:
+>
+> - There is no module-level `app`. `app/main.py:create_app(plugins=None)` is
+>   a factory: `uv run uvicorn --factory app.main:create_app`. By default it
+>   discovers plugins from the `decisionledger.reasoners` entry-point group
+>   (filtered by `DECISIONLEDGER_REASONERS`); tests pass `plugins=[...]`.
+> - The lifespan builds the shared services once
+>   (`app/bootstrap.py:build_framework_services` → `app.state.framework`),
+>   then calls each plugin's `build_services(framework)` and stores the
+>   result in `app.state.reasoners[reasoner_id]`. With zero plugins the app
+>   still starts and logs `api.no_reasoners`.
+> - The decide endpoint belongs to the reasoner's router, not the framework:
+>   ATO's is `POST /api/v1/ato/decisions` (`ato_reasoner/api.py`). The
+>   framework keeps `GET /health`, `GET /api/v1/decisions/{decision_id}`, and
+>   `POST /api/v1/decisions/{decision_id}/replay`, which work for any
+>   reasoner.
+> - Lookup and replay return a 404 `DECISION_NOT_FOUND` envelope when no
+>   bundle exists (including a malformed id, which used to be a 500) and a
+>   409 `REASONER_NOT_COMPOSED` envelope when the bundle belongs to a
+>   reasoner this deployment does not compose.
+> - The missing-model hard fail moved into the ATO plugin's
+>   `build_services`; the error names `make train-account_takeover`.
+
 ### Context
 
 Every pipeline component (ingestion through audit/replay) is implemented and
@@ -919,7 +976,7 @@ Streamlit or Django) will need HTTP access to both bundle retrieval and replay.
 Building the endpoint now avoids giving the reviewer app direct database access
 or requiring a separate CLI shim.
 
-**Hard fail on missing model.** If `reasoner/account_takeover/scorer/models/ato-v1.ubj` does not
+**Hard fail on missing model.** If `ato_reasoner/scorer/models/ato-v1.ubj` does not
 exist at startup, the lifespan raises `FileNotFoundError` with a message
 pointing to `make train`. Auto-training on startup was rejected: implicit
 behavior during startup masks a missing prerequisite step and makes
@@ -1210,7 +1267,8 @@ co-located with the only thing that references it. Re-exported from
 `corpus_version` flows orchestrator → `PolicyGate.evaluate(corpus_version=...)`.
 The gate writes it into `gate_input.config["corpus_version"]`. The reasoner
 layer is not involved — `corpus_version` is infrastructure-side metadata
-and stays out of `reasoner/` per the framework's domain-boundary discipline.
+and stays out of the reasoner packages per the framework's domain-boundary
+discipline.
 
 ### Consequences
 
@@ -1455,7 +1513,7 @@ A SOLID audit of `core/` after DR-20 surfaced four issues:
 - Universal `ResolutionAttempt` drops the `evidence: dict[str, Any]`
   field. `HumanResolutionAttempt` adds typed `reviewer_role` and
   `reference_ticket_id` fields. `SlaDefaultResolutionAttempt` adds
-  typed `account_tier` and `sla_window_seconds` fields.
+  typed `entity_tier` and `sla_window_seconds` fields.
 - Discriminator is `resolver_kind` (Pydantic Literal narrowing in each
   subclass). `app/audit/resolution_journal.py` uses a closed
   discriminated union for deserialization — same pattern as
@@ -1760,6 +1818,49 @@ this decision.
 
 ## DR-24: Framework owns audit storage; reasoner_id is a row-level filter, not a schema-level partition
 
+**Status:** Accepted
+**Category:** Data Storage & Retrieval
+
+> **Implementation note (DR-26, 2026-10):** The storage model below is
+> unchanged; DR-26 finished wiring it and fixed what it exposed.
+>
+> - **Elasticsearch `reasoner_id` is mapped as `keyword`.** The original
+>   mapping did not declare the field, so Elasticsearch mapped it
+>   dynamically as analyzed `text`. A `term` filter on a hyphenated id such as
+>   `ato-reasoner` then matched nothing, and the BM25 leg returned no hits in
+>   production. The dense leg masked it, and the eval retrieval dimension
+>   called `retrieve()` without a `reasoner_id`, so it never exercised the
+>   filtered path. The corpus loader now recreates an index whose
+>   `reasoner_id` mapping is not `keyword` (logging that it did, since that
+>   drops every reasoner's BM25 documents), and the eval passes the id.
+> - **`policy_chunks` has a `title` column.** The retriever used to read the
+>   corpus directory to build a title map; it now reads `row["title"]`, so
+>   the framework never touches a reasoner's corpus files. An idempotent
+>   `alter table ... add column if not exists` migrates existing volumes.
+> - **Raw-event factories dispatch by `reasoner_id`.**
+>   `BundleStore(conn, raw_event_factories={reasoner_id: factory},
+>   registry=...)` reads the row's `reasoner_id` column on `load()` and
+>   `replay()` and picks that reasoner's deserializer. A row whose reasoner
+>   is not composed raises `UnregisteredReasonerError`, which the API maps to
+>   409 `REASONER_NOT_COMPOSED`. The single `raw_event_factory` described
+>   below is gone.
+> - **The DDL and the ES mapping are framework package data.** The canonical
+>   DDL is `app/audit/sql/{01_init,02_tables}.sql` and the mapping is
+>   `app/retrieval/es/policy-chunks.json`; the `infra/` tree is gone.
+>   `app/audit/schema.py:apply_canonical_schema` runs the DDL at startup and
+>   replaces the per-class `ensure_schema()` methods that duplicated it.
+>   Compose's Postgres init and CI's `psql` steps read the same files.
+> - **Redis is reasoner infrastructure.** Only ATO's feature service,
+>   ingestion consumer, and generator used it, so it moved out of the shared
+>   stack into `reasoners/account_takeover/compose.yaml` (pulled in by
+>   `include:`) and out of `FrameworkSettings` into `ATO_REDIS_URL`.
+> - **The boundary test is wider.** `tests/test_framework_boundary.py` now
+>   scans all of `app/`, `core/`, and `eval/` (no `app/main.py` exception)
+>   plus their YAML, SQL, and the ES mapping. See DR-26.
+> - The "Why now" paragraph's integration recipe (`app.include_router(...)`
+>   plus a settings class) is superseded: a new reasoner ships a workspace
+>   member with an entry point and no framework edit (DR-26).
+
 **Decision.** DecisionLedger is a multi-tenant governance hub. All
 reasoners write decision bundles, policy chunks, replay logs, and
 resolution attempts to the same framework-owned `decisionledger.*`
@@ -1768,7 +1869,7 @@ each row, not via per-domain schemas. The policy gate, retrieval
 infrastructure, enforcement layer, and audit ledger are all shared.
 Reasoners own only the upstream half of the pipeline (events, features,
 scoring, query rendering, assembly) and ship that as a self-contained
-package under `reasoner/<domain>/` including all supporting infra.
+package under `reasoners/<domain>/` including all supporting infra.
 
 **Why now.** Pre-this DR the schema was named `account_takeover.*` and
 the audit store imported `LoginEvent` directly. That undercut the
@@ -1800,11 +1901,11 @@ plus a `CmSettings` class is the entire integration.
   both pgvector and Elasticsearch queries. The corpus loader takes
   `--reasoner-id` and tags every chunk on insert.
 - **Boundary enforcement test.** `tests/test_framework_boundary.py`
-  asserts (a) `app/*.py` (excluding `app/main.py`) contains no
-  `from reasoner.` imports, (b) `core/*.py` contains no `app.*` or
-  `reasoner.*` imports, (c) no ATO-coded symbols (`LoginEvent`,
-  `AuthOutcome`, hardcoded `account_takeover.*` schema names) appear in
-  framework source. New leaks fail `make check`.
+  asserted, when this record was written, that `app/*.py` other than
+  `app/main.py` imported no reasoner package, that `core/` imported no
+  `app` or reasoner package, and that no ATO-coded symbols appeared in
+  framework source. DR-26 removed the `app/main.py` exception and widened
+  the scan (see the note above). New leaks fail `make check`.
 
 **Alternatives rejected.**
 (a) *Per-domain schemas (`account_takeover.*`, `content_moderation.*`).*
@@ -1830,7 +1931,7 @@ catches this and the leak stays "almost generic."
 behavioral baseline:
 
 1. **Heuristic device-anomaly weight bumped 0.10 → 0.30.** The training
-   heuristic in `_heuristic_label` (`reasoner/account_takeover/scorer/trainer.py`)
+   heuristic in `_heuristic_label` (`ato_reasoner/scorer/trainer.py`)
    weights `(1.0 - device_consistency_score) * 0.30` so partial device
    matches contribute meaningfully to risk. `HEURISTIC_LABEL_VERSION`
    bumps 1.0 → 1.1; `DEFAULT_MODEL_VERSION` 1.0.0 → 1.0.1.
@@ -1873,7 +1974,7 @@ report that nobody can pass.
   conditions under which it should tighten.
 - **Smoke test stayed honest.** The single committed end-to-end
   proof point (`device_fingerprint_anomaly` hitting the LLM gate via
-  `tests/integration/test_scenario_smoke.py`) is independent of all
+  `reasoners/account_takeover/tests/integration/test_scenario_smoke.py`) is independent of all
   four calibration choices — it asserts on `result.rationale is not
   None` rather than specific score values.
 - **Robustness datasets gained `priming_events`.**
@@ -1883,7 +1984,7 @@ report that nobody can pass.
   fallback cases because its labeling-only contract produced
   non-deterministic actions; reintroduce it when real corpus-version
   validation lands in the pipeline.
-- **`tools/capture_baselines.py` merges instead of overwriting.**
+- **`ato_reasoner/eval/capture_baselines.py` merges instead of overwriting.**
   Captures keyed by `case_id`; new captures replace old, new
   case_ids append. This preserves seeds across runs and lets
   captures incrementally replace seeds as polish §6 unlocks more
@@ -1919,3 +2020,191 @@ the metric was correctly catching. Better to drop the case from
 the dataset (smoke test still proves the gate runs end-to-end)
 and tackle gate grounding as a polish-phase prompt-engineering
 item.
+
+---
+
+## DR-26: Reasoner packaging and discovery
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+**Decision.** A reasoner is a uv workspace member under
+`reasoners/<name>/` that owns everything up to and including
+`build_observation()`, and the framework finds it through Python entry
+points rather than imports. The ATO reference reasoner is
+`reasoners/account_takeover/` (src layout, import package `ato_reasoner`,
+distribution `ato-reasoner`, `reasoner_id` `ato-reasoner`). It publishes
+two entry points named after its `reasoner_id`:
+`decisionledger.reasoners` → `ato_reasoner.plugin:PLUGIN` (runtime) and
+`decisionledger.eval_adapters` → `ato_reasoner.eval.adapter:ADAPTER`
+(eval harness). The runtime object satisfies `app/plugin.py:ReasonerPlugin`:
+its `ReasonerRegistration`, a FastAPI router, a prompts directory, a corpus
+directory, a raw-event deserializer for replay, and
+`build_services(framework: FrameworkServices) -> ReasonerServices`. The
+framework is `core/`, `app/`, and `eval/` only. It builds the shared
+infrastructure once (`app/bootstrap.py:build_framework_services`), hands it
+to each discovered plugin, and never names a reasoner. What DR-24 made
+shared stays shared: the `decisionledger.*` schema, the pgvector table, the
+Elasticsearch index, the corpus loader, the prompt registry, the gate,
+enforcement, the bundle store, and the eval harness.
+
+**Why now.** DR-11 and DR-24 made the claim "the reasoning layer is
+pluggable" true in the `core/` contracts and nowhere else. `app/main.py`
+imported five ATO symbols and built ATO's services by hand. ATO's prompts
+lived in `app/gate/policy/prompts/` and its corpus at the repository root.
+The enforcement resolver hardcoded ATO's novel-account feature and its US/EU
+jurisdiction sets, and the gate hardcoded an "authentication risk" system
+prompt. `ReasonerRegistration`, the registry, and `validate_observation()`
+existed but nothing called them at runtime, and `BundleStore` could replay
+one reasoner type. Redis, used only by ATO, sat in the shared compose file
+and the framework settings. The framework's own dependencies included
+xgboost and pandas. Framework tests built ATO fixtures. A second reasoner
+would have needed framework edits in about a dozen places, so the claim had
+to become mechanically true before one is written.
+
+**Consequences.**
+- **Packaging.** The root `decision-ledger` project's
+  `[project] dependencies` and wheel (`core`, `app`, `eval`) never include a
+  reasoner, xgboost, pandas, or redis. Deployment composition is a root
+  `[dependency-groups] reasoners = ["ato-reasoner"]` (a workspace source)
+  listed in `[tool.uv] default-groups`, so a bare `uv sync` installs every
+  member. This group is the pyproject analog of compose `include:`. Entry
+  points refresh only when the member is reinstalled: run `uv sync` after
+  editing a member's `pyproject.toml`.
+- **Discovery.** `app/plugins.py:discover_plugins` loads the
+  `decisionledger.reasoners` group sorted by name, checks each object
+  against the `ReasonerPlugin` protocol, and requires the entry-point name
+  to equal `registration.reasoner_id`. A failed load, a protocol mismatch, a
+  name/id mismatch, or a duplicate id raises `ReasonerPluginError` at
+  startup. `DECISIONLEDGER_REASONERS` is an optional comma-separated
+  allowlist (blank means every installed plugin). The eval group is
+  separate so `app/` never imports `eval/`.
+- **Composition.** `app/main.py:create_app(plugins=None)` is a factory
+  (`uv run uvicorn --factory app.main:create_app`). Its lifespan builds
+  `FrameworkServices` (Postgres, Elasticsearch, embedder, cross-encoder,
+  retriever, prompt registry, gate, bundle store, reasoner registry) and
+  then each plugin's services into `app.state.reasoners[reasoner_id]`. With
+  no plugins it logs a warning and serves only the framework routes:
+  `/health`, `GET /api/v1/decisions/{id}`, and
+  `POST /api/v1/decisions/{id}/replay`. Lookup and replay answer 404
+  `DECISION_NOT_FOUND` for a missing or malformed id and 409
+  `REASONER_NOT_COMPOSED` for a bundle whose reasoner is not in this
+  deployment.
+- **Enforcement profile on the registration.** `ReasonerRegistration`
+  gained `novel_entity_feature: str | None` and
+  `jurisdiction_conflict_groups: tuple[frozenset[str], ...]`.
+  `resolve()` takes `registration` as a required keyword argument, because
+  an optional one would silently switch Tiers 3 and 5 off. Tier 3 fires
+  when the registered feature is truthy in `feature_set` and never when it
+  is `None`. Tier 5 fires when the gate flags a conflict or when the
+  retrieved snippets' jurisdictions touch at least two distinct groups.
+  `execute_decision` takes the `registry` and calls `validate_observation`
+  first (DR-14 note).
+- **System prompt in the template.** `YamlPromptRegistry` takes one
+  directory per plugin and reads an optional top-level `system:` key; a
+  template without one gets the generic `DEFAULT_SYSTEM_TEXT`. A
+  `template_id` that appears in two reasoners' directories fails startup,
+  since the id is the audit key in every bundle. The gate's hardcoded ATO
+  system prompt is gone. Prompt files are immutable, so ATO ships a new
+  `ato-v3.yaml`: the v2 user text byte for byte plus a `system:` key that
+  carries the former gate constant verbatim, which keeps the rendered
+  prompt unchanged. The assembler uses `ato-v3`. `ato-v1` and `ato-v2` stay
+  registered so historical bundles validate, but re-activating either
+  would now pair it with the generic default; they are not byte-identical
+  rollback targets. `ato-v3` activation needs one green `make eval`, which
+  has not been run since the switch: the eval report on disk
+  (`outputs/eval/eval-report-v1.json`, 2026-05-06) predates the prompt
+  relocation and the tenant-filtered retrieval dimension.
+- **Retrieval and audit storage.** The Elasticsearch `keyword` mapping fix,
+  the `policy_chunks.title` column, per-reasoner raw-event factories in
+  `BundleStore`, and the DDL and ES mapping as framework package data are
+  recorded in the DR-24 implementation note. The corpus loader applies the
+  canonical DDL first and resolves the corpus directory from the plugin
+  named by `--reasoner-id` (or an explicit `--corpus-dir`).
+- **Reasoner-owned infrastructure.** Root `docker-compose.yml` runs only
+  Postgres and Elasticsearch and pulls `reasoners/account_takeover/compose.yaml`
+  (Redis) in with `include:`, which needs Compose 2.20 or later.
+  `FrameworkSettings` no longer has Redis settings; ATO reads
+  `ATO_REDIS_URL` (and Compose reads the optional `ATO_REDIS_PORT`).
+  `ATO_SCORER_MODEL_PATH` defaults to the absolute path of the artifact
+  inside the package.
+- **Eval.** `eval/adapter.py` defines `EvalAdapter` (`reasoner_id`,
+  `event_type`, `datasets_dir`, `build_driver`) and `EvalDriver`. The
+  harness requires `--reasoner-id` or `DECISIONLEDGER_EVAL_REASONER`, the
+  consistency and robustness dimensions are generic over the adapter's
+  event type, and ATO's driver, golden datasets, `capture_baselines`, and
+  scenario generator live under `ato_reasoner/eval/` and
+  `ato_reasoner/generator/`.
+- **Build and CI.** The root `Makefile` runs
+  `-include $(wildcard reasoners/*/reasoner.mk)` and never names a
+  reasoner. Each `reasoner.mk` defines suffixed targets (for ATO:
+  `train-`, `eval-model-`, `scenario-`, `build-policy-index-`, `prepare-`,
+  `eval-`, and `capture-baselines-account_takeover`) and appends to the
+  aggregates `train`, `build-policy-index`, `prepare-reasoners`, and `eval`.
+  The root `eval-model`, `scenario`, and `capture-baselines` targets are
+  gone. The integration and eval workflows run a matrix over reasoner
+  directories, use the `decisionledger` Postgres credentials, and call
+  `make prepare-<reasoner>` and `make eval-<reasoner>`.
+- **Tests.** `tests/_stub_reasoner/` is a second reasoner used only by
+  framework tests (its own event, registration with an enforcement
+  profile, router, prompt, and two-document corpus). Composing it with
+  `create_app(plugins=[...])` is the executable proof that a new reasoner
+  needs zero framework diff. ATO's tests live in
+  `reasoners/account_takeover/tests/` with no `__init__.py`; the root
+  `pytest` collects both trees under `--import-mode=importlib`.
+  `tests/test_framework_boundary.py` scans every `.py`, `.yaml`, and
+  `.sql` under `app/`, `core/`, and `eval/` plus the ES mapping for
+  reasoner imports and ATO tokens, asserts the root pyproject declares no
+  reasoner dependency, no entry points, and only the three framework
+  packages, and asserts each member declares its own entry points.
+- **Bugs fixed on the way.** The structlog configuration crashed the
+  lifespan on its first log call. The ATO endpoint rejected the JSON wire
+  format because strict validation ran in Python mode; it now validates in
+  JSON mode. A malformed decision id on lookup or replay was a 500; it is
+  now a 404.
+- **Judgment calls.**
+  - The Tier 3 HOLD reason still reads "Insufficient account history for
+    confident decision" so that `override_log` text stays byte-identical
+    across the refactor. Rewording it for a generic subject is a
+    deliberate audit-text change for a later commit.
+  - `ResolverKind.STEP_UP_AUTH` and `AUTOMATED_OUTREACH` stay in `core/`.
+    They are identity-flavored names, but removing enum members is a
+    contract change and was deferred.
+  - `SlaDefaultResolutionAttempt.account_tier` became `entity_tier`
+    (DR-12 note).
+  - Pyright's `include` uses `reasoners/**/src`: pyright silently matched
+    nothing for a single-star directory glob.
+  - `pandas-stubs` stays in the root `dev` group as well as the member's,
+    because pyright checks the member from the root environment and a bare
+    root `uv sync` does not install a member's dev group.
+- **Where the code differs from the plan.** The plan kept the DDL and ES
+  mapping under `infra/`; they became package data under `app/` so an
+  installed framework wheel can apply its own schema. The plan's
+  `reasoners/*/src` pyright glob became `reasoners/**/src`, and the plan
+  dropped `pandas-stubs` from the root group, which the code keeps (both
+  above). The plan scheduled a `make eval` run to activate `ato-v3`; that
+  run has not happened.
+
+**Alternatives rejected.**
+(a) *Namespace package `reasoners.account_takeover`.* Couples every
+reasoner's import path to this repository's directory name, makes an
+externally published reasoner look different from an in-tree one, and
+would have needed a blind `reasoner` → `reasoners` rewrite. A distinct
+top-level import package per member (`ato_reasoner`) is what an outside
+author would ship anyway.
+(b) *`COMPOSE_FILE` in `.env` instead of `include:`.* `.env` is gitignored,
+so a fresh checkout without it silently starts a stack with no Redis, and
+the failure surfaces later as a connection error in the reasoner.
+`include:` is versioned with the code.
+(c) *Per-reasoner audit or retrieval storage.* Rejected for the reasons in
+DR-24: the framework is the audit hub, and row-level `reasoner_id` keeps
+cross-reasoner audit queries and a single replay path.
+(d) *`uv sync --all-packages` with no root dependency group.* Installs
+members, but leaves composition implicit in a command-line flag that every
+script, CI job, and contributor must remember. A named default group says
+which reasoners this checkout deploys, and a bare `uv sync` does the right
+thing.
+(e) *Keep prompts and the corpus in framework trees.* The framework would
+keep shipping one reasoner's assets, the retriever would keep reading
+reasoner files, and a second reasoner would edit framework directories.
+`prompts_dir` and `corpus_dir` on the plugin keep both with their owner.

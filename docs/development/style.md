@@ -144,14 +144,14 @@ This is the most important structural convention in the project:
 
 - `core/` imports from **nothing internal** and has **no infrastructure dependencies**. No Redis, no database drivers, no LLM SDK, no FastAPI, no HTTP clients.
 - `core/` contains only: Pydantic schemas, enum definitions, contract interfaces (abstract base classes or protocols), pure business logic, and metric computation functions.
-- Everything in `app/`, `eval/`, and `generator/` **imports from `core/`**. Nothing imports from `app/` except `app/` itself.
+- Everything in `app/`, `eval/`, and every reasoner under `reasoners/` **imports from `core/`**. Reasoners also import from `app/`; `core/`, `app/`, and `eval/` never import from a reasoner, which reaches the framework only through entry points (enforced by `tests/test_framework_boundary.py`).
 - Violation of this boundary is a blocking review finding. If you need to add an import to `core/`, stop and reconsider.
 
 ### File Organization
 
 - One primary class or concern per module. A module can contain closely related helpers, but if it exceeds ~300 lines, consider splitting.
 - `__init__.py` files export the public API of each package. Internal modules are prefixed with `_` if they should not be imported directly.
-- Test files mirror the source tree: `core/decision/bundle.py` → `tests/core/decision/test_bundle.py`.
+- Test files mirror the source tree: `core/observation/registration.py` → `tests/core/observation/test_registration.py`. A reasoner's tests live in its own member (`reasoners/account_takeover/tests/`, no `__init__.py`; collected by the root pytest run in importlib mode).
 
 ---
 
@@ -265,7 +265,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Types:** `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`.
 
-**Scopes** (project-specific): `core`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`.
+**Scopes** (project-specific): `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`. Use `app` for framework runtime changes that span several of its packages (plugin seam, bootstrap, composition) and `reasoners` for changes to a reasoner workspace member that span several of its layers.
 
 **Examples:**
 
@@ -416,7 +416,7 @@ Each entry should be written as it's built, not retroactively. The goal is inter
 
 - Opens with the problem statement, not the solution.
 - Architecture diagram (Mermaid) appears above the fold.
-- Quickstart (`docker compose up && make scenario`) within the first screenful.
+- Quickstart (`uv sync && docker compose up -d && make prepare-account_takeover`) within the first screenful.
 - No badges wall. One or two meaningful badges (CI status, Python version) maximum.
 
 ### Inline Documentation
