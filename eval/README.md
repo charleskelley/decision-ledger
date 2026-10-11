@@ -49,10 +49,10 @@ Every run writes the same default path, so when `make eval` covers more
 than one reasoner, the last run's report wins; pass `--output` per
 reasoner to keep each.
 
-The tracked `eval-report-v1.json` (2026-05-06) predates DR-26: it was
-produced with the `ato-v2` prompt and an unfiltered retrieval dimension.
-It has not been regenerated since the switch to `ato-v3` and the
-`reasoner_id`-filtered retrieval path.
+The tracked `eval-report-v2.json` (2026-10-11) is the current baseline: it
+was produced with the `ato-v3` prompt and the `reasoner_id`-filtered
+retrieval dimension after DR-26. `eval-report-v1.json` (2026-05-06,
+`ato-v2`, unfiltered retrieval) is kept as history.
 
 Override the default with `--output PATH` or `EVAL_OUTPUT_PATH=…`; the
 flag wins when both are set.

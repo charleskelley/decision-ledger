@@ -43,17 +43,17 @@ regressed.
 |---|----------------------------------------------------------------------------------------|--------|
 | 1 | `make check` — lint, sqlfluff, typecheck, and unit tests all pass                      | ✅     |
 | 2 | `make test-smoke` — all 8 ATO scenarios pass end-to-end                                | ✅     |
-| 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ⏳ passed 2026-05-06; re-run pending (see note) |
-| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ✅ before the reasoner-packaging refactor (DR-26); re-verify after merge |
-| 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v1.json`](outputs/eval/eval-report-v1.json)) committed + linked | ✅     |
+| 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ✅ re-run 2026-10-11 on `ato-v3` |
+| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ✅ green after the DR-26 merge |
+| 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v2.json`](outputs/eval/eval-report-v2.json)) committed + linked | ✅     |
 
 When every row reads ✅, the MVP ships.
 
-> **Note:** the committed eval report predates DR-26, which moved the ATO
-> reasoner into its own workspace package, moved the policy gate's system
-> prompt into the reasoner's new `ato-v3` template (rendered text unchanged),
-> and made the retrieval dimension filter by `reasoner_id`. `make eval` has
-> not been re-run since, so the baseline measures `ato-v2`.
+> **Note:** `eval-report-v2.json` (2026-10-11) is the first baseline after
+> DR-26: it measures the `ato-v3` template (system prompt relocated into the
+> template, rendered text unchanged) and the `reasoner_id`-filtered retrieval
+> path. All five dimensions passed. `eval-report-v1.json` (2026-05-06,
+> `ato-v2`) is kept as history.
 
 ### The Production Problem
 

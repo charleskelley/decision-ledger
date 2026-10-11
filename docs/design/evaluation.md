@@ -277,13 +277,14 @@ writes a structured `EvalReport` JSON to `outputs/stage/eval/eval-report.json`.
 Exit codes: `0` if every dimension cleared its threshold, `1` if any
 dimension failed, `2` for config errors (no reasoner named, no adapter
 installed under that id, missing API keys). The committed baseline lives at
-`outputs/eval/eval-report-v1.json`.
+`outputs/eval/eval-report-v2.json`.
 
-The committed baseline predates DR-26. It was produced on 2026-05-06, before
-the active ATO prompt moved to `ato-v3` (the system prompt relocated into the
-template) and before the retrieval dimension passed `reasoner_id`, so it
-measures `ato-v2` and an unfiltered retrieval path. `make eval` has not been
-re-run since; `ato-v3` activation is pending that run.
+`eval-report-v2.json` (2026-10-11) is the first baseline after DR-26: it
+measures the `ato-v3` prompt (system prompt relocated into the template,
+rendered text unchanged) and the `reasoner_id`-filtered retrieval path, and
+every dimension cleared its threshold. That run activates `ato-v3`.
+`eval-report-v1.json` (2026-05-06) measured `ato-v2` and an unfiltered
+retrieval path; it is kept as history.
 
 ---
 
