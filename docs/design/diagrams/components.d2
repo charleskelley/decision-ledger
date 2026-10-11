@@ -1,11 +1,15 @@
 ###############################################################################
 # DecisionLedger — C4 Level 3: Decision Pipeline Components
 #
-# Zooms into the Decision API container (app/main.py + app/decide.py).
-# Shows execute_pipeline(): domain assembly → routing → retrieval + gate
-# (or fast path) → enforcement → audit. The Reasoner Assembler is the
-# single handoff point between the domain and framework layers (the
-# left/right halves of the diagram, distinguished by indigo vs teal).
+# Zooms into the Decision API container (app/main.py:create_app mounts the
+# ATO plugin's router; the request runs ato_reasoner.pipeline.run_ato_decision
+# and then app/decide.py:execute_decision). Shows domain assembly → intake
+# validation + routing → retrieval + gate (or fast path) → enforcement →
+# audit. The Reasoner Assembler is the single handoff point between the
+# domain and framework layers (the upper/lower halves of the diagram,
+# distinguished by indigo vs teal). Indigo components are code in the ATO
+# workspace member (reasoners/account_takeover/src/ato_reasoner/); teal
+# components are framework code in app/.
 #
 # Render:  d2 --theme 0 components.d2 ../../assets/diagrams/components.svg
 #          (uses dagre — see justfile for the special-case)
@@ -40,7 +44,7 @@ input: LoginEvent {
   shape: rectangle
   style.fill: "#f0f0f0"
   style.stroke: "#1c2024"
-  tooltip: "Validated LoginEvent — entered via POST /api/v1/decisions or the in-process eval PipelineDriver."
+  tooltip: "Validated LoginEvent — entered via POST /api/v1/ato/decisions (ato_reasoner/api.py) or the in-process eval driver (ato_reasoner/eval/driver.py)."
 }
 
 ###############################################################################
@@ -51,7 +55,7 @@ features: Feature Engine {
   style.fill: "#e8eef9"
   style.stroke: "#5b6abf"
   style.stroke-width: 2
-  tooltip: "FeatureService.compute() — sliding-window velocity + novelty + impossible-travel features over Redis state. app/features/."
+  tooltip: "FeatureService.compute() — sliding-window velocity + novelty + impossible-travel features over Redis state. ato_reasoner/feature_service.py."
 }
 
 redis_state: Redis  ·  feature state {
@@ -59,14 +63,14 @@ redis_state: Redis  ·  feature state {
   style.fill: "#e8f5f5"
   style.stroke: "#2e8b8b"
   style.stroke-width: 2
-  tooltip: "Per-account hashes + sorted sets for sliding windows. TTL-managed."
+  tooltip: "Per-account ato:* hashes, sets, and sorted sets for sliding windows. TTL-managed. Owned by the ATO reasoner (reasoners/account_takeover/compose.yaml; ATO_REDIS_URL), not the framework."
 }
 
 scorer: ATO Scorer {
   style.fill: "#e8eef9"
   style.stroke: "#5b6abf"
   style.stroke-width: 2
-  tooltip: "AtoScorer.score() — XGBoost over AtoFeatureVector → ScorerOutput (risk_score, top SHAP signals, GateRoute). app/scorer/."
+  tooltip: "AtoScorer.score() — XGBoost over AtoFeatureVector → ScorerOutput (risk_score, top SHAP signals, GateRoute). ato_reasoner/scorer/."
 }
 
 assembler: Reasoner Assembler {
@@ -75,7 +79,7 @@ assembler: Reasoner Assembler {
   style.font-color: "#ffffff"
   style.bold: true
   style.stroke-width: 2
-  tooltip: "build_observation() — the only function crossing the domain → framework boundary. Translates (LoginEvent, AtoFeatureVector, ScorerOutput) into an Observation with ReasonerContext + GateContext + (fast_path_rationale on fast path)."
+  tooltip: "build_observation() — the only function crossing the domain → framework boundary. Translates (LoginEvent, AtoFeatureVector, ScorerOutput) into an Observation with ReasonerContext + GateContext + (fast_path_rationale on fast path). ato_reasoner/assembler.py."
 }
 
 ###############################################################################
@@ -89,7 +93,7 @@ route: Route? {
   style.font-color: "#ffffff"
   style.bold: true
   style.stroke-width: 2
-  tooltip: "Inspects observation.route. FAST_PATH_ALLOW < 0.20; FAST_PATH_BLOCK > 0.95; otherwise ROUTE_TO_GATE."
+  tooltip: "execute_decision first runs validate_observation against the reasoner registry (registered reasoner, allowed gate / template / jurisdictions), then inspects observation.route. ATO thresholds: FAST_PATH_ALLOW < 0.20; FAST_PATH_BLOCK > 0.95; otherwise ROUTE_TO_GATE. app/decide.py."
 }
 
 ###############################################################################
@@ -100,14 +104,14 @@ retrieval: Hybrid Retrieval {
   style.fill: "#e8f5f3"
   style.stroke: "#0d9488"
   style.stroke-width: 2
-  tooltip: "PolicyRetriever.retrieve() — pgvector HNSW (dense) + Elasticsearch BM25 (sparse) → RRF fusion → cross-encoder rerank (latency-budget bypass falls back to RRF-only). Filters: jurisdictions on both stores; risk_tier on pgvector only. app/retrieval/."
+  tooltip: "PolicyRetriever.retrieve() — pgvector HNSW (dense) + Elasticsearch BM25 (sparse) → RRF fusion → cross-encoder rerank (latency-budget bypass falls back to RRF-only). Filters: reasoner_id (tenant) and jurisdictions on both stores; risk_tier on pgvector only. app/retrieval/."
 }
 
 gate: Policy Gate {
   style.fill: "#e8f5f3"
   style.stroke: "#0d9488"
   style.stroke-width: 2
-  tooltip: "PolicyGate.evaluate() — resolves the YAML prompt template via prompt_template_id, renders with template_vars + retrieved snippets, calls the LLM with a structured-output schema, returns PolicyGateOutput (verdict + rationale + citations) or None on validation failure. app/gate/policy/."
+  tooltip: "PolicyGate.evaluate() — resolves the reasoner's YAML prompt template (from its plugin prompts_dir) via gate_config template_id, sends the template's system text, renders with template_vars + retrieved snippets, calls the LLM with a structured-output schema, returns PolicyGateOutput (verdict + rationale + citations) or None on validation failure. app/gate/policy/."
 }
 
 fast_path: Fast Path {
@@ -121,7 +125,7 @@ enforcement: Enforcement Resolver {
   style.fill: "#e8f5f3"
   style.stroke: "#0d9488"
   style.stroke-width: 2
-  tooltip: "resolve(obs, verdict, snippets, decision_id) — pure deterministic rule application. Schema-failure / novel-entity / adversarial-flag / jurisdiction-conflict → HOLD. Severity ladder ALLOW < CHALLENGE < HOLD < BLOCK. Re-runnable byte-identically for replay. app/enforcement/."
+  tooltip: "resolve(obs, verdict, snippets, decision_id, registration) — pure deterministic rule application. Schema-failure / novel-entity (registration.novel_entity_feature) / low-confidence / jurisdiction-conflict (registration.jurisdiction_conflict_groups) → HOLD; adversarial probe → BLOCK. Severity ladder ALLOW < CHALLENGE < HOLD < BLOCK. Re-runnable byte-identically for replay. app/enforcement/."
 }
 
 audit: Audit Builder + Store {
@@ -164,7 +168,7 @@ pg_audit: PostgreSQL  ·  decision_bundles {
   style.fill: "#fbf3e6"
   style.stroke: "#8c6d3f"
   style.stroke-width: 2
-  tooltip: "Append-only audit store: decision_bundles JSONB + replay_logs."
+  tooltip: "Append-only audit store in the shared decisionledger schema: decision_bundles JSONB (reasoner_id tenant column) + replay_logs."
 }
 
 ###############################################################################

@@ -4,10 +4,16 @@
 # The governance gate. Five dimensions run concurrently against curated
 # datasets, drive the live in-process pipeline (or read persisted bundles),
 # call the LLM-as-judge where required, and aggregate into one EvalReport
-# whose pass/fail determines whether the change can merge.
+# whose pass/fail determines whether a baseline can be promoted.
+#
+# The harness is reasoner-agnostic. Everything reasoner-specific (event type,
+# golden datasets, pipeline driver) comes from the EvalAdapter the reasoner
+# publishes under the decisionledger.eval_adapters entry point, selected with
+# --reasoner-id (ATO: ato_reasoner.eval.adapter:ADAPTER, paths under
+# reasoners/account_takeover/src/ato_reasoner/eval/).
 #
 # Render:  d2 --theme 0 --layout elk eval-harness.d2 ../../assets/diagrams/eval-harness.svg
-# Ref:     docs/design/evaluation.md, eval/runners/harness.py
+# Ref:     docs/design/evaluation.md, eval/runners/harness.py, eval/adapter.py
 ###############################################################################
 
 title: Evaluation Harness — 5D Governance Gate {
@@ -31,10 +37,10 @@ direction: down
 ###############################################################################
 
 ###############################################################################
-# Inputs — golden datasets (curated; under eval/datasets/)
+# Inputs — golden datasets (curated; shipped by the reasoner's adapter)
 ###############################################################################
 
-datasets: Golden Datasets  ·  eval/datasets/ {
+datasets: Golden Datasets  ·  ato_reasoner/eval/datasets/ {
   style.fill: "#fbfbfb"
   style.stroke: "#1c2024"
   style.stroke-width: 1
@@ -111,12 +117,20 @@ harness: Eval Harness  ·  eval/runners/harness.py {
 # Things the dimensions consume / call
 ###############################################################################
 
-driver: PipelineDriver  ·  eval/clients/pipeline.py {
+adapter: EvalAdapter  ·  decisionledger.eval_adapters {
+  shape: rectangle
+  style.fill: "#e8eef9"
+  style.stroke: "#5b6abf"
+  style.stroke-width: 2
+  tooltip: "Loaded by eval/adapter.py:load_eval_adapter(--reasoner-id). ATO: ato_reasoner.eval.adapter:ADAPTER — reasoner_id, event_type (LoginEvent), datasets_dir, build_driver(settings)."
+}
+
+driver: EvalDriver  ·  ato_reasoner.eval.driver {
   shape: rectangle
   style.fill: "#e8f5f3"
   style.stroke: "#0d9488"
   style.stroke-width: 2
-  tooltip: "Constructs the same Redis / Postgres / Elasticsearch / OpenAI clients as app/main.py:lifespan and runs execute_pipeline() in-process. Single source of truth for pipeline behavior — eval cannot drift from runtime."
+  tooltip: "Built by the adapter. Uses app/bootstrap.py:build_framework_services (the same wiring as the API lifespan) plus the ATO plugin's build_services, and runs run_ato_decision → execute_decision in-process. Single source of truth for pipeline behavior — eval cannot drift from runtime."
 }
 
 retriever: PolicyRetriever {
@@ -169,7 +183,7 @@ ci: CI Gate {
   style.font-color: "#ffffff"
   style.bold: true
   style.stroke-width: 2
-  tooltip: "make eval exit code = 0 (overall_passed) or 1 (any threshold violation). Required for merge to main."
+  tooltip: "make eval / make eval-account_takeover exit code = 0 (overall_passed), 1 (any threshold violation), or 2 (config error). Run on demand (eval.yaml is workflow_dispatch only); gates baseline promotion."
 }
 
 ###############################################################################
@@ -246,4 +260,17 @@ harness -> report: "5 DimensionRuns →\nassemble_report()" {
 report -> ci: "exit 0 / exit 1" {
   style.stroke: "#0d9488"
   style.stroke-width: 2
+}
+
+###############################################################################
+# Edges — the reasoner's adapter supplies datasets and driver
+###############################################################################
+
+adapter -> datasets: "datasets_dir" {
+  style.stroke: "#5b6abf"
+  style.stroke-dash: 4
+}
+adapter -> driver: "build_driver()" {
+  style.stroke: "#5b6abf"
+  style.stroke-dash: 4
 }

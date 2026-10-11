@@ -4,11 +4,16 @@
 # The single integration boundary. Domain-side: raw event + features +
 # scorer output → build_observation(). Handoff payload: Observation
 # (ReasonerContext + GateContext + optional fast_path_rationale).
-# Framework-side: route → (retrieval + gate) | fast path → enforcement →
-# bundle.
+# Framework-side: validate → route → (retrieval + gate) | fast path →
+# enforcement → bundle.
+#
+# Composition: the framework never imports the domain package. create_app()
+# discovers it through the decisionledger.reasoners entry point
+# (ato-reasoner = "ato_reasoner.plugin:PLUGIN") and builds the reasoner
+# registry that validate_observation() checks against (dashed grey edges).
 #
 # Render:  d2 --theme 0 --layout elk reasoner-handoff.d2 ../../assets/diagrams/reasoner-handoff.svg
-# Ref:     docs/design/reasoner-handoff.md
+# Ref:     docs/design/reasoners/reasoner-handoff.md, DR-26
 ###############################################################################
 
 title: Reasoner ↔ Framework Handoff {
@@ -33,7 +38,7 @@ direction: down
 # Domain Layer (left)
 ###############################################################################
 
-domain: Domain Layer  ·  reasoner/account_takeover {
+domain: Domain Layer  ·  ato_reasoner (reasoners/account_takeover) {
   style.fill: "#eff3fb"
   style.stroke: "#5b6abf"
   style.stroke-width: 2
@@ -84,7 +89,7 @@ obs: Observation {
   gc: GateContext {
     style.fill: "#e8f5f3"
     style.stroke: "#0d9488"
-    tooltip: "Gate dispatch envelope: gate_id, prompt_template_id, template_vars, jurisdictions, risk_tier. Required on EVERY observation, including fast-path (enables shadow evaluation)."
+    tooltip: "Gate dispatch envelope: gate_id + gate_config (template_id, template_vars, jurisdictions, risk_tier). Required on EVERY observation, including fast-path (enables shadow evaluation)."
   }
   fpr: fast_path_rationale {
     style.fill: "#fef3e8"
@@ -107,13 +112,18 @@ framework: Framework Layer  ·  core/ + app/ {
   style.stroke: "#0d9488"
   style.stroke-width: 2
 
+  discover: create_app()  ·  plugin discovery {
+    style.fill: "#e8f5f3"
+    style.stroke: "#0d9488"
+    tooltip: "app/plugins.py:discover_plugins loads every decisionledger.reasoners entry point (entry-point name must equal registration.reasoner_id), mounts each plugin's router, and builds the reasoner registry, prompt registry (plugin prompts_dir), and bundle-store deserializers (plugin raw_event_factory)."
+  }
   validate: validate_observation() {
     shape: diamond
     style.fill: "#0d9488"
     style.stroke: "#0d9488"
     style.font-color: "#ffffff"
     style.bold: true
-    tooltip: "Framework intake gate. Enforces: reasoner_context populated; fast_path_rationale populated iff route is fast-path. Raises ObservationContractError naming the responsible reasoner."
+    tooltip: "Framework intake gate, first step of execute_decision. Enforces: reasoner_context populated; fast_path_rationale populated iff route is fast-path; reasoner registered; gate_id, template_id, and jurisdictions allowed by its registration. Raises ObservationContractError naming the responsible reasoner (UnregisteredReasonerError if unknown)."
   }
   router: route dispatch {
     shape: diamond
@@ -143,6 +153,10 @@ framework: Framework Layer  ·  core/ + app/ {
     tooltip: "Append-only audit record: raw_event (Observation), retrieval results, gate_input/gate_output, enforcement decision, latency breakdown."
   }
 
+  discover -> validate: "reasoner registry" {
+    style.stroke: "#8c93a3"
+    style.stroke-dash: 4
+  }
   validate -> router
   router -> retr_gate: "ROUTE_TO_GATE" {
     style.stroke: "#0d9488"
@@ -162,6 +176,11 @@ framework: Framework Layer  ·  core/ + app/ {
 domain.asm -> obs: "assembled Observation" {
   style.stroke: "#1c2024"
   style.stroke-width: 2
+}
+
+domain -> framework.discover: "entry point\ndecisionledger.reasoners\n(ato_reasoner.plugin:PLUGIN)" {
+  style.stroke: "#8c93a3"
+  style.stroke-dash: 4
 }
 
 obs -> framework.validate: "submitted to framework" {

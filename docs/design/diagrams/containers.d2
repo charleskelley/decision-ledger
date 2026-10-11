@@ -1,16 +1,21 @@
 ###############################################################################
 # DecisionLedger — C4 Level 2: Containers
 #
-# Inside the DecisionLedger boundary: the containers that must be running for
-# the system to work. One long-running process (the Decision API) and three
-# datastores. Offline tools (corpus loader, eval harness, scorer trainer,
+# The containers that must be running for the system to work: one
+# long-running process (the Decision API) and three datastores. PostgreSQL and
+# Elasticsearch are framework-owned and sit inside the DecisionLedger
+# boundary. Redis is owned by the Account Takeover reasoner (its own
+# reasoners/account_takeover/compose.yaml, pulled into the stack by
+# `include:`), so it sits outside the boundary, under the analyst. Offline tools (corpus loader, eval harness, scorer trainer,
 # scenario generator, baseline capture) run on demand and are left out, per
 # the C4 container definition; see the caption in docs/design/architecture.md.
 #
 # - People and external systems are the L1 elements, with L1's text.
-#   Account Takeover is the shipped reference reasoner; its router and
-#   pipeline are mounted into the Decision API and hand observations to the
-#   framework in-process. The other reasoners are illustrative (grey edges).
+#   Account Takeover is the shipped reference reasoner; create_app discovers
+#   its plugin through the decisionledger.reasoners entry point and mounts its
+#   router and pipeline into the Decision API, which hand observations to the
+#   framework in-process. The Redis edge is indigo because ATO code running
+#   inside the API process initiates it. The other reasoners are illustrative (grey edges).
 # - The LLM or ML service is OpenAI GPT-4o at runtime (named in the caption).
 #
 # Layout: the reasoner band is pinned above everything with
@@ -21,7 +26,9 @@
 # centers the LLM on the Decision API so that edge stays horizontal: lift =
 # API center - LLM height / 2, measured from the boundary's top. Recompute it
 # when the API or LLM text changes line count. Inside the boundary, a 3x2
-# grid puts the API over the middle datastore, with empty cells either side.
+# grid puts the API over PostgreSQL in the middle column, Elasticsearch to the
+# lower right, and leaves the lower-left cell empty for the Redis edge. The
+# left column's `rise` spacer drops Redis to roughly the datastore row.
 #
 # Edge labels: d2 masks an edge only behind its label's text box. Multi-line
 # labels keep the lines an edge crosses shorter than their widest line, and
@@ -29,16 +36,21 @@
 # dash touches the text.
 #
 # Sources (code paths for maintainers; nothing here renders):
-#   Decision API   app/main.py (lifespan, routes), app/decide.py,
-#                  reasoner/account_takeover/api.py (mounted router),
-#                  reasoner/account_takeover/pipeline.py (in-process hand-off)
-#   Redis          reasoner/account_takeover/feature_service.py
-#   PostgreSQL     infra/postgres/02_tables.sql, app/audit/store.py,
+#   Decision API   app/main.py (create_app, lifespan, routes),
+#                  app/plugins.py (entry-point discovery), app/bootstrap.py,
+#                  app/decide.py,
+#                  ato_reasoner/api.py (mounted router),
+#                  ato_reasoner/pipeline.py (in-process hand-off)
+#   Redis          reasoners/account_takeover/compose.yaml,
+#                  ato_reasoner/feature_service.py, ato_reasoner/plugin.py
+#   PostgreSQL     app/audit/sql/02_tables.sql, app/audit/store.py,
 #                  app/retrieval/retriever.py
-#   Elasticsearch  infra/elasticsearch/policy-chunks.json,
+#   Elasticsearch  app/retrieval/es/policy-chunks.json,
 #                  app/retrieval/retriever.py
 #   LLM            app/llm/openai.py, app/gate/policy/gate.py
-#   Tech tags      docker-compose.yml (image versions)
+#   Tech tags      docker-compose.yml, reasoners/account_takeover/compose.yaml
+#                  (image versions)
+#   (ato_reasoner/ = reasoners/account_takeover/src/ato_reasoner/)
 #
 # Render:  d2 --theme 0 --layout elk containers.d2 ../../assets/diagrams/containers.svg
 # Ref:     docs/design/architecture.md
@@ -189,6 +201,7 @@ upper: "" {
 
 side-l: "" {
   class: wrapper
+  grid-rows: 4
   # Centers the analyst on the Decision API: API center - person height / 2
   drop: "" {width: 284; height: 108; class: invisible}
   analyst: "" {
@@ -198,6 +211,14 @@ side-l: "" {
     head: "" {width: 230; height: 40; class: invisible}
     n: "Decision Analyst" {class: [row-name; ink-person]; width: 230}
     b: "[Person]\n\nData, risk, or audit\nanalyst who reviews\nbusiness decisions" {class: [row-body; ink-person]; width: 230}
+  }
+  # Drops Redis to roughly the datastore row inside the boundary
+  rise: "" {width: 284; height: 150; class: invisible}
+  # Reasoner-owned infrastructure: outside the DecisionLedger boundary
+  redis: "" {
+    class: [box; state]
+    n: "Redis" {class: [row-name; ink-state; narrow]}
+    b: "[Database: Redis 7]\n\nOwned by Account\nTakeover (its own\ncompose.yaml):\nfeature state" {class: [row-body; ink-state; narrow]}
   }
 }
 
@@ -221,11 +242,9 @@ dl: "  DecisionLedger [Software System]\n " {
   }
   gap-r: "" {class: invisible}
 
-  redis: "" {
-    class: [box; state]
-    n: "Redis" {class: [row-name; ink-state; narrow]}
-    b: "[Database: Redis 7]\n\nAccount Takeover\nsliding-window\nfeature state" {class: [row-body; ink-state; narrow]}
-  }
+  # Empty bottom-left cell: the Redis edge leaves the boundary through it
+  # Width matches the datastore cards so the column keeps its size
+  gap-b: "" {width: 254; class: invisible}
   pg: "" {
     class: [box; datastore]
     n: "PostgreSQL" {class: [row-name; ink-datastore; narrow]}
@@ -262,6 +281,6 @@ dl.api -> upper.reasoners.returns: "" {class: from-framework}
 side-l.analyst -> dl.api: "Fetches bundles and\nreplays decisions\n[HTTP/JSON]" {class: from-person}
 dl.api -> side-r.llm: "Gate-routed cases:\nsends prompts,\ngets verdicts\n[HTTPS]" {class: from-framework}
 
-dl.api -> dl.redis: "Reads, writes\nfeatures\n[RESP]" {class: from-framework}
+dl.api -> side-l.redis: "ATO code in the API:\nreads, writes\nfeatures [RESP]" {class: from-domain}
 dl.api -> dl.pg: "Vector search,\nbundles [SQL]" {class: from-framework}
 dl.api -> dl.es: "BM25 search\n[HTTP]" {class: from-framework}
