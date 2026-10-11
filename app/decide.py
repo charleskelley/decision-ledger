@@ -1,20 +1,16 @@
-"""Framework decision orchestrator — domain-agnostic half of the pipeline.
+"""Framework decision orchestrator — reasoner-agnostic half of the pipeline.
 
 ``execute_decision()`` runs the framework's portion of the pipeline against a
-fully-assembled ``Observation``: optional retrieval + policy gate (when the
-domain routed ``ROUTE_TO_GATE``), deterministic enforcement, bundle
-assembly, and persistence. Returns the persisted ``DecisionBundle``.
+fully-assembled ``Observation``: intake validation against the reasoner
+registry, optional retrieval + policy gate (when the reasoner routed
+``ROUTE_TO_GATE``), deterministic enforcement, bundle assembly, and
+persistence. Returns the persisted ``DecisionBundle``.
 
-The reasoner pipeline (``reasoner/<domain>/pipeline.py``) is responsible for
-everything *before* this function: feature computation, scoring, assembly,
-and rendering a retrieval query string. Once it has those, it calls
-``execute_decision()`` with the assembled observation and the rendered query.
-
-Used by:
-- ``reasoner/account_takeover/pipeline.py:run_ato_decision`` — the ATO
-  domain orchestrator that wraps this function.
-- ``eval/clients/pipeline.py:PipelineDriver`` — the eval harness's
-  in-process driver for consistency / robustness dimensions.
+The reasoner pipeline is responsible for everything *before* this function:
+feature computation, scoring, assembly, and rendering a retrieval query
+string. Once it has those, it calls ``execute_decision()`` with the assembled
+observation and the rendered query. This is the single handoff point between
+any reasoner and the framework.
 
 Async (DR-23). The single ``await`` point is the policy-gate call;
 all other services (retriever, store) are sync and run inline. The function
@@ -31,6 +27,7 @@ from typing import TYPE_CHECKING
 from app.audit import build_bundle
 from app.enforcement.resolver import resolve
 from app.monitoring import duration_ms
+from core.observation import validate_observation
 from core.routes import GateRoute
 
 if TYPE_CHECKING:
@@ -40,7 +37,7 @@ if TYPE_CHECKING:
     from app.gate.policy import PolicyGate
     from app.retrieval.retriever import PolicyRetriever
     from core.bundle import DecisionBundle
-    from core.observation import Observation
+    from core.observation import Observation, ReasonerRegistry
 
 
 async def execute_decision(
@@ -50,6 +47,7 @@ async def execute_decision(
     retriever: PolicyRetriever,
     gate: PolicyGate,
     store: BundleStore,
+    registry: ReasonerRegistry,
     corpus_version: str,
     ingestion_timestamp: datetime,
     upstream_latency: dict[str, float] | None = None,
@@ -60,12 +58,13 @@ async def execute_decision(
 
     The reasoner is expected to have already run feature computation,
     scoring, and ``build_observation`` (or its equivalent) before calling
-    this function. The framework consumes the assembled ``Observation``
-    and the reasoner-rendered retrieval ``query`` string and produces a
-    persisted ``DecisionBundle``.
+    this function. The framework first validates the observation against
+    the intake contract and the reasoner registry, then consumes the
+    assembled ``Observation`` and the reasoner-rendered retrieval ``query``
+    string and produces a persisted ``DecisionBundle``.
 
     Args:
-        observation: Fully-assembled Observation from the domain reasoner.
+        observation: Fully-assembled Observation from the reasoner.
             Must satisfy the ``core.observation.Observation`` protocol —
             ``reasoner_context`` and ``gate_context`` populated.
         query: Pre-rendered retrieval query string (built by the reasoner).
@@ -73,6 +72,10 @@ async def execute_decision(
         retriever: Hybrid policy retriever (pgvector + ES + reranker).
         gate: LLM policy gate (invoked only when the route is to-gate).
         store: Bundle persistence store (Postgres-backed).
+        registry: Registry of known reasoners. The observation's
+            ``reasoner_id`` must be registered; its registration supplies
+            the authorization checks at intake and the enforcement profile
+            (Tiers 3 and 5) at resolution time.
         corpus_version: Policy corpus version stamp for the bundle.
         ingestion_timestamp: Wall-clock time at which the upstream raw event
             entered the pipeline. Recorded in the bundle.
@@ -87,11 +90,23 @@ async def execute_decision(
     Returns:
         The fully-assembled ``DecisionBundle`` after persistence.
 
+    Raises:
+        ObservationContractError: The observation violates an intake
+            contract (shape, gate authorization, or gate_config convention).
+        UnregisteredReasonerError: The observation's ``reasoner_id`` is not
+            in ``registry``.
+
     Side effects:
         - Reads from pgvector + Elasticsearch when routed to the gate.
         - Calls the LLM API when routed to the gate.
         - Writes the bundle to Postgres.
     """
+    validate_observation(observation, registry=registry)
+    # validate_observation guarantees reasoner_context is populated.
+    assert observation.reasoner_context is not None
+    reasoner_id = observation.reasoner_context.reasoner_id
+    registration = registry.get(reasoner_id)
+
     decision_id = decision_id or str(uuid.uuid4())
     idempotency_key = idempotency_key or observation.event_id
     latency: dict[str, float] = dict(upstream_latency or {})
@@ -102,11 +117,6 @@ async def execute_decision(
 
     if observation.route == GateRoute.ROUTE_TO_GATE:
         config = observation.gate_context.gate_config or {}
-        reasoner_id = (
-            observation.reasoner_context.reasoner_id
-            if observation.reasoner_context is not None
-            else None
-        )
         t0 = time.perf_counter()
         snippets, retrieval_path = retriever.retrieve(
             query=query,
@@ -138,6 +148,7 @@ async def execute_decision(
         verdict,
         snippets=snippets,
         decision_id=decision_id,
+        registration=registration,
     )
     latency["enforcement_ms"] = duration_ms(t0)
 

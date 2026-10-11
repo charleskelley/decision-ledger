@@ -1,4 +1,4 @@
-"""Structured JSON logging and observability for the ATO Reasoner pipeline.
+"""Structured JSON logging and observability for the DecisionLedger runtime.
 
 All log entries include: timestamp, level, component, event_id, decision_id.
 Latency measurements use the duration_ms field name (standard across the project).
@@ -28,10 +28,16 @@ import structlog
 
 
 def configure_logging(*, json_logs: bool = True, level: str = "INFO") -> None:
-    """Configure structlog for the ATO Reasoner pipeline.
+    """Configure structlog for the DecisionLedger runtime.
 
     Call once at process startup before any loggers are used. Idempotent —
     safe to call multiple times (subsequent calls reconfigure structlog).
+
+    Loggers are real ``logging.Logger`` instances (``structlog.stdlib``
+    factory), so every entry carries the caller's module as ``logger`` and
+    the rendered line is emitted through the stdlib root handler. That keeps
+    framework and third-party output on one stream and lets tests capture
+    entries with ``caplog``.
 
     Args:
         json_logs: When ``True`` (default), render each log entry as a single
@@ -65,15 +71,16 @@ def configure_logging(*, json_logs: bool = True, level: str = "INFO") -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
-    # Keep stdlib logging consistent so third-party libraries log at the same level.
-    logging.basicConfig(
-        format="%(message)s",
-        level=log_level,
-    )
+    # The rendered line is already JSON (or console-formatted), so the stdlib
+    # handler emits it verbatim. ``basicConfig`` is a no-op when the root
+    # logger already has handlers (pytest, uvicorn), so set the level directly
+    # as well to keep stdlib and structlog filtering consistent.
+    logging.basicConfig(format="%(message)s", level=log_level)
+    logging.getLogger().setLevel(log_level)
 
 
 def duration_ms(start: float) -> float:

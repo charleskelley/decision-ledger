@@ -6,10 +6,11 @@ could back this with a database or remote config service while satisfying the
 same ``ReasonerRegistry`` protocol.
 
 This module is reasoner-agnostic. Each reasoner ships its own
-``ReasonerRegistration`` constant in its own package (e.g.,
-``reasoner.account_takeover.registry.ATO_REGISTRATION``); the deployment
-composer (``app/main.py``) collects them into a ``StaticReasonerRegistry``
-and passes it to ``validate_observation()``.
+``ReasonerRegistration`` constant in its own package (conventionally a
+``<PREFIX>_REGISTRATION`` constant in its ``registry`` module) and exposes it
+on its plugin; ``app/plugins.py:build_registry`` collects the discovered
+plugins' registrations into a ``StaticReasonerRegistry`` that the bootstrap
+hands to the bundle store and to ``validate_observation()``.
 """
 
 from __future__ import annotations

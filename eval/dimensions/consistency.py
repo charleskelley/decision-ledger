@@ -24,9 +24,8 @@ for telemetry only — they are not gated.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from statistics import variance
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,10 +37,10 @@ from core.eval.metrics import (
     EvalDimension,
 )
 from eval.dimensions.base import DimensionRun
-from reasoner.account_takeover.events import LoginEvent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds
@@ -49,7 +48,9 @@ if TYPE_CHECKING:
 
 THRESHOLD_ACTION_STABILITY = 1.0  # zero tolerance
 
-_DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "scenarios"
+#: The reasoner's event model. Datasets are validated against the
+#: ``event_type`` its ``EvalAdapter`` supplies.
+EventT = TypeVar("EventT", bound=BaseModel)
 
 
 # ---------------------------------------------------------------------------
@@ -57,24 +58,24 @@ _DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "scenarios"
 # ---------------------------------------------------------------------------
 
 
-class ScenarioOrdering(BaseModel):
+class ScenarioOrdering(BaseModel, Generic[EventT]):
     """One ordering of a scenario's events.
 
     Attributes:
         ordering_id: Stable identifier (e.g., ``"chronological"``,
             ``"reverse"``, ``"shuffled-1"``).
-        events: Sequence of validated ``LoginEvent`` records. The last event
-            is the *trigger* — its decision is what consistency compares
-            across orderings.
+        events: Sequence of validated events of the reasoner's event type.
+            The last event is the *trigger* — its decision is what
+            consistency compares across orderings.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     ordering_id: str
-    events: list[LoginEvent] = Field(min_length=1)
+    events: list[EventT] = Field(min_length=1)
 
 
-class ConsistencyScenario(BaseModel):
+class ConsistencyScenario(BaseModel, Generic[EventT]):
     """A scenario with multiple orderings of the same event set.
 
     Attributes:
@@ -87,10 +88,12 @@ class ConsistencyScenario(BaseModel):
 
     scenario_id: str
     description: str
-    orderings: list[ScenarioOrdering] = Field(min_length=2)
+    orderings: list[ScenarioOrdering[EventT]] = Field(min_length=2)
 
 
-def load_scenarios(path: Path) -> list[ConsistencyScenario]:
+def load_scenarios(
+    path: Path, *, event_type: type[EventT]
+) -> list[ConsistencyScenario[EventT]]:
     """Parse a YAML scenario file.
 
     Uses ``strict=False`` validation so YAML primitive strings (enum names,
@@ -101,14 +104,15 @@ def load_scenarios(path: Path) -> list[ConsistencyScenario]:
     Args:
         path: Path to the YAML file. Must contain a top-level ``scenarios:``
             list.
+        event_type: The reasoner's event model; every ordering's events are
+            validated against it.
 
     Returns:
         Validated list of ``ConsistencyScenario``.
     """
     raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return [
-        ConsistencyScenario.model_validate(s, strict=False) for s in raw["scenarios"]
-    ]
+    model = ConsistencyScenario[event_type]
+    return [model.model_validate(s, strict=False) for s in raw["scenarios"]]
 
 
 # ---------------------------------------------------------------------------
@@ -180,19 +184,20 @@ class PipelineRunResult(BaseModel):
 class PipelineDriver(Protocol):
     """SDK-agnostic driver into the live decision pipeline.
 
-    The MVP implementation feeds events through the same path as
-    ``app/main.py:create_decision`` (ingestion → assembler → gate →
-    enforcement → audit) and returns the trigger's decision. Test stubs
-    satisfy this same protocol so the dimension's wire-up is testable
-    without infrastructure.
+    A reasoner's eval driver feeds events through the same path as its
+    live decision endpoint (domain pipeline → ``app/decide.py:
+    execute_decision``: retrieval → gate → enforcement → audit) and returns
+    the trigger's decision. Test stubs satisfy this same protocol so the
+    dimension's wire-up is testable without infrastructure.
     """
 
-    async def run(self, events: Sequence[LoginEvent]) -> PipelineRunResult:
+    async def run(self, events: Sequence[Any]) -> PipelineRunResult:
         """Run the pipeline over an ordered event sequence.
 
         Args:
-            events: Ordered events. The last event is the trigger; earlier
-                events warm the feature window state.
+            events: Ordered events of the reasoner's event type. The last
+                event is the trigger; earlier events warm whatever
+                per-entity state the reasoner keeps.
 
         Returns:
             ``PipelineRunResult`` for the trigger event.
@@ -219,19 +224,11 @@ class ConsistencyDimension:
         self,
         *,
         driver: PipelineDriver,
-        scenarios: list[ConsistencyScenario],
+        scenarios: Sequence[ConsistencyScenario[Any]],
     ) -> None:
         """Construct the dimension."""
         self._driver = driver
         self._scenarios = scenarios
-
-    @classmethod
-    def from_default_dataset(cls, *, driver: PipelineDriver) -> ConsistencyDimension:
-        """Construct using the bundled scenario dataset."""
-        scenarios: list[ConsistencyScenario] = []
-        for path in sorted(_DATASETS_DIR.glob("*.yaml")):
-            scenarios.extend(load_scenarios(path))
-        return cls(driver=driver, scenarios=scenarios)
 
     async def evaluate(self) -> DimensionRun:
         """Run all scenarios x orderings and assemble the dimension run."""
@@ -301,6 +298,7 @@ __all__ = [
     "THRESHOLD_ACTION_STABILITY",
     "ConsistencyDimension",
     "ConsistencyScenario",
+    "EventT",
     "PipelineDriver",
     "PipelineRunResult",
     "ScenarioOrdering",
