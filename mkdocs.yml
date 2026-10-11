@@ -79,10 +79,8 @@ nav:
     - reference/index.md
     - core: reference/core.md
     - app: reference/app.md
-    - reasoner: reference/reasoner.md
+    - ato_reasoner: reference/reasoners/account-takeover.md
     - eval: reference/eval.md
-    - generator: reference/generator.md
-    - tools: reference/tools.md
   - Operations:
     - Secrets: operations/secrets.md
   - Development:

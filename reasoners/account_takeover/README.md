@@ -1,0 +1,73 @@
+# ato-reasoner
+
+The account-takeover / identity-risk reference reasoner for DecisionLedger,
+packaged as a uv workspace member. Import package: `ato_reasoner`;
+distribution: `ato-reasoner`; `reasoner_id`: `ato-reasoner`.
+
+It owns the full ATO domain: login-event types, Redis-backed feature
+windows and ingestion stream, the XGBoost scorer (artifact under
+`src/ato_reasoner/scorer/models/`), the assembler that builds the
+`Observation`, prompt templates (`prompts/ato-v*.yaml`), the policy corpus
+(`corpus/`), the synthetic-scenario generator, and the eval driver and
+datasets. The framework (`decision-ledger`) never imports or depends on it.
+
+The active gate template is `ato-v3` (v2's user text plus a `system:` key
+carrying ATO's system message); `ato-v1`/`ato-v2` stay registered for
+historical bundles. `registry.py` declares the enforcement profile the
+framework reads: `novel_entity_feature="sparse_history"` (Tier 3) and the
+US vs. EU `jurisdiction_conflict_groups` (Tier 5).
+
+See DR-26 in `docs/design/decisions.md` for why the reasoner is packaged
+this way, and `docs/design/reasoners/reasoner-handoff.md` for the contract
+and the checklist to copy when writing another reasoner.
+
+## How it plugs in
+
+Two entry points in `pyproject.toml`, both named after the `reasoner_id`:
+
+| Group | Target | Consumed by |
+| --- | --- | --- |
+| `decisionledger.reasoners` | `ato_reasoner.plugin:PLUGIN` | `app.plugins.discover_plugins` (runtime: router, registration, prompts, corpus, services) |
+| `decisionledger.eval_adapters` | `ato_reasoner.eval.adapter:ADAPTER` | `eval.adapter.load_eval_adapter` (eval harness) |
+
+The root workspace installs it through the `reasoners` dependency group
+(a default group), so a bare `uv sync` at the repo root is enough. Entry
+points refresh only on reinstall: re-run `uv sync` after editing this
+`pyproject.toml`.
+
+Infrastructure: `compose.yaml` defines the `redis` service, pulled into the
+root stack by `include:` in `docker-compose.yml`. Make targets come from
+`reasoner.mk`, included by the root `Makefile`.
+
+## Make targets (run from the repo root)
+
+| Target | What it does |
+| --- | --- |
+| `make train-account_takeover` | Train the XGBoost scorer (artifact + model card + CSVs) |
+| `make eval-model-account_takeover` | Evaluate the trained scorer on a fresh-seed test set |
+| `make scenario-account_takeover` | Publish 10 `baseline_normal` synthetic login events |
+| `make build-policy-index-account_takeover` | Embed and index `corpus/` under `reasoner_id=ato-reasoner` |
+| `make prepare-account_takeover` | Build the policy index and train the scorer if the artifact is missing |
+| `make eval-account_takeover` | Run the eval harness with this reasoner's adapter (slow, paid) |
+| `make capture-baselines-account_takeover` | Re-capture faithfulness fixtures from live gate runs |
+
+The aggregate root targets (`make train`, `make build-policy-index`,
+`make prepare-reasoners`, `make eval`) fan out to these.
+
+## Environment
+
+Read by `ato_reasoner.settings.AtoSettings` (prefix `ATO_`, from `.env` or
+the process environment):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ATO_REDIS_URL` | `redis://localhost:6379` | Feature windows, dedup store, login-event stream |
+| `ATO_SCORER_MODEL_PATH` | packaged `scorer/models/ato-v1.ubj` | Override the scorer artifact |
+| `ATO_CORPUS_VERSION` | `ato-v1` | Corpus version recorded in every Decision Bundle |
+| `ATO_REDIS_PORT` | `6379` | Host port mapping in `compose.yaml` (Compose only) |
+
+## Tests
+
+`tests/` here is collected by the root `pytest` run (`testpaths` includes
+`reasoners/*/tests`). It is a separate tree from the framework's `tests/`
+and does not use the framework's stub-reasoner fixtures.

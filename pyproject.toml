@@ -47,22 +47,11 @@ dependencies = [
     # --- API layer ---
     "fastapi>=0.111,<1",
     "uvicorn[standard]>=0.30,<1",
-    # --- Event queue ---
-    "redis>=5.0,<6",
     # --- Database ---
     "psycopg[binary]>=3.1,<4",
     "pgvector>=0.3,<1",
-    "sqlalchemy>=2.0,<3",
-    "alembic>=1.13,<2",
     # --- Search ---
     "elasticsearch>=8.13,<9",
-    # --- ML scorer ---
-    # shap removed: XGBoost >= 2.0 computes TreeSHAP natively via
-    # model.predict(data, pred_contribs=True) — identical numerical output,
-    # no llvmlite/numba dependency chain.
-    "xgboost>=2.0,<3",
-    "numpy>=1.26,<3",
-    "pandas>=2.2,<3",
     # --- Embeddings & retrieval ---
     "sentence-transformers>=3.0,<4",
     "torch>=2.3",
@@ -96,7 +85,16 @@ dev = [
     # --- Utilities ---
     "ipython>=8.25,<9",
     "rich>=13.7,<14",              # Pretty CLI output
+    # Type stubs for the workspace's reasoner members (pyright checks
+    # reasoners/*/src from this root environment). Also declared in the ATO
+    # member's own dev group, which a bare root `uv sync` does not install.
     "pandas-stubs>=3.0.0.260204",
+]
+# Deployment composition: the reasoner plugins this checkout installs. The
+# framework's own [project] dependencies never name a reasoner; this group is
+# the pyproject analog of the compose `include:` (see docker-compose.yml).
+reasoners = [
+    "ato-reasoner",
 ]
 docs = [
     # --- Documentation ---
@@ -116,15 +114,27 @@ Documentation = "https://charleskelley.github.io/decision-ledger/"
 Issues = "https://github.com/charleskelley/decision-ledger/issues"
 
 # =============================================================================
-# Entry Points
+# uv workspace — reasoner plugins are members under reasoners/*
 # =============================================================================
+# Reasoners declare their own `decisionledger.reasoners` and
+# `decisionledger.eval_adapters` entry points in their member pyproject; this
+# root package declares none.
+
+[tool.uv]
+default-groups = ["dev", "reasoners"]
+
+[tool.uv.workspace]
+members = ["reasoners/*"]
+
+[tool.uv.sources]
+ato-reasoner = { workspace = true }
 
 # =============================================================================
 # Hatch (build configuration)
 # =============================================================================
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "app", "eval", "generator", "reasoner"]
+packages = ["core", "app", "eval"]
 
 # =============================================================================
 # Ruff — single tool for formatting and linting
@@ -134,7 +144,7 @@ packages = ["core", "app", "eval", "generator", "reasoner"]
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-src = ["core", "app", "eval", "generator", "reasoner"]
+src = ["core", "app", "eval", "tests"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -182,23 +192,12 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
     "S105",   # hardcoded passwords in test fixtures are fine
     "S106",   # hardcoded passwords in test fixtures are fine
 ]
-"generator/**/*.py" = [
-    "S311",   # pseudo-random generators are fine for synthetic data
-    "S105",   # "hardcoded password" false positives on enum values like AuthMethod.PASSWORD
-    "S106",   # hardcoded password arguments — expected in synthetic data generation
-]
-"core/**/*.py" = [
-    "S105",   # "hardcoded password" false positives on enum values like AuthMethod.PASSWORD
-]
-"reasoner/**/*.py" = [
-    "S105",   # "hardcoded password" false positives on enum values like AuthMethod.PASSWORD
-]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["core", "app", "eval", "generator", "reasoner"]
+known-first-party = ["core", "app", "eval"]
 
 [tool.ruff.lint.flake8-pytest-style]
 fixture-parentheses = false
@@ -210,7 +209,10 @@ fixture-parentheses = false
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-include = ["core", "app", "eval", "generator", "reasoner"]
+# `reasoners/**/src`, not `reasoners/*/src`: pyright 1.1.408 silently matches
+# nothing for a single-star directory glob. ato_reasoner itself resolves via
+# the editable install, so no extraPaths are needed.
+include = ["core", "app", "eval", "reasoners/**/src"]
 exclude = ["**/__pycache__", "build", "dist", ".venv"]
 reportMissingImports = true
 reportMissingTypeStubs = false
@@ -221,7 +223,11 @@ reportUnnecessaryTypeIgnoreComment = true
 # =============================================================================
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "reasoners/*/tests"]
+# Repo root on sys.path so ``tests._stub_reasoner.plugin:PLUGIN`` resolves
+# through ``importlib.metadata.EntryPoint.load()`` exactly like an installed
+# plugin would.
+pythonpath = ["."]
 python_files = "test_*.py"
 python_functions = "test_*"
 addopts = [
@@ -229,9 +235,10 @@ addopts = [
     "--strict-markers",            # fail on unknown markers
     "--strict-config",             # fail on config errors
     "-q",                          # quiet output by default
+    "--import-mode=importlib",     # two test trees (tests/, reasoners/*/tests) without basename clashes
 ]
 markers = [
-    "integration: requires Docker services (Redis, PostgreSQL, Elasticsearch)",
+    "integration: requires Docker services (see docker-compose.yml)",
     "evaluation: full evaluation harness tests (slow, LLM calls, costs money)",
     "slow: tests that take >10s for reasons other than integration or eval",
     "smoke: minimal end-to-end sanity check (subset of integration, fast)",
@@ -280,7 +287,7 @@ sql_file_exts = ".sql,.pgsql"
 max_line_length = 88              # Consistent with ruff line-length
 
 [tool.sqlfluff.rules.capitalisation.keywords]
-capitalisation_policy = "lower"   # Consistent with infra/postgres/init.sql style
+capitalisation_policy = "lower"   # Consistent with app/audit/sql/*.sql style
 
 [tool.sqlfluff.rules.capitalisation.identifiers]
 capitalisation_policy = "lower"

@@ -1,7 +1,7 @@
 """Behavioral tests for the framework's StaticReasonerRegistry.
 
 Reasoner-specific registration tests live with the reasoner package
-(e.g., tests/reasoner/account_takeover/test_registry.py for ATO).
+(e.g., reasoners/account_takeover/tests/test_registry.py for ATO).
 
 Key contracts:
 - StaticReasonerRegistry rejects duplicate reasoner_id at construction.
