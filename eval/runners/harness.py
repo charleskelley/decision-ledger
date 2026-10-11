@@ -9,8 +9,16 @@ test harness). The runner does not know which dimensions exist; it only
 asks each one to ``evaluate()`` and assembles the report. This keeps the
 runner stable as new dimensions are added.
 
+The CLI evaluates one reasoner at a time. ``--reasoner-id`` (or
+``DECISIONLEDGER_EVAL_REASONER``) names it; the reasoner's ``EvalAdapter``
+(see ``eval.adapter``) supplies the event type, golden datasets, and the
+pipeline driver. The harness itself carries no reasoner vocabulary.
+
 Usage::
 
+    uv run python -m eval.runners.harness --reasoner-id <reasoner-id>
+
+    # or programmatically
     from eval.runners.harness import run_eval
 
     report = await run_eval(dimensions=[...], output_path=Path("report.json"))
@@ -40,7 +48,8 @@ from core.eval.metrics import (
     RetrievalMetrics,
     RobustnessMetrics,
 )
-from eval.clients.pipeline import PipelineDriver
+from core.exceptions import ReasonerPluginError
+from eval.adapter import load_eval_adapter
 from eval.clients.ragas import RagasFaithfulnessAdapter
 from eval.dimensions.citation import CitationDimension, load_citation_cases
 from eval.dimensions.consistency import ConsistencyDimension, load_scenarios
@@ -61,6 +70,7 @@ from eval.dimensions.skipped import SkippedDimension
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from eval.adapter import EvalAdapter
     from eval.dimensions import Dimension, DimensionRun
 
 log = structlog.get_logger(__name__)
@@ -158,15 +168,17 @@ async def run_eval(
     return report
 
 
-_DEFAULT_DATASET_ROOT = Path("eval/datasets")
+#: Env var naming the reasoner to evaluate when ``--reasoner-id`` is absent.
+_REASONER_ENV = "DECISIONLEDGER_EVAL_REASONER"
 
 
 def _build_default_dimensions(
     *,
+    adapter: EvalAdapter,
     settings: FrameworkSettings | None = None,
     dataset_root: Path | None = None,
 ) -> list[Dimension]:
-    """Construct the MVP dimension set against live infrastructure.
+    """Construct the MVP dimension set for one reasoner against live infrastructure.
 
     Each dimension's golden dataset is loaded from
     ``dataset_root/<dimension>/...``. When a dataset file is missing
@@ -176,12 +188,15 @@ def _build_default_dimensions(
     threshold violation instead of disappearing silently.
 
     Args:
+        adapter: The reasoner's ``EvalAdapter``. Supplies the tenant id the
+            retrieval dimension filters on, the event type the consistency
+            and robustness datasets are validated against, the default
+            dataset root, and the pipeline driver.
         settings: Optional ``FrameworkSettings`` override. Defaults to a
             fresh ``FrameworkSettings()`` reading from the environment.
             Tests pass a stub Settings to drive the API-key fail-fast path.
         dataset_root: Optional override for the dataset directory.
-            Defaults to ``eval/datasets/`` relative to the working
-            directory.
+            Defaults to ``adapter.datasets_dir``.
 
     Returns:
         Five dimensions in canonical order: retrieval, faithfulness,
@@ -211,12 +226,13 @@ def _build_default_dimensions(
         )
         raise ValueError(msg)
 
-    dataset_root = dataset_root if dataset_root is not None else _DEFAULT_DATASET_ROOT
+    dataset_root = dataset_root if dataset_root is not None else adapter.datasets_dir
+    event_type = adapter.event_type
 
     # Heavy clients — opened once, shared across dimensions. The gate (inside
     # the driver) uses OpenAI; faithfulness/citation judges use Anthropic.
     # Cross-family pairing reduces in-family judging bias.
-    driver = PipelineDriver(framework_settings=settings)
+    driver = adapter.build_driver(settings)
     judge_client = AnthropicLLMClient()
     ragas_scorer = RagasFaithfulnessAdapter()
 
@@ -229,6 +245,7 @@ def _build_default_dimensions(
             RetrievalDimension(
                 retriever=driver.retriever,
                 golden_queries=load_golden_queries(queries_path),
+                reasoner_id=adapter.reasoner_id,
             )
         )
     else:
@@ -265,7 +282,7 @@ def _build_default_dimensions(
     if scenario_files:
         scenarios = []
         for f in scenario_files:
-            scenarios.extend(load_scenarios(f))
+            scenarios.extend(load_scenarios(f, event_type=event_type))
         dimensions.append(ConsistencyDimension(driver=driver, scenarios=scenarios))
     else:
         dimensions.append(
@@ -307,22 +324,22 @@ def _build_default_dimensions(
             RobustnessDimension(
                 driver=driver,
                 injection_cases=(
-                    load_injection_cases(injection_path)
+                    load_injection_cases(injection_path, event_type=event_type)
                     if injection_path.exists()
                     else None
                 ),
                 schema_cases=(
-                    load_schema_violation_cases(schema_path)
+                    load_schema_violation_cases(schema_path, event_type=event_type)
                     if schema_path.exists()
                     else None
                 ),
                 novel_cases=(
-                    load_novel_pattern_cases(novel_path)
+                    load_novel_pattern_cases(novel_path, event_type=event_type)
                     if novel_path.exists()
                     else None
                 ),
                 fallback_cases=(
-                    load_fallback_cases(fallback_path)
+                    load_fallback_cases(fallback_path, event_type=event_type)
                     if fallback_path.exists()
                     else None
                 ),
@@ -339,6 +356,7 @@ def _build_default_dimensions(
     log.info(
         "eval.harness.dimensions_built",
         component="eval_harness",
+        reasoner_id=adapter.reasoner_id,
         num_dimensions=len(dimensions),
         skipped=[d.kind.value for d in dimensions if isinstance(d, SkippedDimension)],
     )
@@ -351,14 +369,17 @@ _DEFAULT_OUTPUT_PATH = Path("outputs/stage/eval/eval-report.json")
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for ``make eval``.
 
-    Resolves the output path (in precedence order: ``--output`` flag,
-    ``EVAL_OUTPUT_PATH`` env var, then the default staging path),
-    constructs the default dimension set, and runs the harness.
+    Resolves the reasoner to evaluate (``--reasoner-id`` flag, else the
+    ``DECISIONLEDGER_EVAL_REASONER`` env var) and loads its ``EvalAdapter``;
+    resolves the output path (in precedence order: ``--output`` flag,
+    ``EVAL_OUTPUT_PATH`` env var, then the default staging path);
+    constructs the default dimension set; and runs the harness.
 
     Exit codes:
         0: all dimensions passed thresholds (``overall_passed=True``).
         1: one or more dimensions failed thresholds.
-        2: config error — no dimensions registered. No report written.
+        2: config error — no reasoner named, no eval adapter for it, missing
+            API keys, or no dimensions registered. No report written.
 
     Args:
         argv: Optional argv override (defaults to ``sys.argv[1:]``).
@@ -369,7 +390,15 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="eval.runners.harness",
-        description="Run the 5-dimension evaluation harness.",
+        description="Run the 5-dimension evaluation harness for one reasoner.",
+    )
+    parser.add_argument(
+        "--reasoner-id",
+        default=None,
+        help=(
+            "reasoner_id whose EvalAdapter supplies the datasets and pipeline "
+            f"driver. Defaults to ${_REASONER_ENV}; one of the two is required."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -386,8 +415,23 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get("EVAL_OUTPUT_PATH", str(_DEFAULT_OUTPUT_PATH))
     )
 
+    reasoner_id = args.reasoner_id or os.environ.get(_REASONER_ENV, "").strip()
+    if not reasoner_id:
+        print(
+            f"error: no reasoner to evaluate; pass --reasoner-id or set "
+            f"{_REASONER_ENV}.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
-        dimensions = _build_default_dimensions()
+        adapter = load_eval_adapter(reasoner_id)
+    except ReasonerPluginError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        dimensions = _build_default_dimensions(adapter=adapter)
     except ValueError as exc:
         # Configuration errors (missing env vars, etc.) — print clean
         # message; exit 2 distinguishes config failure from threshold

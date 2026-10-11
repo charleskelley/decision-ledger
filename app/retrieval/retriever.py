@@ -11,34 +11,33 @@
    If no cross-encoder is provided, or reranking exceeds the configured
    timeout, the RRF-ordered results are returned unchanged as ``rrf_only``.
 
-Domain-agnostic by design: callers pass a pre-rendered query string plus
-optional jurisdiction / risk-tier filters. Reasoners own query construction
-(see ``reasoner/<domain>/retrieval_query.py`` for the ATO reference).
+Domain-agnostic by design: callers pass a pre-rendered query string plus a
+``reasoner_id`` tenant filter and optional jurisdiction / risk-tier filters.
+Reasoners own query construction (each ships its own query builder).
 
+The ``reasoner_id`` filter is applied in both stores (tenant isolation).
 Jurisdiction metadata filtering is applied in both the Postgres and ES queries.
 Risk-tier filtering is applied in Postgres; ES filters by jurisdiction only.
 
-The title lookup is resolved from an in-memory map built from corpus frontmatter
-at startup because the ``policy_chunks`` table does not carry a ``title`` column.
+Every chunk row carries its document ``title`` (written by the corpus loader),
+so the retriever needs no access to any reasoner's corpus directory.
 
 Usage::
 
     retriever = PolicyRetriever(pg_conn, es_client, model)
     snippets, path = retriever.retrieve(
-        query, k=5, jurisdictions=["US_FEDERAL", "INTERNAL"]
+        query, k=5, reasoner_id="<reasoner-id>", jurisdictions=["REGION_A"]
     )
 """
 
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from psycopg.rows import dict_row
 
-from app.retrieval.corpus_loader import parse_document
 from core.snippet import RetrievedSnippet
 
 if TYPE_CHECKING:
@@ -49,8 +48,6 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _ES_INDEX = "policy-chunks"
-_PROJECT_ROOT = Path(__file__).parents[2]
-_CORPUS_DIR = _PROJECT_ROOT / "corpus"
 
 # RRF constant (k=60 from the original Cormack et al. paper)
 _RRF_K = 60
@@ -68,32 +65,13 @@ def _snippet_key(s: RetrievedSnippet) -> _SnippetKey:
     return (s.document_id, s.version, s.section_path)
 
 
-def _load_title_map(corpus_dir: Path) -> dict[str, str]:
-    """Build a policy_id → title lookup from corpus frontmatter.
-
-    Args:
-        corpus_dir: Root directory of the policy corpus.
-
-    Returns:
-        Mapping from ``policy_id`` to document title.
-    """
-    title_map: dict[str, str] = {}
-    for path in corpus_dir.rglob("*.md"):
-        try:
-            doc, _ = parse_document(path)
-            title_map[doc.policy_id] = doc.title
-        except (ValueError, KeyError):
-            pass
-    return title_map
-
-
 # ---------------------------------------------------------------------------
 # Retriever
 # ---------------------------------------------------------------------------
 
 
 class PolicyRetriever:
-    """Hybrid RAG retriever for the ATO Reasoner policy corpus.
+    """Hybrid RAG retriever over the shared policy corpus stores.
 
     Combines pgvector dense retrieval and Elasticsearch BM25 sparse retrieval
     via Reciprocal Rank Fusion. An optional cross-encoder reranks the fused
@@ -109,7 +87,6 @@ class PolicyRetriever:
             ``rerank()`` returns RRF-ordered results as ``"rrf_only"``.
         rerank_timeout_ms: Maximum milliseconds to spend on reranking before
             falling back to ``"rrf_only"``. Default: 200 ms.
-        corpus_dir: Corpus root used to build the title lookup map.
     """
 
     def __init__(
@@ -120,15 +97,13 @@ class PolicyRetriever:
         *,
         cross_encoder: CrossEncoder | None = None,
         rerank_timeout_ms: float = 200.0,
-        corpus_dir: Path = _CORPUS_DIR,
     ) -> None:
-        """Initialize the retriever and build the title map from corpus."""
+        """Bind the store clients and models; no corpus files are read."""
         self._pg = pg_conn
         self._es = es
         self._model = model
         self._cross_encoder = cross_encoder
         self._rerank_timeout_ms = rerank_timeout_ms
-        self._titles = _load_title_map(corpus_dir)
 
     # ------------------------------------------------------------------
     # Public API
@@ -181,8 +156,9 @@ class PolicyRetriever:
         where = ("WHERE " + " AND ".join(filter_parts)) if filter_parts else ""
 
         sql = f"""
-            SELECT policy_id, policy_version, jurisdiction, section_path,
-                   chunk_text, (1 - (embedding <=> %s)) AS relevance_score
+            SELECT policy_id, policy_version, title, jurisdiction,
+                   section_path, chunk_text,
+                   (1 - (embedding <=> %s)) AS relevance_score
             FROM decisionledger.policy_chunks
             {where}
             ORDER BY embedding <=> %s
@@ -206,9 +182,9 @@ class PolicyRetriever:
     ) -> list[RetrievedSnippet]:
         """Elasticsearch BM25 search with dual-analyzer query.
 
-        Queries both ``text`` (English analyser — stemming, stopwords) and
-        ``text.keyword_search`` (standard analyser — exact regulatory
-        identifiers like ``AAL2``, ``NIST-SP-800-63B``). See DR-13.
+        Queries both ``text`` (English analyzer — stemming, stopwords) and
+        ``text.keyword_search`` (standard analyzer — exact identifiers such
+        as section numbers or policy ids like ``POLICY-A-v2.1``). See DR-13.
 
         Args:
             query: Natural language query string.
@@ -416,11 +392,13 @@ class PolicyRetriever:
         The DB column ``policy_id`` (in the ``policy_chunks`` table) maps
         to ``RetrievedSnippet.document_id`` — the column lives in a
         policy-corpus-specific schema; the snippet type is domain-neutral.
+        ``title`` comes from the row; rows written before the column existed
+        carry ``''`` and fall back to the document id.
         """
         doc_id = str(row["policy_id"])
         return RetrievedSnippet(
             document_id=doc_id,
-            title=self._titles.get(doc_id, doc_id),
+            title=row["title"] or doc_id,
             version=row["policy_version"],
             jurisdiction=row["jurisdiction"],
             section_path=row["section_path"],
@@ -436,7 +414,7 @@ class PolicyRetriever:
         doc_id = str(source["policy_id"])
         return RetrievedSnippet(
             document_id=doc_id,
-            title=source.get("title", self._titles.get(doc_id, doc_id)),
+            title=source.get("title") or doc_id,
             version=source["version"],
             jurisdiction=source["jurisdiction"],
             section_path=source["section_path"],
