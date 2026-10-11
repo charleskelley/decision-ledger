@@ -10,7 +10,9 @@
       "Bash(git reset --hard:*)",
       "Bash(git clean -f:*)",
       "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./.env.local)",
+      "Read(./.env.*.local)",
+      "Read(./.env.production)",
       "Read(./secrets/**)"
     ]
   },
