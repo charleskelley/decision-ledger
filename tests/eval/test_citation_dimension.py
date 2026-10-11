@@ -124,22 +124,6 @@ class TestSuperficialRate:
 
 
 class TestLoadCitationCases:
-    def test_loads_default_dataset(self) -> None:
-        from pathlib import Path
-
-        path = (
-            Path(__file__).parents[2]
-            / "eval"
-            / "datasets"
-            / "citations"
-            / "golden_outputs.yaml"
-        )
-        cases = load_citation_cases(path)
-        assert len(cases) >= 3
-        assert all(isinstance(c, CitationCase) for c in cases)
-        ids = [c.case_id for c in cases]
-        assert len(ids) == len(set(ids))
-
     def test_round_trip_yaml(self, tmp_path: Path) -> None:
         fixture = tmp_path / "cases.yaml"
         fixture.write_text(

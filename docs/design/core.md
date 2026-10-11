@@ -6,13 +6,13 @@ The `core/` module boundary, public contracts between pipeline components, and t
 
 ## The `core/` Boundary
 
-`core/` is the only module in the repository with no infrastructure dependencies. Everything else — `app/`, `eval/`, `generator/` — imports from `core/`. Nothing imports from `app/` except `app/` itself.
+`core/` is the only module in the repository with no infrastructure dependencies. Everything else — `app/`, `eval/`, and every reasoner under `reasoners/` — imports from `core/`. `core/` imports from nothing internal, and never from a reasoner package.
 
 **What lives in `core/`:**
-- Pydantic models for all shared data types (`LoginEvent`, `FeatureVector`, `DecisionBundle`, etc.)
-- Enums and constants (`DecisionAction`, `Jurisdiction`, `DocumentType`)
-- Protocol definitions for pluggable reasoning layers
-- Exception types (`PolicyGateOutputError`, `ScorerInferenceError`, etc.)
+- Pydantic models for every framework contract (`ReasonerContext`, `GateContext`, `DecisionBundle`, `ReasonerRegistration`, etc.)
+- Enums and constants (`DecisionAction`, `GateRoute`, `DocumentType`)
+- Protocol definitions for pluggable reasoners and gates (`Observation`, `ReasonerRegistry`, `PromptRegistry`, `LLMClient`)
+- Exception types (`ObservationContractError`, `UnregisteredReasonerError`, `ReasonerPluginError`)
 - Pure functions with no side effects (action severity ordering, idempotency key computation)
 - Evaluation metric interfaces and dimension contracts
 
@@ -22,6 +22,7 @@ The `core/` module boundary, public contracts between pipeline components, and t
 - OpenAI SDK, anthropic SDK, or any LLM client
 - FastAPI, Starlette, or any HTTP framework
 - sentence-transformers, XGBoost, or any ML library
+- Any reasoner's domain types (`LoginEvent`, `AtoFeatureVector`, ATO jurisdiction tags) — those live in the reasoner's own package
 
 The test: if adding an import to `core/` requires `docker compose up` to pass, it does not belong there.
 
@@ -31,52 +32,39 @@ The test: if adding an import to `core/` requires `docker compose up` to pass, i
 
 ```
 core/                         # Framework contracts — no infrastructure, no domain types
-├── decision/
-│   ├── __init__.py
-│   ├── actions.py            # DecisionAction enum, GateRouting enum, severity ordering
+├── actions.py                # DecisionAction enum, severity ordering
+├── routes.py                 # GateRoute (FAST_PATH_ALLOW | FAST_PATH_BLOCK | ROUTE_TO_GATE)
+├── bundle.py                 # DecisionBundle
+├── snippet.py                # RetrievedSnippet (universal retrieved corpus chunk)
+├── enforcement.py            # EnforcementDecision (enforcement-layer output)
+├── exceptions.py             # ObservationContractError, UnregisteredReasonerError, ReasonerPluginError
+├── observation/
 │   ├── observation.py        # Observation protocol, validate_observation
-│   ├── reasoner_context.py   # ReasonerContext, Signal, LabelType, AttributionSummary
+│   ├── reasoner_context.py   # ReasonerContext, LabelType, AttributionSummary, Contribution
 │   ├── gate_context.py       # GateContext
-│   ├── bundle.py             # DecisionBundle
-│   ├── snippet.py            # RetrievedSnippet (universal retrieved corpus chunk)
-│   ├── enforcement.py        # EnforcementDecision (enforcement-layer output)
-│   ├── routes.py             # GateRoute (top-level routing enum)
-│   ├── resolution.py         # ResolutionAttempt, ResolverKind, ResolutionStatus
-│   └── exceptions.py         # ObservationContractError
+│   └── registration.py       # ReasonerRegistration (incl. enforcement profile), ReasonerRegistry
 ├── gate/
-│   ├── __init__.py
 │   ├── input.py              # GateInput (universal base)
 │   ├── output.py             # GateOutput (universal base)
 │   ├── verdict.py            # GateVerdict (universal base)
-│   ├── corpus.py             # PolicyDocument, DocumentType
-│   ├── routes.py             # GateRoute enum
-│   ├── exceptions.py         # PolicyGateOutputError, RetrievalError, EnforcementError
 │   └── policy/               # LLM-backed policy gate concrete contracts
-│       ├── __init__.py
 │       ├── input.py          # PolicyGateInput(GateInput)
 │       ├── output.py         # PolicyGateOutput(GateOutput), TokenCost
 │       ├── verdict.py        # PolicyGateVerdict(GateVerdict)
 │       ├── citation.py       # Citation
-│       └── prompt.py         # PromptTemplate, PromptSnapshot, PromptRegistry
+│       ├── corpus.py         # PolicyDocument, DocumentType
+│       └── prompt.py         # PromptTemplate, PromptSnapshot (incl. system_text), PromptRegistry
+├── resolution/
+│   ├── attempt.py            # ResolutionAttempt, ResolverKind, ResolutionStatus
+│   ├── human.py              # HumanResolutionAttempt
+│   └── sla_default.py        # SlaDefaultResolutionAttempt (entity_tier, sla_window_seconds)
+├── llm/
+│   └── client.py             # LLMClient protocol, CompletionResult, TokenUsage (DR-23)
 └── eval/
-    ├── __init__.py
-    ├── dimensions.py         # EvalDimension enum, DimensionResult
-    ├── metrics.py            # Metric interfaces: precision, recall, MRR, faithfulness, etc.
-    └── exceptions.py         # EvalDimensionError, ThresholdViolation
-
-reasoner/                     # ATO Reasoner domain layer — no infrastructure, imports from core/
-└── account_takeover/
-    ├── __init__.py
-    ├── events.py             # LoginEvent, GeoData, AuthMethod, AuthOutcome
-    ├── features.py           # AtoFeatureVector, WindowSpec
-    ├── scorer.py             # ScorerOutput
-    ├── policy.py             # Jurisdiction, RiskTier (ATO-level policy enums)
-    └── assembler.py          # build_observation() — the domain → framework boundary
+    └── metrics.py            # EvalDimension, per-dimension metrics, DimensionResult, EvalReport
 ```
 
-> **Note:** This layout will be fleshed out further as `app/policy_gate/`,
-> `app/enforcement/`, and `app/audit/` are built. Treat it as a current-state
-> snapshot, not a comprehensive interface specification.
+Domain types are not in `core/`. Each reasoner keeps its own in its workspace member; for ATO that is `ato_reasoner` (`reasoners/account_takeover/src/ato_reasoner/`): `events.py` (`LoginEvent`, `Geolocation`, `AuthMethod`, `AuthOutcome`), `features.py` (`AtoFeatureVector`), `scorer/output.py` (`ScorerOutput`), `policy.py` (`Jurisdiction`, `RiskTier`), and `assembler.py` (`build_observation()`, the domain → framework boundary).
 
 ---
 
@@ -145,7 +133,8 @@ The enforcement layer takes a `GateVerdict` and produces a final
 This is what makes deterministic replay possible.
 
 ```python
-from core.bundle import EnforcementDecision
+from core.enforcement import EnforcementDecision
+from core.observation import ReasonerRegistration
 from core.gate import GateVerdict
 
 def resolve(
@@ -154,6 +143,7 @@ def resolve(
     *,
     snippets: list[RetrievedSnippet],
     decision_id: str,
+    registration: ReasonerRegistration,
 ) -> EnforcementDecision:
     """Apply deterministic enforcement rules to produce the final action.
 
@@ -164,6 +154,10 @@ def resolve(
         snippets: Policy snippets used by the gate (for tier-5 jurisdiction
             conflict detection).
         decision_id: Decision UUID for log context.
+        registration: The submitting reasoner's registration. Supplies the
+            enforcement profile: novel_entity_feature (Tier 3) and
+            jurisdiction_conflict_groups (Tier 5). Required, so a caller
+            cannot silently disable either tier.
 
     Returns:
         EnforcementDecision with decision_action, enforcement_rule_applied,
@@ -180,58 +174,56 @@ def resolve(
 
 ## External API Surface (FastAPI)
 
-The external API is minimal for MVP — it is a thin layer over the pipeline, not a product surface.
+The external API is minimal for MVP — it is a thin layer over the pipeline, not a product surface. `app/main.py:create_app()` is an application factory (`uv run uvicorn --factory app.main:create_app`): it serves the framework routes below and mounts the router of every reasoner plugin it discovers. Decision endpoints belong to reasoners, because only the reasoner knows its event type; lookup and replay belong to the framework, because they key on `decision_id` alone.
 
-### Decision Endpoint
+### Decision Endpoint (reasoner router)
 
-```
-POST /v1/decisions
-
-Request body: LoginEvent (JSON)
-Response: DecisionResponse
-    - decision_id: str
-    - decision_action: DecisionAction   # the pipeline's verdict (immutable)
-    - required_controls: list[str]
-    - latency_ms: float
-    - bundle_url: str   # link to full bundle for inspection
-```
-
-### Audit Endpoints
+ATO's router (`ato_reasoner/api.py`):
 
 ```
-GET /v1/decisions/{decision_id}
-    Returns: Full DecisionBundle
+POST /api/v1/ato/decisions
 
-GET /v1/decisions/{decision_id}/replay
-    Returns: ReplayResult (decision_action, actions_match: bool, diff_summary)
-
-GET /v1/decisions/{decision_id}/resolution
-    Returns: { resolution_status, realized_action, attempts: list[ResolutionAttempt] }
-    For non-terminal decision_action only; terminal actions trivially have
-    realized_action == decision_action.
+Request body: LoginEvent (JSON; validated strictly in JSON mode — 422 on failure)
+Response: AtoDecisionResponse (summary DTO, DR-16)
+    - decision_id, decision_action, enforcement_rule_applied, route, latency_ms
 ```
 
-### Health and Version
+### Audit Endpoints (framework router)
 
 ```
-GET /healthz
-    Returns: {"status": "ok", "model_version": "...", "prompt_version": "...", "corpus_version": "..."}
+GET /api/v1/decisions/{decision_id}
+    Returns: Full DecisionBundle (any reasoner)
+
+POST /api/v1/decisions/{decision_id}/replay
+    Returns: ReplayResponse (decision_id, original_action, replayed_action, actions_match)
+```
+
+Both return the same error envelope (`error_code`, `message`, optional `details`) under FastAPI's `detail` key:
+
+| Status | `error_code` | When |
+|--------|--------------|------|
+| 404 | `DECISION_NOT_FOUND` | No bundle has this id, including an id that is not a well-formed UUID |
+| 409 | `REASONER_NOT_COMPOSED` | The bundle exists, but its `reasoner_id` is not composed in this deployment (not installed, or excluded by `DECISIONLEDGER_REASONERS`); `details.reasoner_id` names it |
+
+A resolution-history endpoint (`GET /api/v1/decisions/{decision_id}/resolution`) is designed (DR-18) but not built.
+
+### Health
+
+```
+GET /health
+    Returns: {"status": "ok"}
 ```
 
 ---
 
 ## Error Types
 
-All exception types are defined in `core/` and imported by `app/`. Infrastructure-specific exceptions (e.g., `redis.ConnectionError`) are caught at the `app/` boundary and re-raised as `core/` types.
+All exception types the framework contracts define live in `core/exceptions.py` and are imported by `app/`. Infrastructure-specific exceptions (e.g., a psycopg or Elasticsearch error) are caught at the `app/` boundary.
 
 | Exception | Module | When raised |
 |-----------|--------|-------------|
-| `FeatureComputationError` | `core.decision.exceptions` | Feature window computation fails |
-| `ScorerInferenceError` | `core.decision.exceptions` | XGBoost inference error |
-| `RetrievalError` | `core.policy.exceptions` | Both dense and sparse retrieval fail |
-| `PolicyGateOutputError` | `core.policy.exceptions` | LLM output fails schema validation |
-| `EnforcementError` | `core.policy.exceptions` | Enforcement rule evaluation error |
-| `BundleWriteError` | `core.decision.exceptions` | Audit store write failure |
-| `ThresholdViolation` | `core.evaluation.exceptions` | Eval dimension fails CI gate |
+| `ObservationContractError` | `core.exceptions` | An Observation violates the intake contract (`validate_observation`): missing context, disallowed gate, template, or jurisdiction |
+| `UnregisteredReasonerError` | `core.exceptions` | A `reasoner_id` is not in the registry: at intake, or when a stored bundle's reasoner is not composed (lookup/replay answer 409) |
+| `ReasonerPluginError` | `core.exceptions` | Plugin or eval-adapter discovery fails: load error, protocol mismatch, entry-point name ≠ `reasoner_id`, duplicate id, or no adapter for `--reasoner-id` |
 
 All errors are logged with structured JSON including `component`, `event_id`, `decision_id` (where known), `error_type`, and `duration_ms`.

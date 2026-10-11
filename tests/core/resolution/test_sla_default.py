@@ -24,7 +24,7 @@ def _make(**overrides) -> SlaDefaultResolutionAttempt:
         "status": ResolutionStatus.COMPLETED,
         "resolution_action": DecisionAction.BLOCK,
         "note": "SLA_EXPIRY_DEFAULT — STANDARD tier defaults to BLOCK.",
-        "account_tier": "STANDARD",
+        "entity_tier": "STANDARD",
         "sla_window_seconds": 86400,
     }
     base.update(overrides)
@@ -34,7 +34,7 @@ def _make(**overrides) -> SlaDefaultResolutionAttempt:
 def test_sla_default_construction():
     attempt = _make()
     assert attempt.resolver_kind == "SLA_DEFAULT"
-    assert attempt.account_tier == "STANDARD"
+    assert attempt.entity_tier == "STANDARD"
     assert attempt.sla_window_seconds == 86400
 
 
@@ -51,4 +51,4 @@ def test_sla_default_is_a_resolution_attempt():
 def test_sla_default_is_frozen():
     attempt = _make()
     with pytest.raises(ValidationError):
-        attempt.account_tier = "ENTERPRISE"
+        attempt.entity_tier = "ENTERPRISE"

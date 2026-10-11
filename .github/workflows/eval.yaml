@@ -18,12 +18,20 @@ concurrency:
 
 jobs:
   eval:
-    name: 5-dimension eval harness
+    name: 5-dimension eval harness (${{ matrix.reasoner }})
     runs-on: ubuntu-latest
     environment: eval
     timeout-minutes: 30
 
+    # One job per reasoner workspace member (reasoners/<name>); each runs the
+    # harness with that reasoner's eval adapter.
+    strategy:
+      fail-fast: false
+      matrix:
+        reasoner: [account_takeover]
+
     services:
+      # Reasoner infrastructure (mirrors reasoners/account_takeover/compose.yaml).
       redis:
         image: redis:7-alpine
         ports:
@@ -37,13 +45,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: account_takeover
-          POSTGRES_PASSWORD: account_takeover
-          POSTGRES_DB: account_takeover
+          POSTGRES_USER: decisionledger
+          POSTGRES_PASSWORD: decisionledger
+          POSTGRES_DB: decisionledger
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U account_takeover -d account_takeover"
+          --health-cmd "pg_isready -U decisionledger -d decisionledger"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
@@ -70,11 +78,10 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: 5432
-      POSTGRES_USER: account_takeover
-      POSTGRES_PASSWORD: account_takeover
-      POSTGRES_DB: account_takeover
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
+      POSTGRES_USER: decisionledger
+      POSTGRES_PASSWORD: decisionledger
+      POSTGRES_DB: decisionledger
+      ATO_REDIS_URL: redis://localhost:6379
       ELASTICSEARCH_URL: http://localhost:9200
 
     steps:
@@ -96,32 +103,26 @@ jobs:
 
       - name: Initialize Postgres schema
         env:
-          PGPASSWORD: account_takeover
+          PGPASSWORD: decisionledger
         run: |
-          psql -h localhost -U account_takeover -d account_takeover \
-            -f infra/postgres/01_init.sql
-          psql -h localhost -U account_takeover -d account_takeover \
-            -f infra/postgres/02_tables.sql
+          psql -h localhost -U decisionledger -d decisionledger \
+            -f app/audit/sql/01_init.sql
+          psql -h localhost -U decisionledger -d decisionledger \
+            -f app/audit/sql/02_tables.sql
 
-      - name: Train scorer if artifact missing
-        run: |
-          if [ ! -f reasoner/account_takeover/scorer/models/ato-v1.ubj ]; then
-            uv run python -m reasoner.account_takeover.scorer train \
-              --output reasoner/account_takeover/scorer/models/ato-v1.ubj \
-              --samples 2000
-          fi
-
-      - name: Build policy index
-        run: make build-policy-index
+      # Index the reasoner's policy corpus and train its model if missing
+      # (reasoners/<name>/reasoner.mk).
+      - name: Prepare reasoner (policy index + model)
+        run: make prepare-${{ matrix.reasoner }}
 
       - name: Run eval harness
-        run: make eval
+        run: make eval-${{ matrix.reasoner }}
 
       - name: Upload eval report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-report-${{ github.run_id }}
+          name: eval-report-${{ matrix.reasoner }}-${{ github.run_id }}
           path: outputs/stage/eval/eval-report.json
           if-no-files-found: warn
           retention-days: 30

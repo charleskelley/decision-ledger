@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# ato-reasoner — the ATO/identity-risk reference reasoner for DecisionLedger
+# =============================================================================
+#
+# A uv workspace member. The framework (`decision-ledger`) never depends on
+# this package; deployment composition lives in the root `reasoners`
+# dependency group. Discovery happens through the two entry points below,
+# whose name must equal the registration's `reasoner_id`.
+
+[project]
+name = "ato-reasoner"
+version = "0.1.0"
+description = "Account-takeover / identity-risk reasoner plugin for DecisionLedger."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    # --- ML scorer ---
+    "xgboost>=2.0,<3",
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<3",
+    # --- Feature store / ingestion stream ---
+    "redis>=5.0,<6",
+    # --- Contracts, config, API ---
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+    "fastapi>=0.111,<1",
+]
+
+[project.entry-points."decisionledger.reasoners"]
+ato-reasoner = "ato_reasoner.plugin:PLUGIN"
+
+[project.entry-points."decisionledger.eval_adapters"]
+ato-reasoner = "ato_reasoner.eval.adapter:ADAPTER"
+
+[dependency-groups]
+dev = [
+    "pandas-stubs>=3.0.0.260204",
+]
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ato_reasoner"]

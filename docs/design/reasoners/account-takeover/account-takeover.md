@@ -9,6 +9,15 @@ For the abstract reasoner contract, see [`reasoner.md`](../index.md). For the
 typed handoff specification, see [`reasoner-handoff.md`](../reasoner-handoff.md).
 For the training-data calibration provenance, see [`scenarios.md`](scenarios.md).
 
+The reasoner is a uv workspace member at `reasoners/account_takeover/`
+(distribution `ato-reasoner`, import package `ato_reasoner`, `reasoner_id`
+`ato-reasoner`). Module paths below are relative to
+`reasoners/account_takeover/src/`. The framework discovers it through the
+`decisionledger.reasoners` entry point (`ato_reasoner.plugin:PLUGIN`) and the
+eval harness through `decisionledger.eval_adapters`
+(`ato_reasoner.eval.adapter:ADAPTER`); nothing in `core/`, `app/`, or
+`eval/` imports it.
+
 ---
 
 ## Goal
@@ -33,14 +42,19 @@ deployments would replace each with operational artifacts.
 
 | Layer | Module | Responsibility |
 |---|---|---|
-| Ingestion | `reasoner/account_takeover/ingestion/` | Redis Streams consumer + SHA-256 dedup; produces typed `LoginEvent`s. |
-| Features | `reasoner/account_takeover/feature_service.py` | Redis sliding-window velocity + novelty + impossible-travel; produces `AtoFeatureVector`. |
-| Scorer | `reasoner/account_takeover/scorer/` | XGBoost binary-logistic with TreeSHAP attribution; produces `ScorerOutput` (risk + signals + route). |
-| Assembler | `reasoner/account_takeover/assembler.py` | Composes event + features + scorer output into a typed `Observation` with populated `ReasonerContext` and `GateContext`. |
-| API | `app/main.py` | FastAPI surface; orchestrates the pipeline per request. |
+| Ingestion | `ato_reasoner/ingestion/` | Redis Streams consumer + SHA-256 dedup; produces typed `LoginEvent`s. |
+| Features | `ato_reasoner/feature_service.py` | Redis sliding-window velocity + novelty + impossible-travel; produces `AtoFeatureVector`. |
+| Scorer | `ato_reasoner/scorer/` | XGBoost binary-logistic with TreeSHAP attribution; produces `ScorerOutput` (risk + signals + route). |
+| Assembler | `ato_reasoner/assembler.py` | Composes event + features + scorer output into a typed `Observation` with populated `ReasonerContext` and `GateContext`. |
+| Pipeline | `ato_reasoner/pipeline.py` | `run_ato_decision`: features → score → assemble, then hands the `Observation` to `app/decide.py:execute_decision`. |
+| API | `ato_reasoner/api.py` | FastAPI router (`POST /api/v1/ato/decisions`), mounted by `app/main.py:create_app` from the plugin. |
+| Plugin | `ato_reasoner/plugin.py` | `PLUGIN`: registration, router, `prompts/` and `corpus/` dirs, raw-event deserializer, and `build_services` (opens Redis, loads the scorer). |
+| Registration | `ato_reasoner/registry.py` | `ATO_REGISTRATION`: allowed gate/templates/jurisdictions and the enforcement profile (`novel_entity_feature="sparse_history"`; US vs. EU conflict groups). |
+| Prompts + corpus | `ato_reasoner/prompts/`, `ato_reasoner/corpus/` | Gate templates `ato-v1`–`ato-v3` (active: `ato-v3`, which carries its own `system:` text) and the policy documents indexed under `ato-reasoner`. |
+| Infrastructure | `reasoners/account_takeover/compose.yaml` | Redis, included into the root stack; configured with `ATO_REDIS_URL`. |
 
-The boundaries are intentional. `reasoner/account_takeover/scorer/` knows about XGBoost; `core/`
-doesn't. `reasoner/account_takeover/` knows about login events;
+The boundaries are intentional. `ato_reasoner/scorer/` knows about XGBoost; `core/`
+and `app/` don't, and the framework's dependencies don't include it. `ato_reasoner/` knows about login events;
 `core/observation/` doesn't. Adding a different reasoner means following
 this layering, not modifying the framework.
 
@@ -57,7 +71,7 @@ two confidence-band thresholds:
 | `0.20 – 0.95` | `ROUTE_TO_GATE` | Run retrieval + LLM policy gate; enforcement consumes verdict. |
 | `> 0.95` | `FAST_PATH_BLOCK` | Skip retrieval + gate; enforcement applies blocking default. |
 
-The thresholds live as public constants in `reasoner/account_takeover/scorer/scorer.py`
+The thresholds live as public constants in `ato_reasoner/scorer/scorer.py`
 (`FAST_PATH_ALLOW_THRESHOLD`, `FAST_PATH_BLOCK_THRESHOLD`) and are recorded
 in the `ModelCard` sidecar at training time so the routing distribution
 captured against the test set is interpretable later.
@@ -88,7 +102,7 @@ contract specification.
 ### Data
 
 Synthetic feature rows from five archetype distributions inside
-`reasoner/account_takeover/scorer/trainer.py:_generate_sample()`:
+`ato_reasoner/scorer/trainer.py:_generate_sample()`:
 
 | Archetype | Sampled prevalence | Pattern |
 |---|---|---|
@@ -100,7 +114,7 @@ Synthetic feature rows from five archetype distributions inside
 
 The training set is generated in-memory from these archetypes; the exact
 train and test partitions are persisted as CSV alongside the committed model
-(`reasoner/account_takeover/scorer/models/ato-v1.{train,test}.csv`) for reproducibility and
+(`ato_reasoner/scorer/models/ato-v1.{train,test}.csv`) for reproducibility and
 inspection.
 
 The archetype distributions are *qualitatively informed* by published
@@ -120,7 +134,7 @@ which events need the LLM gate's attention.
 
 ### Train / test split + evaluation
 
-`train()` in `reasoner/account_takeover/scorer/trainer.py`:
+`train()` in `ato_reasoner/scorer/trainer.py`:
 
 1. Generates the dataset (default: 5000 samples).
 2. Deterministic 80/20 split (numpy permutation, seed 42).
@@ -134,18 +148,18 @@ which events need the LLM gate's attention.
 Run:
 
 ```bash
-make train       # 5000 samples → reasoner/account_takeover/scorer/models/ato-v1.{ubj,json,train.csv,test.csv}
-make eval-model  # Re-evaluate on a fresh-seed test set; exits non-zero if test_auc < 0.85
+make train-account_takeover       # 5000 samples → ato_reasoner/scorer/models/ato-v1.{ubj,json,train.csv,test.csv}
+make eval-model-account_takeover  # Re-evaluate on a fresh-seed test set; exits non-zero if test_auc < 0.85
 ```
 
 ### Model card and integrity
 
-The `ModelCard` (in `reasoner/account_takeover/scorer/model_card.py`) is the persisted contract
+The `ModelCard` (in `ato_reasoner/scorer/model_card.py`) is the persisted contract
 between training and runtime. At load time, `AtoScorer.__init__`
 validates two integrity properties:
 
 - `feature_names` in the card matches `FEATURE_NAMES` in
-  `reasoner/account_takeover/scorer/scorer.py`. Mismatch → `ValueError` (catches schema drift
+  `ato_reasoner/scorer/scorer.py`. Mismatch → `ValueError` (catches schema drift
   between training and inference).
 - `artifact_sha256` in the card matches the binary on disk. Mismatch →
   `ValueError` (catches post-write tampering).
@@ -196,7 +210,7 @@ not a production fraud detector. Every choice below reflects that scope.
   the reference implementation introduces infrastructure that doesn't
   pay for itself at MVP scope. A production deployment would likely
   replace this with Feast, Tecton, or a custom Kafka-backed store; the
-  feature contract in `reasoner/account_takeover/feature_service.py` is small enough to swap.
+  feature contract in `ato_reasoner/feature_service.py` is small enough to swap.
 
 - **Commit the model artifact (and train/test CSVs).** Sub-MB total; the
   cost is a binary in git. The benefit is `git clone && uvicorn` works
@@ -220,7 +234,8 @@ not a production fraud detector. Every choice below reflects that scope.
 - **[`scenarios.md`](scenarios.md)** — scenario-generator distribution
   calibration provenance and the polish-phase RBA-calibration plan.
 - **DR-10** — hybrid data strategy.
-- **DR-11** — `core/` / `reasoner/` package boundary.
+- **DR-11** — framework / domain package boundary.
+- **DR-26** — reasoner packaging and discovery (workspace member, entry points).
 - **DR-12** — `entity_id` as the universal subject identity primitive.
 - **DR-14** — `Observation` as domain-assembled output.
 - **DR-17** — model-artifact fingerprint approach.

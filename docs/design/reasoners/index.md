@@ -6,6 +6,14 @@ and risk scoring for a specific decision domain. It produces typed
 takes over for retrieval, gate evaluation, deterministic enforcement, and
 audit-bundle construction.
 
+Concretely, a reasoner is a uv workspace member under `reasoners/<name>/`
+that owns everything up to and including `build_observation()` — its event
+types, features, model, pipeline, router, settings, prompts, policy corpus,
+eval adapter, and any infrastructure only it uses — and that the framework
+discovers through a `decisionledger.reasoners` entry point instead of
+importing it (DR-26). The reference reasoner is
+`reasoners/account_takeover/` (import package `ato_reasoner`).
+
 This document covers the **abstract** picture: what a reasoner can be, what
 shapes it can take, and what information it must provide or have available
 to hook into the framework. For the contract specification (the typed
@@ -105,7 +113,13 @@ this to:
 - Apply retrieval filters (`gate_config["jurisdictions"]`,
   `gate_config["risk_tier"]`).
 - Render the LLM prompt (`gate_config["template_id"]`,
-  `gate_config["template_vars"]`).
+  `gate_config["template_vars"]`), optionally honoring a model hint
+  (`gate_config["target_model"]`).
+
+`gate_config` is an opaque dict; the keys above are the ones the reference
+policy gate reads (documented on `core/observation/gate_context.py`). The
+framework validates `template_id` and `jurisdictions` against the
+reasoner's registration when they are present.
 
 `GateContext` is required on fast-path observations to enable shadow
 evaluation — the framework can retrospectively run the gate offline against
@@ -144,8 +158,9 @@ A way to compute the features the reasoner consumes. For batch domains
 this might be precomputed; for streaming domains (the ATO reference) this
 is done online from the inbound event plus prior state.
 
-The framework does not prescribe a feature store — `reasoner/account_takeover/feature_service.py` in the
-ATO reference uses Redis sliding-windows; another domain might use
+The framework does not prescribe a feature store — `ato_reasoner/feature_service.py` in the
+ATO reference uses Redis sliding-windows (Redis that the ATO reasoner owns
+and brings up from its own `compose.yaml`); another domain might use
 DataFrames, SQL, or a managed feature store. What matters is that
 `feature_set` in `ReasonerContext` is populated with everything the model
 consumed at inference time.
@@ -182,8 +197,18 @@ result to the framework pipeline. Everything before that call is the
 reasoner's responsibility; everything after is the framework's.
 
 The ATO reference's assembler is at
-`reasoner/account_takeover/assembler.py` — that's the canonical pattern
-for any domain reasoner.
+`reasoners/account_takeover/src/ato_reasoner/assembler.py` — that's the
+canonical pattern for any domain reasoner.
+
+### Packaging and registration
+
+Everything above ships in one workspace member that publishes a
+`ReasonerPlugin` (registration, router, prompts, corpus, raw-event
+deserializer, service factory) and an `EvalAdapter`. The registration also
+carries the reasoner's enforcement profile: which `feature_set` key marks a
+novel entity (Tier 3) and which jurisdiction groups conflict (Tier 5). See
+the [new-reasoner checklist](reasoner-handoff.md#implementing-a-new-reasoner)
+for the file-by-file layout.
 
 ---
 

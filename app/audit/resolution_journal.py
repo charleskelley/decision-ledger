@@ -1,8 +1,8 @@
 """ResolutionJournal — append-only persistence for ResolutionAttempt rows.
 
-Mirrors the patterns in ``app.audit.store.BundleStore`` (idempotent schema
-init, JSON encoding via Pydantic ``model_dump``, structured logging keyed
-by ``component``/``decision_id``) but for the resolution surface.
+Mirrors the patterns in ``app.audit.store.BundleStore`` (JSON encoding via
+Pydantic ``model_dump``, structured logging keyed by
+``component``/``decision_id``) but for the resolution surface.
 
 Append-only contract: ``record_attempt`` writes a new row. There is no
 update path. New states are recorded as new attempts. The realized action
@@ -16,10 +16,9 @@ MVP closes the union over ``HumanResolutionAttempt`` and
 arms here. The bundle's typed surface (``ResolutionAttempt``) does not
 change.
 
-Schema is created in ``infra/postgres/02_tables.sql`` under the
-framework-owned ``decisionledger`` schema. ``ensure_schema`` here mirrors
-that DDL so the journal can be initialized in a fresh dev database without
-depending on the init scripts having run. The ``evidence jsonb`` column is
+Schema is created in ``app/audit/sql/02_tables.sql`` under the
+framework-owned ``decisionledger`` schema and applied at startup by
+``app.audit.schema.apply_canonical_schema``. The ``evidence jsonb`` column is
 preserved nullable for backward-compatible reads of pre-DR-21 rows; new
 writes leave it null because typed subclass fields supersede it. Reasoner
 identity is reachable via the ``decision_id`` join to ``decision_bundles``;
@@ -60,41 +59,6 @@ _ATTEMPT_ADAPTER = TypeAdapter(_ResolutionAttemptUnion)
 
 
 # ---------------------------------------------------------------------------
-# DDL — mirrors infra/postgres/02_tables.sql for tests / fresh-DB bootstrapping
-# ---------------------------------------------------------------------------
-
-_CREATE_SCHEMA = "CREATE SCHEMA IF NOT EXISTS decisionledger;"
-
-_CREATE_ATTEMPTS_TABLE = """
-CREATE TABLE IF NOT EXISTS decisionledger.decision_resolution_attempts (
-    attempt_id        TEXT        PRIMARY KEY,
-    decision_id       TEXT        NOT NULL,
-    attempt_sequence  INTEGER     NOT NULL,
-    started_at        TIMESTAMPTZ NOT NULL,
-    completed_at      TIMESTAMPTZ,
-    resolver_kind     TEXT        NOT NULL,
-    resolver_id       TEXT        NOT NULL,
-    status            TEXT        NOT NULL,
-    resolution_action TEXT,
-    note              TEXT        NOT NULL,
-    evidence          JSONB,
-    payload           JSONB       NOT NULL,
-    UNIQUE (decision_id, attempt_sequence)
-);
-"""
-
-_CREATE_DECISION_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_resolution_attempts_decision_id "
-    "ON decisionledger.decision_resolution_attempts (decision_id);"
-)
-
-_CREATE_STATUS_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_resolution_attempts_status "
-    "ON decisionledger.decision_resolution_attempts (status);"
-)
-
-
-# ---------------------------------------------------------------------------
 # ResolutionJournal
 # ---------------------------------------------------------------------------
 
@@ -103,8 +67,8 @@ class ResolutionJournal:
     """Append-only persistence for ``ResolutionAttempt`` rows.
 
     Construct once at process startup with an open psycopg connection.
-    Call ``ensure_schema()`` once at startup before the first write — it
-    is idempotent.
+    The canonical schema is applied separately by
+    ``app.audit.schema.apply_canonical_schema`` before the first write.
 
     The journal is stateless beyond the connection. Thread safety is the
     caller's responsibility (psycopg connections are not thread-safe).
@@ -116,18 +80,6 @@ class ResolutionJournal:
     def __init__(self, conn: psycopg.Connection[object]) -> None:
         """Initialize ResolutionJournal with a psycopg connection."""
         self._conn = conn
-
-    def ensure_schema(self) -> None:
-        """Create decision_resolution_attempts table and indexes if missing.
-
-        Idempotent — safe to call on every startup.
-        """
-        with self._conn.cursor() as cur:
-            cur.execute(_CREATE_SCHEMA)
-            cur.execute(_CREATE_ATTEMPTS_TABLE)
-            cur.execute(_CREATE_DECISION_INDEX)
-            cur.execute(_CREATE_STATUS_INDEX)
-        self._conn.commit()
 
     def record_attempt(self, attempt: ResolutionAttempt) -> None:
         """Append a single ResolutionAttempt row.

@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import yaml
@@ -37,6 +36,7 @@ from eval.judge import JudgePromptRegistry, llm_judge
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from core.llm import LLMClient
 
@@ -50,8 +50,8 @@ if TYPE_CHECKING:
 # unsupported and the case score drops to 0.5-0.8 even when the rationale is
 # clearly grounded. The MVP dataset is seed-only (live captures from the
 # gate currently exhibit grounding drift and are filtered out by the merge
-# logic in tools/capture_baselines.py until the gate's grounding discipline
-# improves). 0.65 is a realistic floor that still catches genuine
+# logic in the reasoner's baseline-capture script until the gate's grounding
+# discipline improves). 0.65 is a realistic floor that still catches genuine
 # regression — a working gate plus well-grounded fixtures lands in the
 # 0.7-0.9 range. Tighten back to 0.85 once the dataset is dominated by
 # live captures with verifiable grounding.
@@ -65,7 +65,6 @@ THRESHOLD_HALLUCINATION_MAX = 0.0  # zero tolerance
 # A judge grounding score below this counts as a hallucination case.
 HALLUCINATION_BOUNDARY = 0.5
 
-_DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "faithfulness"
 _GROUNDING_TEMPLATE_ID = "faithfulness_grounding"
 
 _WORD_RE = re.compile(r"\w+")

@@ -2,7 +2,8 @@
 
 Framework subpackages (core/observation/, core/gate/, core/eval/) and top-level
 framework modules (core/bundle.py, core/actions.py, core/exceptions.py) must
-never import from domain subpackages (reasoner/ or any future domain package).
+never import from domain packages (reasoner/, reasoners/, ato_reasoner, or any
+future domain package).
 The dependency arrow points inward only: subpackages → top-level → (nothing in core/).
 
 This test walks the AST of every framework module and fails if any import from
@@ -30,6 +31,8 @@ FRAMEWORK_TOP_LEVEL = [
 
 DOMAIN_PREFIXES = [
     "reasoner",
+    "reasoners",
+    "ato_reasoner",
 ]
 
 

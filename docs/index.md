@@ -10,9 +10,10 @@ policy gate architecture.
 ## Documentation
 
 - [**Design**](design/index.md) — Architecture, pipeline, data model,
-  evaluation framework, and the DR-1–DR-25 decision record.
+  evaluation framework, and the DR-1–DR-26 decision record.
 - [**Reasoners**](design/reasoners/index.md) — How a domain plugs into
-  the framework via the `build_observation()` handoff.
+  the framework: a uv workspace member under `reasoners/`, discovered by
+  entry point, that hands off through `build_observation()`.
 - [**Operations**](operations/secrets.md) — Local, CI, and deployment
   secrets handling.
 - [**Development**](development/contributing.md) — Contributing guide,

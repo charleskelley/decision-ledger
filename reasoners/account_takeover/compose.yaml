@@ -1,0 +1,26 @@
+# ATO reasoner infrastructure, pulled into the root stack by `include:` in
+# docker-compose.yml (Compose >= 2.20). Redis belongs to this reasoner: only
+# the ATO feature service, ingestion consumer, and scenario generator use it
+# (sliding-window features, dedup store, login-event stream). Point the
+# reasoner at it with ATO_REDIS_URL.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Redis — event queue (Streams) + dedup store + feature sliding windows
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${ATO_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --save 60 1
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:

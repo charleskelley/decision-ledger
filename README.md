@@ -22,7 +22,9 @@ regressed.
 > **This project is designed to demonstrate the engineering principles required 
 > to make AI decisioning production-safe:**
 >
-> * **The reasoning layer is pluggable -** ML, LLM, human, or any combination.
+> * **The reasoning layer is pluggable -** each domain is a reasoner package
+> (ML, LLM, rules, or any combination inside it) that the framework discovers
+> at install time and never imports.
 > * **The control layers are constant -** versioned artifacts, evaluation-gated
 > releases, and immutable state capture.
 > * **The decisions recorded are auditable by design -** deterministic
@@ -41,11 +43,17 @@ regressed.
 |---|----------------------------------------------------------------------------------------|--------|
 | 1 | `make check` — lint, sqlfluff, typecheck, and unit tests all pass                      | ✅     |
 | 2 | `make test-smoke` — all 8 ATO scenarios pass end-to-end                                | ✅     |
-| 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ✅     |
-| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ✅     |
+| 3 | `make eval` — 5D evaluation harness produces a passing baseline report                 | ⏳ passed 2026-05-06; re-run pending (see note) |
+| 4 | All four GitHub Actions workflows (CI, Integration, Eval, Docs) green on `main`       | ✅ before the reasoner-packaging refactor (DR-26); re-verify after merge |
 | 5 | Versioned baseline eval report ([`outputs/eval/eval-report-v1.json`](outputs/eval/eval-report-v1.json)) committed + linked | ✅     |
 
 When every row reads ✅, the MVP ships.
+
+> **Note:** the committed eval report predates DR-26, which moved the ATO
+> reasoner into its own workspace package, moved the policy gate's system
+> prompt into the reasoner's new `ato-v3` template (rendered text unchanged),
+> and made the retrieval dimension filter by `reasoner_id`. `make eval` has
+> not been re-run since, so the baseline measures `ato-v2`.
 
 ### The Production Problem
 
@@ -88,20 +96,27 @@ decisioning production-safe:
   <img src="docs/assets/decision-ledger-overview.png" alt="Decision Pipeline Overview" width="850">
 </p>
 
-DecisionLedger structures runtime decisioning into three layers with fixed
+A **reasoner** is one domain's half of the pipeline: a package under
+`reasoners/<name>/` that owns everything up to `build_observation()` (events,
+ingestion, features, scoring, prompts, policy corpus) and plugs in through a
+Python entry point. The **framework** (`core/`, `app/`, `eval/`) owns
+everything after it and never imports a reasoner. Account Takeover is the
+reference reasoner. Runtime decisioning has three layers with fixed
 responsibilities:
 
-**Context** — Event ingestion coalesces into observations with online feature
-computation, and policy evidence retrieval via hybrid search (dense embeddings +
-sparse BM25 with cross-encoder reranking) against a versioned policy corpus.
-Every input to the reasoning layer is snapshotted and traceable.
+**Context** — The reasoner ingests its events, computes its features, scores
+them, and hands the framework one typed observation carrying that evidence.
+The framework adds policy evidence via hybrid search (dense embeddings +
+sparse BM25 with cross-encoder reranking) over the reasoner's versioned
+policy corpus. Every input to the reasoning layer is snapshotted and
+traceable.
 
-**Reasoning** — A pluggable layer where any combination of reasoners can
-operate: a fast ML scorer (XGBoost over engineered features, sub-10ms) for
-high-confidence signals, an LLM policy gate for ambiguous cases requiring
-elaboration, and a human review path for high-stakes escalation. The framework
-requires schema-valid structured output with citations and confidence signals;
-the underlying reasoner remains swappable.
+**Reasoning** — The reasoner's own scorer settles clear-cut cases (for
+Account Takeover, XGBoost over engineered features, sub-10ms), and ambiguous
+ones go to the framework's LLM policy gate, which must return schema-valid
+structured output with citations and confidence signals. Either side is
+swappable: a different reasoner brings its own scorer and prompts, and the
+gate is one implementation of a generic gate contract.
 
 **Resolution** — Deterministic enforcement applies policy rules to the reasoning
 output and produces the final action. Every decision emits a **Decision Bundle** —
@@ -146,20 +161,23 @@ baseline report committed as the release receipt.
 ### Quickstart
 
 ```bash
-uv sync                        # Install dependencies
+uv sync                        # Install the framework + every workspace reasoner
 cp .env.example .env           # Then paste your OPENAI_API_KEY and ANTHROPIC_API_KEY
-docker compose up -d           # Start infra (Redis, PostgreSQL+pgvector, Elasticsearch)
-make build-policy-index        # Build and embed the policy corpus
+docker compose up -d           # Start infra (PostgreSQL+pgvector, Elasticsearch, + ATO's Redis)
+make prepare-account_takeover  # Index the ATO policy corpus; train the scorer if missing
 make install-hooks             # Install pre-commit hooks (gitleaks + ruff)
 
-# Run a scenario
-uv run python -m generator run --scenario post_breach_ato --count 50
+# Run the API (discovers and mounts every installed reasoner)
+uv run uvicorn --factory app.main:create_app
+
+# Publish synthetic ATO events to the reasoner's Redis stream
+make scenario-account_takeover
 
 # Run the 8-scenario smoke test
 make test-smoke
 
 # Run the full eval gate (uses ANTHROPIC_API_KEY for cross-family judges)
-make eval
+make eval-account_takeover
 ```
 
 All infrastructure runs locally via `docker compose up`; no cloud account is
@@ -183,9 +201,10 @@ design rationale:
 | [Architecture](https://charleskelley.github.io/decision-ledger/design/architecture/)     | C4 diagrams, component dependencies, directory layout        |
 | [Pipeline](https://charleskelley.github.io/decision-ledger/design/pipeline/)             | Runtime flow, latency budget, fallback paths                 |
 | [Evaluation](https://charleskelley.github.io/decision-ledger/design/evaluation/)         | 5D framework methodology, metrics, CI thresholds             |
-| [Data Model](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/data/) | Event schema, Decision Bundle structure, policy corpus model |
-| [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-25 — the significant choices and why         |
-| [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, schema bootstrap, deployment model     |
+| [Reasoner Handoff](https://charleskelley.github.io/decision-ledger/design/reasoners/reasoner-handoff/) | The `build_observation()` contract and the new-reasoner checklist |
+| [ATO Data](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/data/) | ATO login-event schema, scorer output, Decision Bundle structure |
+| [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-26 — the significant choices and why         |
+| [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, `decisionledger` schema, environment   |
 | [Scenarios](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/scenarios/) | Eight named event patterns and what each exercises           |
 
  
@@ -196,7 +215,9 @@ design rationale:
 DecisionLedger demonstrates the pattern using account takeover detection as the
 reference domain. The corpus, feature set, action space, and reasoning layer all
 change across domains. The underlying decision-system architecture stays the
-same even as the domain changes.
+same even as the domain changes: a new domain is a new reasoner package with
+no framework edits. Account Takeover is the only reasoner that exists today;
+the rows below are illustrations.
 
 | Domain                    | Corpus                                  | Action Space                               |
 |---------------------------|-----------------------------------------|--------------------------------------------|

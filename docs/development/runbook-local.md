@@ -2,16 +2,70 @@
 
 Bring-up, verification, and operational procedures for the local development stack.
 
-This document tracks what can actually be run today. Each section is added as the corresponding pipeline component is built. The current state reflects week 2 completion: infrastructure, corpus loading, event generation, and ingestion are all operational.
+This document tracks what can actually be run today. Section 0 is the end-to-end walk-through; the numbered sections after it drill into each component. Commands that name a reasoner use the reference reasoner, Account Takeover (`reasoners/account_takeover/`, `reasoner_id` `ato-reasoner`).
 
 ---
 
 ## Prerequisites
 
-- Docker Desktop running (or Docker Engine on Linux)
+- Docker Desktop running (or Docker Engine on Linux) with Compose 2.20 or later (the root compose file uses `include:`)
 - `uv` installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- Dependencies installed: `uv sync`
-- `.env` file created from `.env.example` (optional — defaults work for local dev)
+- `.env` file created from `.env.example` (optional — defaults work for local dev; `OPENAI_API_KEY` is needed for gate-routed decisions, `ANTHROPIC_API_KEY` for `make eval`)
+
+---
+
+## 0. End-to-End Walk-Through
+
+```bash
+# 1. Install the framework and every workspace reasoner (the default
+#    `reasoners` dependency group installs ato-reasoner and its entry points)
+uv sync
+
+# 2. Start Postgres + Elasticsearch (framework) and Redis (included from
+#    reasoners/account_takeover/compose.yaml)
+docker compose up -d
+
+# 3. Prepare the reasoner: index its policy corpus under reasoner_id
+#    ato-reasoner, and train the XGBoost scorer if the artifact is missing
+make prepare-account_takeover
+
+# 4. Confirm the plugin is discoverable
+uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
+# Expected: ['ato-reasoner']
+
+# 5. Run the API (application factory; composes every discovered plugin)
+uv run uvicorn --factory app.main:create_app --reload
+```
+
+In a second shell:
+
+```bash
+# Liveness
+curl -s localhost:8000/health
+# Expected: {"status":"ok"}
+
+# One decision through the ATO router: generate a synthetic login event and POST it
+uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 1 --dry-run \
+  | tail -1 > /tmp/ato-event.json
+curl -s -X POST localhost:8000/api/v1/ato/decisions \
+  -H 'content-type: application/json' --data @/tmp/ato-event.json
+# Expected: {"decision_id": "...", "decision_action": "...", "route": "...", ...}
+
+# Fetch the bundle and replay it (framework routes, work for any reasoner)
+curl -s localhost:8000/api/v1/decisions/<decision_id> | python3 -m json.tool | head -40
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
+# Expected: "actions_match": true
+# 404 DECISION_NOT_FOUND for an unknown or malformed id; 409 REASONER_NOT_COMPOSED
+# for a bundle whose reasoner is not installed in this deployment
+
+# Publish 10 baseline_normal events to the ATO Redis stream
+make scenario-account_takeover
+
+# Full 5-dimension eval for this reasoner (slow; calls OpenAI and Anthropic)
+make eval-account_takeover
+```
+
+To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). With none composed, the API still starts, logs `api.no_reasoners`, and serves only the framework routes.
 
 ---
 
@@ -21,14 +75,16 @@ This document tracks what can actually be run today. Each section is added as th
 
 ```bash
 docker compose up -d
+docker compose config --services
+# Expected: elasticsearch, postgres, redis (redis comes from the ATO reasoner's compose.yaml)
 ```
 
 ### Verify health
 
-All three services must be healthy before running any pipeline component.
+All three services must be healthy before running any pipeline component. PostgreSQL and Elasticsearch are the framework's; Redis is used only by the ATO reasoner.
 
 ```bash
-# Redis
+# Redis (ATO reasoner)
 docker compose exec redis redis-cli ping
 # Expected: PONG
 
@@ -56,8 +112,10 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 # Tables exist
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dt decisionledger.*'
-# Expected: decision_bundles, policy_chunks, replay_logs
+# Expected: decision_bundles, decision_resolution_attempts, policy_chunks, replay_logs
 ```
+
+The schema comes from `app/audit/sql/01_init.sql` and `02_tables.sql`, mounted into the Postgres init directory on first start. The API and the corpus loader also apply the same idempotent DDL on every run, so an older volume picks up new columns (for example `policy_chunks.title`) without a reset.
 
 ### Stop services
 
@@ -75,10 +133,14 @@ The corpus must be loaded before the retrieval layer can serve queries. This is 
 ### Load
 
 ```bash
+make build-policy-index-account_takeover
+# equivalent to:
 uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
 ```
 
-Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
+The loader resolves the corpus directory from the installed plugin whose `reasoner_id` matches (`ato_reasoner/corpus/`); pass `--corpus-dir` to override. Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
+
+If the Elasticsearch index was created before `reasoner_id` was mapped as `keyword`, the loader logs that it is recreating the index. That drops every reasoner's BM25 documents, so run `make build-policy-index` afterward to reload all of them.
 
 ### Verify
 
@@ -117,7 +179,7 @@ uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner --wipe
 ### List available scenarios
 
 ```bash
-uv run python -m generator list
+uv run python -m ato_reasoner.generator list
 ```
 
 Eight scenarios are available:
@@ -137,7 +199,7 @@ Eight scenarios are available:
 
 ```bash
 # Inspect 5 baseline events without publishing
-uv run python -m generator run --scenario baseline_normal --count 5 --dry-run
+uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 5 --dry-run
 ```
 
 Check the output:
@@ -148,17 +210,17 @@ Check the output:
 
 ```bash
 # Compare credential stuffing — multiple countries, rotating devices, failures
-uv run python -m generator run --scenario credential_stuffing_burst --count 10 --dry-run
+uv run python -m ato_reasoner.generator run --scenario credential_stuffing_burst --count 10 --dry-run
 
 # Adversarial probe — check user_agent for injection payload
-uv run python -m generator run --scenario adversarial_probe --count 3 --dry-run
+uv run python -m ato_reasoner.generator run --scenario adversarial_probe --count 3 --dry-run
 ```
 
 ### Publish to Redis
 
 ```bash
 # Push 20 baseline events to the stream
-uv run python -m generator run --scenario baseline_normal --count 20
+uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 20
 ```
 
 Inspect the stream:
@@ -190,7 +252,7 @@ uv run python
 
 ```python
 import redis
-from reasoner.account_takeover.ingestion.consumer import IngestionConsumer
+from ato_reasoner.ingestion.consumer import IngestionConsumer
 
 r = redis.Redis(decode_responses=True)
 consumer = IngestionConsumer(
@@ -231,8 +293,8 @@ Push the same event twice, then consume once — first delivery accepted, second
 ```python
 import json
 import redis
-from reasoner.account_takeover.ingestion.consumer import IngestionConsumer
-from reasoner.account_takeover.events import AuthMethod, AuthOutcome,
+from ato_reasoner.ingestion.consumer import IngestionConsumer
+from ato_reasoner.events import AuthMethod, AuthOutcome,
     GeoLocation, LoginEvent
 from datetime import datetime, UTC
 
@@ -308,79 +370,49 @@ uv run python
 ```python
 import psycopg
 from elasticsearch import Elasticsearch
+from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 from app.retrieval.retriever import PolicyRetriever
-from pathlib import Path
 
 pg = psycopg.connect(
     "host=localhost dbname=decisionledger user=decisionledger password=decisionledger"
 )
+register_vector(pg)
 es = Elasticsearch("http://localhost:9200")
 model = SentenceTransformer("all-MiniLM-L6-v2")
-retriever = PolicyRetriever(pg, es, model, corpus_dir=Path("corpus"))
+retriever = PolicyRetriever(pg, es, model)
+RID = "ato-reasoner"  # tenant filter: always pass it, as the pipeline does
 ```
 
 ```python
 # Dense search — MFA query
-results = retriever.dense_search("multi-factor authentication TOTP requirement", k=5)
+results = retriever.dense_search("multi-factor authentication TOTP requirement", k=5, reasoner_id=RID)
 for s in results:
-    print(f"{s.policy_id:30s} | {s.section_path:40s} | {s.relevance_score:.4f}")
+    print(f"{s.document_id:30s} | {s.section_path:40s} | {s.relevance_score:.4f}")
 ```
 
 ```python
-# Sparse BM25 search
-results = retriever.sparse_search("account lockout authentication failure threshold", k=5)
+# Sparse BM25 search (returns hits only if reasoner_id is mapped as keyword)
+results = retriever.sparse_search("account lockout authentication failure threshold", k=5, reasoner_id=RID)
 for s in results:
-    print(f"{s.policy_id:30s} | {s.section_path}")
+    print(f"{s.document_id:30s} | {s.section_path}")
 ```
 
 ```python
-# Full pipeline — impossible travel scenario
-from reasoner.account_takeover.events import AuthMethod, AuthOutcome,
-    GeoLocation, LoginEvent
-from reasoner.account_takeover.scorer import ScorerOutput
-from core.decision.actions import ScorerRouting
-from core.decision.scorer import Signal
-from datetime import datetime, UTC
-from uuid import uuid4
-
-event = LoginEvent(
-    event_id="review-001",
-    timestamp=datetime.now(UTC),
-    account_id="acc-review-001",
-    session_id="sess-001",
-    ip_address="185.100.87.1",
-    geo=GeoLocation(latitude=48.85, longitude=2.35, country="FR", city="Paris",
-                    asn="AS3215"),
-    device_fingerprint="fp-new-device",
-    user_agent="Mozilla/5.0",
-    auth_method=AuthMethod.PASSWORD,
-    outcome=AuthOutcome.FAILURE,
+# Hybrid retrieval (dense + BM25 → RRF → rerank), as execute_decision calls it.
+# In the pipeline the query string comes from ato_reasoner.retrieval_query.build_ato_query.
+snippets, path = retriever.retrieve(
+    "impossible travel new device failed password login from Paris",
+    k=5,
+    reasoner_id=RID,
+    jurisdictions=["US_FEDERAL", "INTERNAL"],
 )
-scorer = ScorerOutput(
-    entity_id=uuid4(),
-    risk_score=0.78,
-    top_signals=[
-        Signal(feature_name="impossible_travel", shap_value=0.41,
-               raw_value=1.0),
-        Signal(feature_name="device_novelty", shap_value=0.22, raw_value=1.0),
-        Signal(feature_name="velocity_1min", shap_value=0.15, raw_value=8.0),
-    ],
-    scorer_version="xgb-v1.0.0",
-    inference_latency_ms=1.2,
-    routing=ScorerRouting.ROUTE_TO_GATE,
-)
-
-query = retriever.build_query(event, scorer)
-print(f"Query: {query}\n")
-
-snippets, path = retriever.retrieve(query, k=5)
 print(f"Retrieval path: {path}")
 for s in snippets:
-    print(f"  {s.policy_id:30s} | {s.relevance_score:.4f} | {s.section_path}")
+    print(f"  {s.document_id:30s} | {s.relevance_score:.4f} | {s.section_path}")
 ```
 
-Expected: `path = "rrf_only"` (cross-encoder reranker is a stub until week 3). Geographic risk and ATO detection policy chunks should surface.
+Expected: `path = "rrf_only"` here, because this retriever was built without a cross-encoder (the API's `build_framework_services` passes one, giving `"reranked"` unless the latency budget is exceeded). Geographic risk and ATO detection policy chunks should surface.
 
 ---
 
@@ -390,8 +422,11 @@ Expected: `path = "rrf_only"` (cross-encoder reranker is a stub until week 3). G
 # Unit tests (no Docker required)
 make test
 
-# Integration tests (requires docker compose up -d)
+# Integration tests (requires docker compose up -d and make prepare-account_takeover)
 make test-integration
+
+# Smoke tests (bundle replay + the ATO scenario smoke run)
+make test-smoke
 
 # Lint and format
 make lint
@@ -444,18 +479,18 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 ```bash
 docker compose down -v     # destroys all volumes
 docker compose up -d       # fresh start
-uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner   # reload corpus
+make prepare-reasoners     # reload every reasoner's corpus (+ train missing models)
 ```
 
 ---
 
-## Sections To Be Added
+## Scorer and Eval
 
-The following sections will be added as each component is built:
+```bash
+make train-account_takeover        # retrain the XGBoost scorer (artifact + model card + CSVs)
+make eval-model-account_takeover   # re-evaluate the scorer on a fresh-seed test set
+make capture-baselines-account_takeover   # re-capture faithfulness fixtures from live gate runs
+make eval                          # 5-dimension harness for every installed reasoner
+```
 
-- **Section 7 — Feature Computation** (week 4): running `reasoner/account_takeover/feature_service.py`, inspecting velocity and novelty features in Redis
-- **Section 8 — XGBoost Scorer** (week 4): training, loading the model, running inference, interpreting fast-path vs. gate routing
-- **Section 9 — LLM Policy Gate** (week 5): prompt template management, live gate invocation, reviewing `PolicyGateOutput`
-- **Section 10 — Enforcement + Decision Bundle** (week 5–6): full pipeline end-to-end, reading a `DecisionBundle` from Postgres
-- **Section 11 — Audit Replay** (week 6): `uv run python -m decision_ledger.audit replay --id <bundle_id>`, `diff` command
-- **Section 12 — Evaluation Harness** (week 6): `make eval`, reviewing `EvalReport` output per dimension
+The committed eval report (`outputs/eval/eval-report-v1.json`) predates the switch to the `ato-v3` prompt; see [Evaluation](../design/evaluation.md).

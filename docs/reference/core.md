@@ -7,7 +7,7 @@ imports, no FastAPI. The full surface below can be unit-tested
 without Docker running.
 
 `core/` is consumed by every other package. It never imports from
-`reasoner/` or `app/`.
+`app/` or any reasoner package.
 
 ::: core
     options:

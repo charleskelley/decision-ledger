@@ -55,6 +55,9 @@ jobs:
       - name: Install docs dependencies
         # mkdocstrings imports the project modules to introspect them,
         # so main deps must be present. --no-dev skips pytest/ragas/etc.
+        # The `reasoners` default group stays installed, so the workspace
+        # reasoner packages (e.g. ato_reasoner) are importable for their
+        # reference pages.
         run: uv sync --frozen --group docs --no-dev
 
       - name: Build site

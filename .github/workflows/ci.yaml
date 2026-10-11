@@ -33,6 +33,7 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Default groups (dev + reasoners) install every workspace reasoner.
       - name: Install dependencies
         run: uv sync --frozen
 
@@ -43,14 +44,14 @@ jobs:
         run: uv run ruff check .
 
       - name: SQLFluff lint (postgres dialect)
-        run: uv run sqlfluff lint --dialect postgres infra/
+        run: uv run sqlfluff lint --dialect postgres app/audit/sql/
 
       - name: Pyright typecheck
         run: uv run pyright
 
       - name: Unit tests (no integration, eval, slow, or smoke)
         run: >
-          uv run pytest tests/
+          uv run pytest
           -m "not integration and not evaluation and not slow and not smoke"
           --maxfail=5
 
@@ -69,7 +70,7 @@ jobs:
           set -euo pipefail
           leaks=$(grep -rE "^(from|import) (openai|anthropic)" \
             --include="*.py" \
-            app/ core/ eval/ reasoner/ tests/ \
+            app/ core/ eval/ reasoners/ tests/ \
             | grep -v "^app/llm/" || true)
           if [ -n "$leaks" ]; then
             echo "ERROR: DR-23 boundary violation — LLM SDK imported outside app/llm/:"

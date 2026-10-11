@@ -24,15 +24,19 @@ cd decision-ledger
 # Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Sync all dependencies (creates .venv, installs everything, lockfile)
+# Sync all dependencies (creates .venv; installs the framework plus every
+# reasoner workspace member through the default `reasoners` dependency group)
 uv sync
 
 # Copy environment template and add your API key
 cp .env.example .env
 # Edit .env to add OPENAI_API_KEY
 
-# Start infra
+# Start infra (Postgres + Elasticsearch, plus each reasoner's compose.yaml via include:)
 docker compose up -d
+
+# Index the reference reasoner's corpus and train its scorer if missing
+make prepare-account_takeover
 
 # Verify everything is running
 make check
@@ -41,18 +45,22 @@ make check
 ### Running the Pipeline
 
 ```bash
-# Generate events for a scenario
-uv run python -m scenarios run --scenario baseline_normal --count 50
+# Run the API (application factory; mounts every discovered reasoner plugin)
+uv run uvicorn --factory app.main:create_app --reload
 
-# Run the full decision path
-make scenario
+# Publish synthetic events for one ATO scenario to the reasoner's Redis stream
+uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 50
+make scenario-account_takeover          # 10 baseline_normal events
 
-# Run the eval harness
+# Run the eval harness (one reasoner, or every installed reasoner)
+make eval-account_takeover
 make eval
 
-# Replay a specific decision
-uv run python -m decision_ledger.audit replay --id <bundle_id>
+# Replay a specific decision (API running)
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
 ```
+
+Per-reasoner targets come from each `reasoners/<name>/reasoner.mk`; `make help` lists them.
 
 > **Note:** `make` targets use `uv run` internally. If running Python commands
 > directly, prefix with `uv run` to ensure the correct virtualenv and
@@ -65,9 +73,9 @@ uv run python -m decision_ledger.audit replay --id <bundle_id>
 
 ### Before You Start
 
-1. Read `STYLE.md` — it covers formatting, naming, Pydantic conventions, commit messages, and all the style guides we follow.
-2. Read `DECISIONS.md` — it explains *why* the system is designed the way it is.
-3. Understand the `core/` boundary — `core/` has no infrastructure dependencies. If your change needs to import Redis, a database driver, an LLM SDK, or FastAPI, it belongs in `app/`, not `core/`.
+1. Read `docs/development/style.md` — it covers formatting, naming, Pydantic conventions, commit messages, and all the style guides we follow.
+2. Read `docs/design/decisions.md` — it explains *why* the system is designed the way it is.
+3. Understand the `core/` boundary — `core/` has no infrastructure dependencies. If your change needs to import a database driver, an LLM SDK, or FastAPI, it belongs in `app/`, not `core/`. If it is specific to one domain (its events, features, model, Redis, prompts, corpus), it belongs in that reasoner's workspace member under `reasoners/`, not in the framework.
 
 ### Making Changes
 
@@ -77,7 +85,7 @@ uv run python -m decision_ledger.audit replay --id <bundle_id>
    ```
    Branch naming: `<type>/<short-description>` — e.g., `feat/geo-impossible-detector`, `fix/replay-hash-mismatch`.
 
-2. **Write code** following `STYLE.md`.
+2. **Write code** following `docs/development/style.md`.
 
 3. **Run checks locally** before pushing:
    ```bash
@@ -92,7 +100,7 @@ uv run python -m decision_ledger.audit replay --id <bundle_id>
    feat(scorer): add SHAP value extraction to scorer output
    ```
 
-5. **Push and open a PR** against `main`. CI runs lint, typecheck, unit tests, and integration/smoke against service containers on every push and PR. The 5D eval harness runs nightly and on demand via `workflow_dispatch` — invoke it manually before a release candidate.
+5. **Push and open a PR** against `main`. CI runs lint, typecheck, unit tests, and integration/smoke against service containers on every push and PR. The 5D eval harness runs only on demand via `workflow_dispatch` — invoke it manually before a release candidate.
 
 ### What Makes a Good PR
 
@@ -110,12 +118,12 @@ uv run python -m decision_ledger.audit replay --id <bundle_id>
 
 Prompt changes are treated as code changes with extra scrutiny:
 
-1. Create a new prompt version file: `app/policy_gate/prompts/v{n+1}.yaml`
+1. Create a new prompt version file in the reasoner's `prompts/` directory (ATO: `reasoners/account_takeover/src/ato_reasoner/prompts/ato-v{n+1}.yaml`), carrying its own `system:` text if the reasoner needs domain framing
 2. Do **not** modify the existing version file — old versions are immutable for
    audit trail integrity.
-3. Run the full eval harness against the new prompt version.
-4. Include the eval results in the PR description.
-5. CI will block the merge if the eval gate fails.
+3. Point the reasoner's assembler at the new `template_id` and add it to the registration's `allowed_prompt_template_ids`.
+4. Run the full eval harness against the new prompt version (`make eval-<reasoner>`).
+5. Include the eval results in the PR description. The eval workflow is manual, so this run is the gate.
 
 ---
 
@@ -123,30 +131,30 @@ Prompt changes are treated as code changes with extra scrutiny:
 
 ```
 decision-ledger/
-├── core/                    # Pure business logic — no infrastructure dependencies
-│   ├── decision/            # Decision schema, action space, bundle contracts
-│   ├── policy/              # Policy gate contracts, citation schema, enforcement rules
-│   └── eval/          # Eval dimension contracts, metric interfaces
-├── app/                     # Runtime pipeline — imports from core/
-│   ├── ingestion/           # Redis Streams consumer, dedup, bounded lateness
-│   ├── features/            # Sliding window feature computation
-│   ├── scorer/              # XGBoost fast scorer
-│   ├── retrieval/           # Hybrid RAG (pgvector + Elasticsearch + reranker)
-│   ├── policy_gate/         # LLM reasoning layer
-│   │   └── prompts/         # Versioned YAML prompt templates
+├── core/                    # Framework contracts — no infrastructure dependencies
+│   ├── observation/         # Observation protocol, ReasonerContext, GateContext, registration
+│   ├── gate/                # Universal gate contracts; gate/policy/ for the LLM policy gate
+│   ├── resolution/          # Resolution attempt log
+│   ├── llm/                 # LLMClient protocol
+│   └── eval/                # Eval metric contracts
+├── app/                     # Framework runtime — imports from core/, never from a reasoner
+│   ├── main.py, plugin.py, plugins.py, bootstrap.py   # create_app factory + plugin seam
+│   ├── decide.py            # execute_decision (framework half of the handoff)
+│   ├── retrieval/           # Hybrid RAG (pgvector + Elasticsearch + reranker), corpus loader, ES mapping
+│   ├── gate/policy/         # LLM policy gate + prompt registry
 │   ├── enforcement/         # Deterministic rule-based action resolution
-│   ├── audit/               # Decision Bundle construction + replay
+│   ├── audit/               # Decision Bundle construction + replay, canonical DDL (sql/)
+│   ├── llm/                 # LLMClient adapters (OpenAI, Anthropic)
 │   └── monitoring/          # Structured logging, latency tracking
-├── eval/                    # Evaluation harness (5 dimensions)
-├── generator/           # Synthetic event generator (8 named patterns)
-├── tests/                   # Mirrors source tree
-├── infra/                   # Terraform (AWS primary)
-├── docs/                    # PlantUML C4 diagrams, architecture docs
-├── STYLE.md                 # Code style guide and conventions
-├── CONTRIBUTING.md          # This file
-├── DECISIONS.md             # Architecture decision records (D1–D10)
+├── eval/                    # Reasoner-agnostic evaluation harness (5 dimensions, EvalAdapter)
+├── reasoners/               # One uv workspace member per reasoner
+│   └── account_takeover/    # pyproject.toml, reasoner.mk, compose.yaml, src/ato_reasoner/, tests/
+├── tests/                   # Framework tests (+ _stub_reasoner/, a test-only second reasoner)
+├── docs/                    # MkDocs site: design docs, decision records, D2 diagrams
 └── README.md                # Project overview, quickstart, architecture diagram
 ```
+
+The style guide is [`docs/development/style.md`](style.md) and the decision records are [`docs/design/decisions.md`](../design/decisions.md).
 
 ### The `core/` Boundary — The Most Important Rule
 
@@ -154,12 +162,12 @@ decision-ledger/
 
 - ✅ Pydantic models, enums, dataclasses, protocols, pure functions
 - ✅ `import json`, `import hashlib`, `import enum`, `from pydantic import BaseModel`
-- ❌ `import redis`, `import asyncpg`, `import openai`, `import fastapi`
+- ❌ `import redis`, `import psycopg`, `import openai`, `import fastapi`
 - ❌ Any network calls, file I/O to external systems, or database queries
 
-Everything else (`app/`, `eval/`, `generator/`) imports from `core/`. Nothing imports from `app/` except `app/` itself.
+Everything else (`app/`, `eval/`, every reasoner under `reasoners/`) imports from `core/`. `core/`, `app/`, and `eval/` never import from a reasoner; reasoners are discovered through entry points, and `tests/test_framework_boundary.py` fails the build on any leak.
 
-**If you're unsure whether something belongs in `core/` or `app/`:** ask whether it can be unit-tested without Docker running. If yes → `core/`. If no → `app/`.
+**If you're unsure whether something belongs in `core/` or `app/`:** ask whether it can be unit-tested without Docker running. If yes → `core/`. If no → `app/`. If it names a domain concept → the reasoner.
 
 ---
 
@@ -167,29 +175,30 @@ Everything else (`app/`, `eval/`, `generator/`) imports from `core/`. Nothing im
 
 ### Test Organization
 
-Tests mirror the source tree:
+Framework tests mirror the framework tree and run against the test-only stub reasoner, never ATO; each reasoner's tests live in its own member:
 
 ```
 tests/
+├── _stub_reasoner/                 # minimal second reasoner used only by framework tests
 ├── core/
-│   ├── decision/
-│   │   └── test_bundle.py
-│   └── policy/
-│       └── test_enforcement_rules.py
+│   ├── observation/test_registration.py
+│   └── test_bundle.py
 ├── app/
-│   ├── ingestion/
-│   │   └── test_dedup.py
-│   └── scorer/
-│       └── test_risk_score.py
-└── eval/
-    └── test_consistency.py
+│   ├── test_enforcement.py
+│   └── test_plugin_discovery.py
+├── eval/
+│   └── test_consistency_dimension.py
+├── integration/
+│   └── test_bundle_store.py
+└── test_framework_boundary.py
+reasoners/account_takeover/tests/   # ATO unit, integration, generator, and eval-driver tests
 ```
 
 ### Test Categories
 
-- **Unit tests** (`tests/core/`): Pure logic, no infrastructure. Fast. Run on every commit.
+- **Unit tests** (`tests/core/`, `tests/app/`, `tests/eval/`, and the member's unit tests): Pure logic, no infrastructure. Fast. Run on every commit.
 - **Smoke tests**: Minimal end-to-end sanity check — one happy path, one error path, one replay through the full pipeline. Subset of integration, but fast enough to run during development for quick confidence. Mark with `@pytest.mark.smoke`.
-- **Integration tests** (`tests/app/`): Require Docker services. Run in CI and before PRs. Mark with `@pytest.mark.integration`.
+- **Integration tests** (`tests/integration/`, `reasoners/<name>/tests/integration/`): Require Docker services. Run in CI and before PRs. Mark with `@pytest.mark.integration`.
 - **Evaluation tests** (`tests/eval/` and `eval/`): Full pipeline evaluation. Slow, makes LLM calls, costs money. Run before PRs and in CI release gates. Mark with `@pytest.mark.evaluation`.
 
 ### Running Tests
@@ -228,11 +237,13 @@ The eval harness is a first-class component, not an afterthought. Changes that a
 
 ### Golden Sets
 
-- `eval/datasets/retrieval/golden_queries.yaml` — 12 curated retrieval queries with annotated relevant policy chunks
-- `eval/datasets/scenarios/*.yaml` — 4 scenarios × 3 orderings with expected actions
-- `eval/datasets/faithfulness/golden_outputs.yaml` — reference gate outputs with retrieved-snippet ground truth
-- `eval/datasets/citations/golden_outputs.yaml` — reviewed citations rated for claim support
-- `eval/datasets/robustness/{injection,malformed,novel,fallback}.yaml` — adversarial event variants with expected handling
+Golden sets belong to the reasoner they evaluate and ship with its eval adapter. For ATO they live under `reasoners/account_takeover/src/ato_reasoner/eval/datasets/`:
+
+- `retrieval/golden_queries.yaml` — 12 curated retrieval queries with annotated relevant policy chunks
+- `scenarios/*.yaml` — 4 scenarios × 3 orderings with expected actions
+- `faithfulness/golden_outputs.yaml` — reference gate outputs with retrieved-snippet ground truth
+- `citations/golden_outputs.yaml` — reviewed citations rated for claim support
+- `robustness/{injection,malformed,novel,fallback}.yaml` — adversarial event variants with expected handling
 
 Golden set changes are high-impact and require careful review.
 
@@ -245,8 +256,8 @@ GitHub Actions runs three workflows:
 | Workflow             | Trigger                            | What it runs                                                                     |
 |----------------------|------------------------------------|----------------------------------------------------------------------------------|
 | `ci.yaml`            | Push to `main`, PR to `main`       | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
-| `integration.yaml`   | Push to `main`, PR to `main`       | `make test-integration` + `make test-smoke` against service containers           |
-| `eval.yaml`          | `workflow_dispatch` + nightly cron | `make eval` — full 5D harness; uploads the report as a workflow artifact         |
+| `integration.yaml`   | Push to `main`, PR to `main`       | Per reasoner (`matrix.reasoner`): `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers |
+| `eval.yaml`          | `workflow_dispatch` only           | Per reasoner: `make prepare-<reasoner>`, then `make eval-<reasoner>` — full 5D harness; uploads the report as a workflow artifact |
 
 - **Gate check.** The eval harness compares each dimension's score against its
   threshold. Any regression below threshold fails the workflow.
@@ -257,8 +268,8 @@ GitHub Actions runs three workflows:
 
 ### Quality and Integration Must Pass Before Merge
 
-No exceptions on `ci.yaml` and `integration.yaml`. The eval workflow is
-nightly — drive it manually via `workflow_dispatch` to validate a release
+No exceptions on `ci.yaml` and `integration.yaml`. The eval workflow has no
+schedule — drive it manually via `workflow_dispatch` to validate a release
 candidate before promoting a new baseline.
 
 ---
@@ -270,17 +281,16 @@ candidate before promoting a new baseline.
 All development runs locally via Docker Compose. No cloud dependency during iteration.
 
 ```bash
-docker compose up -d          # Start Redis, PostgreSQL+pgvector, Elasticsearch
+docker compose up -d          # Start PostgreSQL+pgvector, Elasticsearch, and ATO's Redis (included)
 docker compose down           # Stop everything
 docker compose down -v        # Stop and remove volumes (full reset)
 ```
 
 ### Cloud Deployment (Stretch Goal)
 
-Terraform modules in `infra/` target AWS (ECS + ElastiCache + RDS + OpenSearch). Deployment is validated but not required for MVP.
+Cloud deployment (AWS: ECS + ElastiCache + RDS + OpenSearch) is a planned stretch goal; no Terraform is in the repository yet. See [Infrastructure](../design/infrastructure.md) for the target layout.
 
 - Never commit `.tfstate` files or `.tfvars` with secrets.
-- Use `infra/environments/dev/terraform.tfvars.example` as a template.
 - All Terraform changes require `terraform plan` output in the PR description.
 
 ---
@@ -289,7 +299,7 @@ Terraform modules in `infra/` target AWS (ECS + ElastiCache + RDS + OpenSearch).
 
 - **Never commit secrets.** API keys, database passwords, Terraform state — none of these belong in git.
 - `.env` is gitignored. Use `.env.example` as a committed template with placeholder values.
-- The OpenAI API key is the only external secret required during MVP. Pass it via environment variable `OPENAI_API_KEY`.
+- Two external secrets are used during MVP: `OPENAI_API_KEY` (policy gate) and `ANTHROPIC_API_KEY` (eval judges). Pass them via environment variables; see [Secrets](../operations/secrets.md).
 - If you discover a committed secret, rotate it immediately and force-push to remove it from history.
 
 ---
@@ -298,6 +308,6 @@ Terraform modules in `infra/` target AWS (ECS + ElastiCache + RDS + OpenSearch).
 
 If you encounter a design question that isn't covered by existing code or documentation:
 
-1. Check `DECISIONS.md` — the answer may already be documented.
-2. Check `STYLE.md` — it may be a style convention question.
-3. If neither covers it, make a judgment call, document it, and move on. A consistent decision made now is better than a perfect decision made later. If it's a significant architectural choice, add a DECISIONS.md entry.
+1. Check `docs/design/decisions.md` — the answer may already be documented.
+2. Check `docs/development/style.md` — it may be a style convention question.
+3. If neither covers it, make a judgment call, document it, and move on. A consistent decision made now is better than a perfect decision made later. If it's a significant architectural choice, add a decision record.

@@ -1,8 +1,10 @@
 """ReasonerRegistration and ReasonerRegistry — framework registration contracts.
 
 A ReasonerRegistration is the framework's declaration of a known domain
-reasoner: its stable identifier, display name, and the set of resources
-(prompt templates, jurisdictions) it is authorized to use.
+reasoner: its stable identifier, display name, the set of resources
+(prompt templates, jurisdictions) it is authorized to use, and the
+enforcement profile (novel-entity feature, jurisdiction conflict groups)
+that the deterministic enforcement layer reads for Tiers 3 and 5.
 
 A ReasonerRegistry is the protocol any registry implementation must satisfy.
 The reference implementation (StaticReasonerRegistry in app/) loads from a
@@ -35,7 +37,7 @@ class ReasonerRegistration(BaseModel):
             reasoner submits. Used as the registry lookup key and as the
             stable cross-bundle query key.
         reasoner_name: Human-readable display name for dashboards and
-            audit reports (e.g., ``"ATO Reasoner"``).
+            audit reports (e.g., ``"Claims Reasoner"``).
         allowed_gate_ids: Gate types this reasoner is authorized to
             target via ``GateContext.gate_id``. The framework rejects any
             Observation whose gate_id is not in this set.
@@ -47,6 +49,20 @@ class ReasonerRegistration(BaseModel):
             authorized to claim via ``gate_config["jurisdictions"]``.
             Validated by convention — skipped when the key is absent
             from gate_config. An empty frozenset means no restriction.
+        novel_entity_feature: Enforcement profile for Tier 3 (novel
+            entity). Names the ``ReasonerContext.feature_set`` key whose
+            truthy value signals that the decision subject has too little
+            history for a confident decision; enforcement routes such
+            observations to ``HOLD``. ``None`` (the default) means the
+            reasoner exposes no such signal and Tier 3 never fires.
+        jurisdiction_conflict_groups: Enforcement profile for Tier 5
+            (jurisdiction conflict). Each member is a group of
+            jurisdiction tags whose policies are mutually consistent;
+            enforcement treats a decision as conflicted when the
+            retrieved policy snippets span at least two distinct groups
+            and routes it to ``HOLD``. An empty tuple (the default)
+            disables the structural check — Tier 5 then fires only when
+            the gate itself signals a conflict.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -56,6 +72,8 @@ class ReasonerRegistration(BaseModel):
     allowed_gate_ids: frozenset[str]
     allowed_prompt_template_ids: frozenset[str]
     allowed_jurisdictions: frozenset[str]
+    novel_entity_feature: str | None = None
+    jurisdiction_conflict_groups: tuple[frozenset[str], ...] = ()
 
 
 @runtime_checkable

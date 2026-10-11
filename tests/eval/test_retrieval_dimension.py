@@ -60,18 +60,22 @@ class _StubRetriever:
         responses: dict[str, list[RetrievedSnippet]],
     ) -> None:
         self._responses = responses
-        self.calls: list[tuple[str, int, list[str] | None, str | None]] = []
+        self.calls: list[tuple[str, int, str | None, list[str] | None, str | None]] = []
 
     def retrieve(
         self,
         query: str,
         k: int = 5,
         *,
+        reasoner_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
     ) -> tuple[list[RetrievedSnippet], str]:
-        self.calls.append((query, k, jurisdictions, risk_tier))
+        self.calls.append((query, k, reasoner_id, jurisdictions, risk_tier))
         return self._responses.get(query, []), "rrf_only"
+
+
+_REASONER_ID = "stub-reasoner"
 
 
 # ---------------------------------------------------------------------------
@@ -178,25 +182,6 @@ class TestJurisdictionsRespected:
 
 
 class TestLoadGoldenQueries:
-    def test_loads_default_dataset(self) -> None:
-        from pathlib import Path
-
-        path = (
-            Path(__file__).parents[2]
-            / "eval"
-            / "datasets"
-            / "retrieval"
-            / "golden_queries.yaml"
-        )
-        queries = load_golden_queries(path)
-        assert len(queries) >= 10
-        assert all(isinstance(q, GoldenQuery) for q in queries)
-        # Every query has at least one relevant doc.
-        assert all(q.relevant_document_ids for q in queries)
-        # Query IDs are unique.
-        ids = [q.query_id for q in queries]
-        assert len(ids) == len(set(ids))
-
     def test_round_trip_yaml(self, tmp_path: Path) -> None:
         fixture = tmp_path / "fixture.yaml"
         fixture.write_text(
@@ -256,7 +241,12 @@ class TestRetrievalDimension:
                 ],
             }
         )
-        dim = RetrievalDimension(retriever=retriever, golden_queries=queries, k=3)
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id=_REASONER_ID,
+            k=3,
+        )
         run = await dim.evaluate()
 
         assert run.result.dimension == EvalDimension.RETRIEVAL
@@ -285,7 +275,12 @@ class TestRetrievalDimension:
         retriever = _StubRetriever(
             responses={"auth risk": [_snippet(document_id="DOC-A", version="1.0")]}
         )
-        dim = RetrievalDimension(retriever=retriever, golden_queries=queries, k=3)
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id=_REASONER_ID,
+            k=3,
+        )
         run = await dim.evaluate()
 
         assert run.result.passed is False
@@ -322,7 +317,12 @@ class TestRetrievalDimension:
                 ]
             }
         )
-        dim = RetrievalDimension(retriever=retriever, golden_queries=queries, k=3)
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id=_REASONER_ID,
+            k=3,
+        )
         run = await dim.evaluate()
 
         assert run.result.passed is False
@@ -340,7 +340,12 @@ class TestRetrievalDimension:
             ),
         ]
         retriever = _StubRetriever(responses={"x": []})  # zero results
-        dim = RetrievalDimension(retriever=retriever, golden_queries=queries, k=5)
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id=_REASONER_ID,
+            k=5,
+        )
         run = await dim.evaluate()
 
         assert run.result.passed is False
@@ -363,8 +368,37 @@ class TestRetrievalDimension:
         retriever = _StubRetriever(
             responses={"hva": [_snippet(document_id="DOC-H", version="2.0")]}
         )
-        dim = RetrievalDimension(retriever=retriever, golden_queries=queries, k=3)
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id=_REASONER_ID,
+            k=3,
+        )
         await dim.evaluate()
 
-        # Confirm filters were forwarded.
-        assert retriever.calls == [("hva", 3, ["INTERNAL"], "HIGH_VALUE")]
+        # Confirm the tenant and metadata filters were forwarded.
+        assert retriever.calls == [("hva", 3, _REASONER_ID, ["INTERNAL"], "HIGH_VALUE")]
+
+    @pytest.mark.asyncio
+    async def test_retriever_receives_reasoner_id_on_every_query(self) -> None:
+        """Every golden query is tenant-scoped, matching the production path."""
+        queries = [
+            GoldenQuery(
+                query_id=f"q{i}",
+                query=f"query {i}",
+                relevant_document_ids=["DOC"],
+                expected_top_document_id="DOC",
+                expected_top_version="1.0",
+            )
+            for i in range(3)
+        ]
+        retriever = _StubRetriever(responses={})
+        dim = RetrievalDimension(
+            retriever=retriever,
+            golden_queries=queries,
+            reasoner_id="another-reasoner",
+        )
+        await dim.evaluate()
+
+        assert dim.reasoner_id == "another-reasoner"
+        assert [c[2] for c in retriever.calls] == ["another-reasoner"] * 3

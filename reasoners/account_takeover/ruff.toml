@@ -1,0 +1,22 @@
+# Member-local Ruff config: inherits everything from the root pyproject and
+# only adds the ATO package's first-party name and per-file ignores.
+extend = "../../pyproject.toml"
+src = ["src", "tests", "../.."]
+
+[lint.isort]
+known-first-party = ["core", "app", "eval", "ato_reasoner"]
+
+[lint.extend-per-file-ignores]
+"src/ato_reasoner/**/*.py" = [
+    "S105",   # "hardcoded password" false positives on enum values like AuthMethod.PASSWORD
+]
+"src/ato_reasoner/generator/**/*.py" = [
+    "S311",   # pseudo-random generators are fine for synthetic data
+    "S106",   # hardcoded password arguments — expected in synthetic data generation
+]
+"tests/**/*.py" = [
+    "D",      # no docstring requirements in tests
+    "S101",   # assert is expected in tests
+    "S105",   # hardcoded passwords in test fixtures are fine
+    "S106",   # hardcoded passwords in test fixtures are fine
+]

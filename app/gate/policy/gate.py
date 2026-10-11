@@ -1,8 +1,11 @@
 """LLM-backed policy gate orchestrator — prompt rendering, LLM invocation, validation.
 
 PolicyGate renders the prompt template, calls the LLM through the
-SDK-agnostic ``LLMClient`` (DR-23), and returns a ``GateResult``
-carrying typed ``PolicyGateInput`` and ``PolicyGateOutput``.
+SDK-agnostic ``LLMClient`` (DR-23) with the template's own ``system_text``
+as the system message, and returns a ``GateResult`` carrying typed
+``PolicyGateInput`` and ``PolicyGateOutput``. The gate carries no domain
+wording: everything the model reads comes from the reasoner's template
+file and the retrieved snippets.
 
 Strict structured output is enforced at the SDK layer — the LLMClient
 returns a Pydantic-validated ``PolicyGateVerdict`` directly. The gate
@@ -20,7 +23,8 @@ Usage::
     from app.gate.policy import PolicyGate, YamlPromptRegistry
 
     client = OpenAILLMClient(client=AsyncOpenAI())
-    gate = PolicyGate(client=client, prompt_registry=YamlPromptRegistry())
+    registry = YamlPromptRegistry([plugin.prompts_dir])
+    gate = PolicyGate(client=client, prompt_registry=registry)
     result = await gate.evaluate(
         obs, snippets, decision_id="dec-abc123", corpus_version="corpus-v1"
     )
@@ -49,16 +53,6 @@ if TYPE_CHECKING:
     from core.snippet import RetrievedSnippet
 
 log = structlog.get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Gate-level system prompt — minimal framing for the policy-evaluation task.
-# Per-domain rubric and event context flow in via the user-message template.
-# ---------------------------------------------------------------------------
-
-_GATE_SYSTEM_PROMPT = (
-    "You evaluate authentication risk for the policy gate. "
-    "Respond with a PolicyGateVerdict that conforms strictly to the schema."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +254,7 @@ class PolicyGate:
             template_id=template.template_id,
             version=template.version,
             template_text=template.template_text,
+            system_text=template.system_text,
         )
 
         # --- Render prompt ---
@@ -287,9 +282,11 @@ class PolicyGate:
             )
 
         # --- LLM invocation via SDK-agnostic client ---
+        # The system message belongs to the template (and so to the reasoner
+        # that ships it); the framework adds no wording of its own.
         try:
             result = await self._client.complete_structured(
-                system=_GATE_SYSTEM_PROMPT,
+                system=template.system_text,
                 user=rendered,
                 response_format=PolicyGateVerdict,
             )

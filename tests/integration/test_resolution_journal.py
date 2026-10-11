@@ -26,6 +26,7 @@ import psycopg
 import pytest
 
 from app.audit.resolution_journal import ResolutionJournal
+from app.audit.schema import apply_canonical_schema
 from app.settings import FrameworkSettings
 from core.actions import DecisionAction
 from core.resolution import (
@@ -56,9 +57,8 @@ def pg_conn():
 
 @pytest.fixture
 def journal(pg_conn) -> ResolutionJournal:
-    j = ResolutionJournal(pg_conn)
-    j.ensure_schema()
-    return j
+    apply_canonical_schema(pg_conn)
+    return ResolutionJournal(pg_conn)
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def fresh_decision_id(pg_conn) -> str:
     Inserts a stub ``decision_bundles`` parent row so the FK constraint on
     ``decision_resolution_attempts.decision_id`` is satisfied. Without this
     parent row, ``record_attempt`` raises ``ForeignKeyViolation`` against
-    the canonical schema in ``infra/postgres/02_tables.sql``.
+    the canonical schema in ``app/audit/sql/02_tables.sql``.
     """
     decision_id = str(uuid.uuid4())
     with pg_conn.cursor() as cur:
@@ -129,7 +129,7 @@ def _sla_default_attempt(
     decision_id: str,
     *,
     sequence: int = 0,
-    account_tier: str = "STANDARD",
+    entity_tier: str = "STANDARD",
     sla_window_seconds: int = 86400,
     resolution_action: DecisionAction | None = DecisionAction.BLOCK,
     note: str = "SLA_EXPIRY_DEFAULT",
@@ -145,7 +145,7 @@ def _sla_default_attempt(
         status=ResolutionStatus.COMPLETED,
         resolution_action=resolution_action,
         note=note,
-        account_tier=account_tier,
+        entity_tier=entity_tier,
         sla_window_seconds=sla_window_seconds,
     )
 
@@ -175,13 +175,13 @@ def test_human_attempt_round_trips_as_human_subclass(journal, fresh_decision_id)
 
 def test_sla_default_attempt_round_trips_as_sla_subclass(journal, fresh_decision_id):
     attempt = _sla_default_attempt(
-        fresh_decision_id, account_tier="HIGH_VALUE", sla_window_seconds=7200
+        fresh_decision_id, entity_tier="HIGH_VALUE", sla_window_seconds=7200
     )
     journal.record_attempt(attempt)
 
     [reloaded] = journal.load_attempts(fresh_decision_id)
     assert isinstance(reloaded, SlaDefaultResolutionAttempt)
-    assert reloaded.account_tier == "HIGH_VALUE"
+    assert reloaded.entity_tier == "HIGH_VALUE"
     assert reloaded.sla_window_seconds == 7200
 
 

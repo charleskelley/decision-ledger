@@ -11,10 +11,14 @@ the quality of the gate's reasoning: sparse or vague documents produce vague
 citations; precise, well-scoped documents produce grounded, citable decisions.
 
 The corpus consists of **32 documents** across four regulatory jurisdictions and
-four document types. Documents are stored as Markdown files with YAML frontmatter
-in `corpus/` at the project root. The frontmatter maps directly to the
-`PolicyDocument` schema in `core/policy/corpus.py`. The retrieval layer at
-`app/retrieval/` loads, chunks, embeds, and indexes the corpus at startup.
+four document types. It belongs to the ATO reasoner: documents are stored as
+Markdown files with YAML frontmatter in `ato_reasoner/corpus/`
+(`reasoners/account_takeover/src/ato_reasoner/corpus/`), the directory the
+ATO plugin exposes as `corpus_dir`. The frontmatter maps directly to the
+`PolicyDocument` schema in `core/gate/policy/corpus.py`. The framework's
+corpus loader (`app/retrieval/corpus_loader.py`) chunks, embeds, and indexes
+it under `reasoner_id=ato-reasoner` when run (`make build-policy-index` or
+`make prepare-account_takeover`), not at API startup.
 
 ---
 
@@ -75,20 +79,23 @@ This policy establishes geographic risk controls for login event processing...
 ```
 
 The frontmatter fields map directly to `PolicyDocument` in
-`core/policy/corpus.py`. The `jurisdiction` and `risk_tier` fields use the string
-values of the `Jurisdiction` and `RiskTier` enums from
-`core/policy/corpus.py`.
+`core/gate/policy/corpus.py`. The `jurisdiction` and `risk_tier` fields use the
+string values of the ATO `Jurisdiction` and `RiskTier` enums from
+`ato_reasoner/policy.py`; the framework schema stores them as plain strings.
 
 ### Storage location
 
-Corpus documents live in `corpus/` at the project root, not inside `app/`.
-This is an intentional boundary: the corpus is versioned source data, not
-application code. The retrieval layer at `app/retrieval/` imports and indexes it,
-but does not own it. This separation makes corpus updates (adding a document,
-correcting a threshold) independent of application code changes.
+Corpus documents live with the reasoner that owns them, not inside `app/`.
+This is an intentional boundary: the corpus is the reasoner's versioned source
+data, not framework code. The framework's corpus loader indexes it, given
+`--reasoner-id` (it resolves the directory from the installed plugin) or an
+explicit `--corpus-dir`, and the retriever reads only the indexed rows (each
+chunk carries its document `title`), never the files. This separation makes
+corpus updates (adding a document, correcting a threshold) independent of
+framework code changes.
 
 ```
-corpus/
+ato_reasoner/corpus/
 ├── regulations/      # REGULATION type — legally binding external sources
 ├── guidance/         # GUIDANCE type — non-binding standards body documents
 ├── standards/        # STANDARD type — technical/operational standards
@@ -209,7 +216,7 @@ to exercise version resolution logic in the retriever.
 ## Threshold Calibration
 
 Internal policy thresholds are deliberately calibrated to match the synthetic
-scenario generator configurations in `generator/scenarios/`. This ensures the
+scenario generator configurations in `ato_reasoner/generator/scenarios/`. This ensures the
 generator and policy gate are self-consistent within the reference implementation.
 
 The following table maps generator config values to the policy thresholds written
@@ -315,7 +322,7 @@ A real evaluation would use held-out attack data the system has not seen.
 
 ### Static corpus — no update pipeline
 
-**What this corpus does:** The corpus is a fixed set of files in `corpus/`. No
+**What this corpus does:** The corpus is a fixed set of files in `ato_reasoner/corpus/`. No
 ingestion workflow exists for regulatory updates.
 
 **What production requires:** A corpus update pipeline that monitors regulatory

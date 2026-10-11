@@ -22,7 +22,6 @@ dimension where claim decomposition + entailment is genuinely hard.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import yaml
@@ -37,6 +36,7 @@ from eval.dimensions.base import DimensionRun
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from core.snippet import RetrievedSnippet
 
@@ -62,8 +62,6 @@ THRESHOLD_VERSION_RESOLUTION = 1.0  # zero tolerance
 THRESHOLD_JURISDICTION_FILTER = 1.0  # zero tolerance
 
 DEFAULT_K = 5
-
-_DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "retrieval"
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +238,10 @@ class RetrieverClient(Protocol):
     The MVP implementation is ``app.retrieval.retriever.PolicyRetriever``; a
     test stub satisfies this same protocol so the dimension's wire-up can be
     unit-tested without Postgres or Elasticsearch running.
+
+    ``reasoner_id`` is the tenant filter the production pipeline always
+    passes; the dimension forwards it on every call so eval exercises the
+    same tenant-scoped path as ``execute_decision``.
     """
 
     def retrieve(
@@ -247,6 +249,7 @@ class RetrieverClient(Protocol):
         query: str,
         k: int = 5,
         *,
+        reasoner_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
     ) -> tuple[list[RetrievedSnippet], str]:
@@ -266,6 +269,9 @@ class RetrievalDimension:
         retriever: ``RetrieverClient`` implementation (typically
             ``PolicyRetriever``; a stub for unit tests).
         golden_queries: Loaded golden query set.
+        reasoner_id: Tenant whose corpus the golden queries target. Passed
+            to the retriever on every call so the dimension measures the
+            production (tenant-filtered) retrieval path.
         k: Retrieval depth at which all metrics are computed.
     """
 
@@ -276,20 +282,14 @@ class RetrievalDimension:
         *,
         retriever: RetrieverClient,
         golden_queries: list[GoldenQuery],
+        reasoner_id: str,
         k: int = DEFAULT_K,
     ) -> None:
         """Construct the dimension with its dependencies."""
         self._retriever = retriever
         self._queries = golden_queries
+        self._reasoner_id = reasoner_id
         self._k = k
-
-    @classmethod
-    def from_default_dataset(
-        cls, *, retriever: RetrieverClient, k: int = DEFAULT_K
-    ) -> RetrievalDimension:
-        """Construct using the bundled ``golden_queries.yaml`` dataset."""
-        path = _DATASETS_DIR / "golden_queries.yaml"
-        return cls(retriever=retriever, golden_queries=load_golden_queries(path), k=k)
 
     async def evaluate(self) -> DimensionRun:
         """Run all golden queries and assemble the dimension run."""
@@ -303,6 +303,7 @@ class RetrievalDimension:
             snippets, _path = self._retriever.retrieve(
                 q.query,
                 self._k,
+                reasoner_id=self._reasoner_id,
                 jurisdictions=q.jurisdictions,
                 risk_tier=q.risk_tier,
             )
@@ -402,6 +403,11 @@ class RetrievalDimension:
     def k(self) -> int:
         """Retrieval depth at which metrics are computed."""
         return self._k
+
+    @property
+    def reasoner_id(self) -> str:
+        """Tenant filter forwarded to the retriever on every golden query."""
+        return self._reasoner_id
 
 
 __all__ = [

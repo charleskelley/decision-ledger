@@ -13,9 +13,13 @@ CI/CD, and production cloud.
 | `OPENAI_API_KEY`     | Policy gate calls (PolicyGate consumes OpenAILLMClient).               | Any pipeline run, `make test-smoke` |
 | `ANTHROPIC_API_KEY`  | Eval-harness faithfulness/citation judges (cross-family bias control). | `make eval`                         |
 
-Infrastructure values (Postgres credentials, Redis host/port, Elasticsearch
-URL) also flow through `Settings`, but their defaults match `docker-compose.yml`
-so they rarely need overriding. See `.env.example` for the complete list.
+Infrastructure values (Postgres credentials, Elasticsearch URL) also flow
+through `FrameworkSettings`, but their defaults match `docker-compose.yml` so
+they rarely need overriding. Reasoner-owned infrastructure is configured under
+the reasoner's own prefix and read by its own settings class (ATO:
+`ATO_REDIS_URL` in `AtoSettings`, defaulting to the Redis in
+`reasoners/account_takeover/compose.yaml`). See `.env.example` for the
+complete list.
 
 ## Architecture: one read site, many sources
 
@@ -95,8 +99,8 @@ Three workflows under `.github/workflows/`:
 | Workflow            | Trigger                          | Secrets needed                               |
 | ------------------- | -------------------------------- | -------------------------------------------- |
 | `ci.yaml`           | every push and PR                | none — runs on forks                         |
-| `integration.yaml`  | PRs to `main`                    | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
-| `eval.yaml`         | manual + nightly cron            | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
+| `integration.yaml`  | pushes to `main`, same-repo PRs to `main` (one job per reasoner) | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
+| `eval.yaml`         | manual (`workflow_dispatch`), one job per reasoner | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
 
 ### Configuring secrets
 
@@ -268,13 +272,14 @@ uv run pre-commit run gitleaks --all-files
 # 3. .env not tracked
 git check-ignore .env && echo ".env is gitignored"
 
-# 4. .env.example covers every Settings field
+# 4. .env.example covers every FrameworkSettings field (reasoner-prefixed
+#    vars such as ATO_* belong to the reasoner's settings class; excluded here)
 diff <(grep -oE '^\s*[a-z_]+: ' app/settings.py | sed 's/[: ]//g' | sort -u) \
-     <(grep -oE '^[A-Z_]+=' .env.example | sed 's/=//' | tr 'A-Z' 'a-z' | sort -u)
+     <(grep -oE '^[A-Z_]+=' .env.example | grep -v '^ATO_' | sed 's/=//' | tr 'A-Z' 'a-z' | sort -u)
 
 # 5. CI boundary check (DR-23) catches accidental SDK leaks
 ! grep -rE "^(from|import) (openai|anthropic)" --include="*.py" \
-    app/ core/ eval/ reasoner/ tests/ | grep -v "^app/llm/"
+    app/ core/ eval/ reasoners/ tests/ | grep -v "^app/llm/"
 ```
 
 Failing any of these means a secrets-discipline regression has landed.

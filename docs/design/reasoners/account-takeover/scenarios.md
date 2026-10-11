@@ -55,8 +55,8 @@ statistics appear in the ACM TOPS 2022 publication.
 | Feature weights — UA full / browser / OS / device | 0.53 / 0.27 / 0.19 / 0.01 | §4.3 |
 | Attacker taxonomy | Naive / VPN / Targeted / Very Targeted | §5, Fig 2 |
 
-These numbers informed the design of `generator/scenarios/*.yaml` and
-`reasoner/account_takeover/scorer/trainer.py:_generate_sample`, but were not used in a
+These numbers informed the design of `ato_reasoner/generator/scenarios/*.yaml` and
+`ato_reasoner/scorer/trainer.py:_generate_sample`, but were not used in a
 data-fitting sense — no empirical distribution was extracted from the raw
 dataset and used to set parameters.
 
@@ -64,7 +64,7 @@ dataset and used to set parameters.
 
 ## Per-scenario summary
 
-The eight scenarios under `generator/scenarios/` map to risk patterns
+The eight scenarios under `ato_reasoner/generator/scenarios/` map to risk patterns
 with corresponding generator parameters and expected pipeline actions:
 
 | Scenario | Pattern | Expected action(s) | Paper signal |
@@ -154,7 +154,7 @@ re-tune → empirical validation.
 3. **Distribution-fitting pass.** Log-normal or power-law fits for
    heavy-tailed counts; categorical priors for user-agent / device / OS;
    mixture models where appropriate. Record fitted parameters.
-4. **Scenario re-tune.** Update each `generator/scenarios/*.yaml`'s
+4. **Scenario re-tune.** Update each `ato_reasoner/generator/scenarios/*.yaml`'s
    `velocity`, `device`, `network`, `geo`, `auth` blocks to match the
    fitted distributions. Record the diff with before/after numbers.
 5. **Documentation update.** Replace each

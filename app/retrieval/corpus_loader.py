@@ -1,16 +1,21 @@
 r"""Policy corpus loader.
 
-Reads all ``corpus/**/*.md`` files, parses YAML frontmatter into
-``PolicyDocument``, chunks the body at ``##`` / ``###`` section boundaries,
-embeds each chunk using sentence-transformers (all-MiniLM-L6-v2), and writes to:
+Reads every ``*.md`` file under a reasoner's corpus directory, parses YAML
+frontmatter into ``PolicyDocument``, chunks the body at ``##`` / ``###``
+section boundaries, embeds each chunk using sentence-transformers
+(all-MiniLM-L6-v2), and writes to:
 
 - PostgreSQL ``decisionledger.policy_chunks`` (text + embedding + metadata,
-  including ``reasoner_id`` for tenant filtering at retrieval time).
+  including ``reasoner_id`` for tenant filtering at retrieval time and the
+  document ``title`` so the retriever can cite without reading the corpus).
 - Elasticsearch ``policy-chunks`` index (text + metadata; no embedding).
 
-The framework owns the schema; the loader is invoked with ``--reasoner-id``
-to tag every chunk with its owning reasoner's identity so a multi-tenant
-deployment can filter at retrieval time.
+The framework owns both stores; each reasoner owns its corpus directory.
+The loader is invoked with ``--reasoner-id`` and resolves the directory from
+the installed ``ReasonerPlugin`` whose ``registration.reasoner_id`` matches,
+so the framework never hardcodes a corpus path. ``--corpus-dir`` overrides
+that lookup (useful for tests and for indexing a corpus before its plugin
+is installed).
 
 Chunking rules (from ``docs/design/policy-corpus.md``):
 
@@ -25,15 +30,18 @@ Chunking rules (from ``docs/design/policy-corpus.md``):
 Usage::
 
     uv run python -m app.retrieval.corpus_loader \\
-        --reasoner-id ato-reasoner [--wipe]
+        --reasoner-id <reasoner-id> [--corpus-dir <path>] [--wipe]
 
 Options:
-    --reasoner-id  Reasoner that owns this corpus (e.g., ``ato-reasoner``).
-                   Stored on every chunk so the retriever can filter by tenant.
-    --wipe         Truncate both stores before loading. Default behaviour is
-                   to delete existing chunks for each ``(reasoner_id,
-                   policy_id)`` before inserting, making repeated runs safe
-                   without accumulating duplicates.
+    --reasoner-id  Reasoner that owns this corpus. Stored on every chunk so
+                   the retriever can filter by tenant, and used to resolve
+                   the corpus directory from the matching installed plugin.
+    --corpus-dir   Explicit corpus root. When omitted, the matching plugin's
+                   ``corpus_dir`` is used.
+    --wipe         Delete this reasoner's chunks from both stores before
+                   loading. Default behavior is to delete existing chunks for
+                   each ``(reasoner_id, policy_id)`` before inserting, making
+                   repeated runs safe without accumulating duplicates.
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
 import structlog
@@ -54,8 +62,16 @@ from elasticsearch.helpers import bulk
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
+from app.audit.schema import apply_canonical_schema
+from app.plugins import discover_plugins
 from app.settings import FrameworkSettings
+from core.exceptions import ReasonerPluginError
 from core.gate import PolicyDocument
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from app.plugin import ReasonerPlugin
 
 log = structlog.get_logger(__name__)
 
@@ -63,15 +79,23 @@ log = structlog.get_logger(__name__)
 # Configuration constants
 # ---------------------------------------------------------------------------
 
-_PROJECT_ROOT = Path(__file__).parents[2]
-_CORPUS_DIR = _PROJECT_ROOT / "corpus"
-_ES_MAPPING_PATH = _PROJECT_ROOT / "infra" / "elasticsearch" / "policy-chunks.json"
+#: Elasticsearch index definition, shipped as package data next to this module.
+_ES_MAPPING_PATH = Path(__file__).resolve().parent / "es" / "policy-chunks.json"
 
 _MODEL_NAME = "all-MiniLM-L6-v2"
-_ES_INDEX = "policy-chunks"
+
+#: Name of the shared Elasticsearch BM25 index every reasoner's corpus is
+#: written to. Public so integration fixtures can target the same index the
+#: loader and retriever use without reaching into private names.
+ES_INDEX = "policy-chunks"
+_ES_INDEX = ES_INDEX
 
 _CHUNK_MAX_WORDS = 300
 _CHUNK_MIN_WORDS = 30
+
+#: Outcome of ``ensure_es_index``: the index was created fresh, dropped and
+#: recreated because its mapping was stale, or left untouched.
+EnsureIndexOutcome = Literal["created", "recreated", "kept"]
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -208,25 +232,130 @@ def chunk_document(doc: PolicyDocument, body: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Storage — PostgreSQL
+# Corpus directory resolution
 # ---------------------------------------------------------------------------
 
 
-def _ensure_es_index(es: Elasticsearch) -> None:
-    """Create the Elasticsearch index if it does not already exist.
+def resolve_corpus_dir(
+    reasoner_id: str,
+    corpus_dir: Path | None = None,
+    *,
+    plugins: Sequence[ReasonerPlugin] | None = None,
+) -> Path:
+    """Return the corpus directory to index for ``reasoner_id``.
+
+    An explicit ``corpus_dir`` wins. Otherwise the installed reasoner plugins
+    are discovered and the one whose ``registration.reasoner_id`` equals
+    ``reasoner_id`` supplies its ``corpus_dir``.
+
+    Args:
+        reasoner_id: Reasoner whose corpus is being loaded.
+        corpus_dir: Explicit override (``--corpus-dir``). Returned as-is when
+            provided.
+        plugins: Plugins to search instead of calling ``discover_plugins()``.
+            Tests inject fakes here; production leaves it ``None``.
+
+    Returns:
+        The directory of Markdown policy documents to index.
+
+    Raises:
+        ReasonerPluginError: No installed plugin declares ``reasoner_id``.
+            The message lists the ids that were discovered.
+    """
+    if corpus_dir is not None:
+        return corpus_dir
+
+    found = list(plugins) if plugins is not None else discover_plugins()
+    for plugin in found:
+        if plugin.registration.reasoner_id == reasoner_id:
+            return plugin.corpus_dir
+
+    discovered = sorted(p.registration.reasoner_id for p in found)
+    raise ReasonerPluginError(
+        reasoner_id,
+        f"no installed reasoner plugin declares reasoner_id {reasoner_id!r}; "
+        f"discovered: {discovered}. Install the plugin or pass --corpus-dir.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Storage — Elasticsearch index lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _reasoner_id_is_keyword(mapping_response: Any) -> bool:
+    """Return True when the live index maps ``reasoner_id`` as ``keyword``.
+
+    Args:
+        mapping_response: Result of ``es.indices.get_mapping(index=...)``;
+            either the client's response object (``.body`` holds the dict)
+            or a plain dict keyed by index name.
+    """
+    body = getattr(mapping_response, "body", mapping_response)
+    for index_def in body.values():
+        properties = index_def.get("mappings", {}).get("properties", {})
+        field = properties.get("reasoner_id")
+        if field is None or field.get("type") != "keyword":
+            return False
+    return bool(body)
+
+
+def ensure_es_index(
+    es: Elasticsearch, *, mapping_path: Path = _ES_MAPPING_PATH
+) -> EnsureIndexOutcome:
+    """Create the Elasticsearch index, recreating it if its mapping is stale.
+
+    The tenant filter is a ``term`` query on ``reasoner_id``; that only
+    matches when the field is mapped as ``keyword``. An index created before
+    the mapping declared ``reasoner_id`` has it dynamically mapped as
+    ``text``, which silently returns zero sparse hits for hyphenated ids.
+    Such an index is dropped and recreated — wiping every reasoner's BM25
+    documents — so the caller logs loudly that each corpus must be reloaded.
 
     Args:
         es: Connected Elasticsearch client.
+        mapping_path: JSON file holding the index ``settings`` and
+            ``mappings``.
+
+    Returns:
+        ``"created"`` when no index existed, ``"recreated"`` when a stale
+        index was replaced, ``"kept"`` when the existing mapping is current.
     """
+    outcome: EnsureIndexOutcome = "created"
     if es.indices.exists(index=_ES_INDEX):
-        return
-    mapping = json.loads(_ES_MAPPING_PATH.read_text())
+        current = es.indices.get_mapping(index=_ES_INDEX)
+        if _reasoner_id_is_keyword(current):
+            return "kept"
+        log.warning(
+            "es.index_mapping_stale",
+            component="corpus_loader",
+            index=_ES_INDEX,
+            reason="reasoner_id is not mapped as keyword; recreating the index",
+            action=(
+                "every reasoner's corpus must be reloaded: run the corpus "
+                "loader once per --reasoner-id"
+            ),
+        )
+        es.indices.delete(index=_ES_INDEX)
+        outcome = "recreated"
+
+    mapping = json.loads(mapping_path.read_text())
     es.indices.create(
         index=_ES_INDEX,
         settings=mapping["settings"],
         mappings=mapping["mappings"],
     )
-    log.info("es.index_created", index=_ES_INDEX)
+    log.info("es.index_created", component="corpus_loader", index=_ES_INDEX)
+    return outcome
+
+
+#: Backward-compatible alias; ``ensure_es_index`` is the public name.
+_ensure_es_index = ensure_es_index
+
+
+# ---------------------------------------------------------------------------
+# Storage — PostgreSQL
+# ---------------------------------------------------------------------------
 
 
 def write_postgres(
@@ -245,7 +374,7 @@ def write_postgres(
     Args:
         conn: Open psycopg connection with pgvector adapter registered.
         chunks: Chunk dicts including ``embedding`` as a list of floats.
-        reasoner_id: Reasoner that owns this corpus (e.g., ``"ato-reasoner"``).
+        reasoner_id: Reasoner that owns this corpus.
         policy_id: Document identifier — used for the pre-insert delete.
         wipe: When True, skip the per-document delete (caller truncated).
     """
@@ -259,9 +388,9 @@ def write_postgres(
         cur.executemany(
             """
             INSERT INTO decisionledger.policy_chunks
-                (chunk_id, reasoner_id, policy_id, policy_version,
+                (chunk_id, reasoner_id, policy_id, policy_version, title,
                  jurisdiction, risk_tier, section_path, chunk_text, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
                 (
@@ -269,6 +398,7 @@ def write_postgres(
                     reasoner_id,
                     c["policy_id"],
                     c["version"],
+                    c["title"],
                     c["jurisdiction"],
                     c["risk_tier"],
                     c["section_path"],
@@ -281,7 +411,7 @@ def write_postgres(
 
 
 # ---------------------------------------------------------------------------
-# Storage — Elasticsearch
+# Storage — Elasticsearch documents
 # ---------------------------------------------------------------------------
 
 
@@ -328,29 +458,54 @@ def write_elasticsearch(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """Load the full policy corpus into pgvector and Elasticsearch."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for ``python -m app.retrieval.corpus_loader``."""
     parser = argparse.ArgumentParser(
-        description="Load policy corpus into pgvector and Elasticsearch."
+        description="Load a reasoner's policy corpus into pgvector and Elasticsearch."
     )
     parser.add_argument(
         "--reasoner-id",
         required=True,
         help=(
-            "Reasoner that owns this corpus (e.g., 'ato-reasoner'). Stored "
-            "on every chunk so the retriever can filter by tenant."
+            "Reasoner that owns this corpus. Stored on every chunk so the "
+            "retriever can filter by tenant, and used to find the installed "
+            "plugin whose corpus_dir is indexed."
+        ),
+    )
+    parser.add_argument(
+        "--corpus-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit corpus root. Default: the corpus_dir of the installed "
+            "plugin whose registration.reasoner_id matches --reasoner-id."
         ),
     )
     parser.add_argument(
         "--wipe",
         action="store_true",
         help=(
-            "Truncate both stores before loading. Default: delete existing "
-            "chunks per (reasoner_id, policy_id) before inserting (safe for "
-            "repeated runs)."
+            "Delete this reasoner's chunks from both stores before loading. "
+            "Default: delete existing chunks per (reasoner_id, policy_id) "
+            "before inserting (safe for repeated runs)."
         ),
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Load one reasoner's policy corpus into pgvector and Elasticsearch.
+
+    Args:
+        argv: Optional argv override (defaults to ``sys.argv[1:]``).
+    """
+    args = build_parser().parse_args(argv)
+
+    try:
+        corpus_dir = resolve_corpus_dir(args.reasoner_id, args.corpus_dir)
+    except ReasonerPluginError as exc:
+        log.error("corpus_loader.unknown_reasoner", error=str(exc))
+        sys.exit(2)
 
     # Build DSN + ES URL from FrameworkSettings so the loader honors whatever
     # the local .env / docker-compose stack actually configured. Avoids
@@ -360,16 +515,21 @@ def main() -> None:
     pg_dsn = fw.postgres_dsn
     es_url = fw.elasticsearch_url
 
-    log.info("corpus_loader.start", reasoner_id=args.reasoner_id, wipe=args.wipe)
+    log.info(
+        "corpus_loader.start",
+        reasoner_id=args.reasoner_id,
+        corpus_dir=str(corpus_dir),
+        wipe=args.wipe,
+    )
 
     # Load embedding model
     log.info("corpus_loader.model_loading", model=_MODEL_NAME)
     model = SentenceTransformer(_MODEL_NAME)
 
     # Discover corpus files
-    md_files = sorted(_CORPUS_DIR.rglob("*.md"))
+    md_files = sorted(corpus_dir.rglob("*.md"))
     if not md_files:
-        log.error("corpus_loader.no_files", corpus_dir=str(_CORPUS_DIR))
+        log.error("corpus_loader.no_files", corpus_dir=str(corpus_dir))
         sys.exit(1)
     log.info("corpus_loader.files_found", count=len(md_files))
 
@@ -403,8 +563,12 @@ def main() -> None:
         chunk["embedding"] = embedding.tolist()
     log.info("corpus_loader.embedding_done")
 
-    # Write to PostgreSQL
+    # Write to PostgreSQL. The canonical DDL is applied first so a volume
+    # created before a schema change (e.g. the ``title`` column) is migrated
+    # by the idempotent ``alter table ... add column if not exists`` statements
+    # rather than failing on the first insert.
     with psycopg.connect(pg_dsn) as conn:
+        apply_canonical_schema(conn)
         register_vector(conn)
 
         if args.wipe:
@@ -439,7 +603,7 @@ def main() -> None:
 
     # Write to Elasticsearch
     es = Elasticsearch(es_url)
-    _ensure_es_index(es)
+    ensure_es_index(es)
 
     if args.wipe:
         es.delete_by_query(

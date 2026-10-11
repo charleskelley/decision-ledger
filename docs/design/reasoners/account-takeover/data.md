@@ -67,10 +67,10 @@ the same minute (different device, different auth method) is not.
 ## Feature Vector
 
 Computed by the online feature layer (
-`reasoner/account_takeover/feature_service.py`) from the raw event and the
+`ato_reasoner/feature_service.py`) from the raw event and the
 user's sliding window state in Redis. This is an ATO Reasoner domain type — it
 lives in
-`reasoner/account_takeover/features.py`, not in `core/`.
+`ato_reasoner/features.py`, not in `core/`.
 
 ```python
 class AtoFeatureVector(BaseModel):
@@ -173,9 +173,10 @@ window.
 ## Scorer Output
 
 `ScorerOutput` is a domain type — it lives in
-`reasoner/account_takeover/scorer.py`. The assembler translates it into
-`ReasonerContext` and `FastPathRecord` before the framework sees it. `Signal`
-and `FastPathRecord` are framework types in `core/decision/routing.py`.
+`ato_reasoner/scorer/output.py`. The assembler translates it into
+`ReasonerContext` (score, feature set, SHAP contributions) and, on the fast
+path, `fast_path_rationale` before the framework sees it. The sketch below
+predates that translation and is kept for the field list.
 
 ```python
 class Signal(BaseModel):
@@ -287,7 +288,7 @@ Per DR-14, the bundle no longer has separate top-level fields for
 `raw_event` (the
 `Observation`): ML evidence in `raw_event.reasoner_context`, retrieval and
 prompt context in `raw_event.gate_context`, and fast-path provenance in
-`raw_event.fast_path_record`. This makes `DecisionBundle` domain-agnostic — it
+`raw_event.fast_path_rationale`. This makes `DecisionBundle` domain-agnostic — it
 stores an `Observation` and the framework's processing outputs, nothing
 ATO-specific.
 
@@ -390,16 +391,20 @@ enforcement — the same deterministic rule evaluation that ran at decision time
 This is what "deterministic replay" means: verifying enforcement determinism,
 not gate reproducibility.
 
+Replay is served by the framework API for any reasoner's bundle (DR-16):
+
 ```bash
-# Replay a single decision
-uv run python -m decision_ledger.audit replay --id <decision_id>
+# Fetch a stored bundle
+curl -s localhost:8000/api/v1/decisions/<decision_id>
 
-# Diff two decisions
-uv run python -m decision_ledger.audit diff --id <id_a> --id <id_b>
-
-# CI replay check (20 random bundles, byte-identical assertion)
-make test-replay
+# Replay a single decision; actions_match must be true
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
 ```
+
+The bundle store reads the row's `reasoner_id` to pick the reasoner's
+raw-event deserializer (ATO: `LoginEvent`). Replay is also covered by the
+integration suite (`tests/integration/test_bundle_store.py`) and the smoke
+tests (`make test-smoke`).
 
 ---
 

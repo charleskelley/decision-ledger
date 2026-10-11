@@ -2,20 +2,81 @@
 
 Tests are split into two groups:
 - PromptTemplate contract tests: pure Pydantic model validation, no filesystem.
-- YamlPromptRegistry tests: use the real prompts/ directory (ato-v1.yaml).
-  These tests depend on app/gate/policy/prompts/ato-v1.yaml being present.
-  They do not require Docker or any infrastructure.
+- YamlPromptRegistry tests: use small fixture YAMLs written to ``tmp_path``.
+  They do not depend on any reasoner's real prompt files, so framework
+  behavior is pinned independently of what a given reasoner ships.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
 
-from app.gate.policy.prompt_registry import YamlPromptRegistry, _extract_required_vars
+from app.gate.policy.prompt_registry import (
+    DEFAULT_SYSTEM_TEXT,
+    YamlPromptRegistry,
+    _extract_required_vars,
+)
 from core.gate.policy import PromptRegistry, PromptTemplate
 
-_PROMPTS_DIR = Path(__file__).parents[4] / "app" / "gate" / "policy" / "prompts"
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_FIXTURE_V1 = """\
+template_id: fixture-v1
+version: 1.0.0
+description: >
+  Fixture template with two domain variables and no system key.
+template: |
+  Score: {risk_score}
+  Tier: {risk_tier}
+
+  Evidence:
+  {policy_snippets}
+"""
+
+_FIXTURE_V2_WITH_SYSTEM = """\
+template_id: fixture-v2
+version: 2.0.0
+description: >
+  Fixture template that carries its own system message.
+system: >-
+  You are the fixture gate. Be terse.
+template: |
+  Score: {risk_score}
+  {policy_snippets}
+"""
+
+_FIXTURE_NO_ID = """\
+version: 0.1.0
+description: Fixture template that relies on the filename stem for its id.
+template: |
+  Hello {name}.
+  {policy_snippets}
+"""
+
+
+def _write(directory: Path, filename: str, body: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / filename
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def prompts_dir(tmp_path: Path) -> Path:
+    """A prompts directory holding fixture-v1 (no system) and fixture-v2."""
+    directory = tmp_path / "prompts"
+    _write(directory, "fixture-v1.yaml", _FIXTURE_V1)
+    _write(directory, "fixture-v2.yaml", _FIXTURE_V2_WITH_SYSTEM)
+    return directory
+
+
+@pytest.fixture
+def registry(prompts_dir: Path) -> YamlPromptRegistry:
+    return YamlPromptRegistry([prompts_dir])
 
 
 # ---------------------------------------------------------------------------
@@ -47,59 +108,138 @@ def test_extract_required_vars_deduplicates_repeated_placeholder():
 # ---------------------------------------------------------------------------
 
 
+def _template(**overrides: object) -> PromptTemplate:
+    fields: dict[str, object] = {
+        "template_id": "test-v1",
+        "version": "1.0.0",
+        "description": "Test template.",
+        "template_text": "Hello {name}.",
+        "system_text": "You are a test gate.",
+        "required_vars": frozenset({"name"}),
+    }
+    fields.update(overrides)
+    return PromptTemplate(**fields)  # type: ignore[arg-type]
+
+
 def test_prompt_template_required_vars_is_frozenset():
-    t = PromptTemplate(
-        template_id="test-v1",
-        version="1.0.0",
-        description="Test template.",
-        template_text="Hello {name}.",
-        required_vars=frozenset({"name"}),
-    )
+    t = _template()
     assert isinstance(t.required_vars, frozenset)
     assert "name" in t.required_vars
 
 
 def test_prompt_template_is_immutable():
-    t = PromptTemplate(
-        template_id="test-v1",
-        version="1.0.0",
-        description="Test.",
-        template_text="Hello {name}.",
-        required_vars=frozenset({"name"}),
-    )
+    t = _template()
     with pytest.raises(ValidationError):
         t.template_id = "modified"
 
 
+def test_prompt_template_requires_system_text():
+    with pytest.raises(ValidationError):
+        PromptTemplate(
+            template_id="test-v1",
+            version="1.0.0",
+            description="Test.",
+            template_text="Hello {name}.",
+            required_vars=frozenset({"name"}),
+        )  # type: ignore[call-arg]
+
+
 # ---------------------------------------------------------------------------
-# YamlPromptRegistry — ato-v1.yaml (real file)
+# YamlPromptRegistry — loading from fixture directories
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def registry():
-    return YamlPromptRegistry(prompts_dir=_PROMPTS_DIR)
+def test_registry_loads_every_yaml_in_directory(registry: YamlPromptRegistry):
+    assert registry.registered_ids() == ["fixture-v1", "fixture-v2"]
 
 
-def test_registry_loads_ato_v1(registry):
-    template = registry.get("ato-v1")
-    assert template.template_id == "ato-v1"
+def test_registry_reads_template_id_and_version_from_yaml(registry):
+    template = registry.get("fixture-v1")
+    assert template.template_id == "fixture-v1"
     assert template.version == "1.0.0"
 
 
-def test_registry_ato_v1_has_policy_snippets_placeholder(registry):
-    template = registry.get("ato-v1")
-    assert "{policy_snippets}" in template.template_text
+def test_registry_falls_back_to_filename_stem_for_template_id(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(directory, "stem-only-v9.yaml", _FIXTURE_NO_ID)
+    registry = YamlPromptRegistry([directory])
+    assert registry.registered_ids() == ["stem-only-v9"]
 
 
-def test_registry_ato_v1_required_vars_excludes_policy_snippets(registry):
-    template = registry.get("ato-v1")
+def test_registry_required_vars_excludes_policy_snippets(registry):
+    template = registry.get("fixture-v1")
     assert "policy_snippets" not in template.required_vars
+    assert template.required_vars == frozenset({"risk_score", "risk_tier"})
 
 
-def test_registry_ato_v1_required_vars_includes_risk_score(registry):
-    template = registry.get("ato-v1")
-    assert "risk_score" in template.required_vars
+def test_registry_uses_default_system_text_when_yaml_has_no_system_key(registry):
+    assert registry.get("fixture-v1").system_text == DEFAULT_SYSTEM_TEXT
+
+
+def test_registry_honors_explicit_system_key(registry):
+    expected = "You are the fixture gate. Be terse."
+    assert registry.get("fixture-v2").system_text == expected
+
+
+def test_default_system_text_carries_no_domain_wording():
+    lowered = DEFAULT_SYSTEM_TEXT.lower()
+    for domain_word in ("authentication", "login", "ato", "account", "fraud"):
+        assert domain_word not in lowered
+
+
+def test_registry_rejects_blank_system_key(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(
+        directory,
+        "blank-system.yaml",
+        "template_id: blank-system\nversion: 1.0.0\ndescription: x\n"
+        'system: "   "\ntemplate: |\n  {policy_snippets}\n',
+    )
+    with pytest.raises(ValueError, match="empty 'system' key"):
+        YamlPromptRegistry([directory])
+
+
+def test_registry_rejects_empty_template_content(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(
+        directory,
+        "empty.yaml",
+        'template_id: empty\nversion: 1.0.0\ndescription: x\ntemplate: "   "\n',
+    )
+    with pytest.raises(ValueError, match="empty template content"):
+        YamlPromptRegistry([directory])
+
+
+def test_registry_with_no_directories_is_empty():
+    registry = YamlPromptRegistry([])
+    assert registry.registered_ids() == []
+
+
+def test_registry_merges_templates_across_directories(tmp_path: Path):
+    dir_a = tmp_path / "reasoner-a" / "prompts"
+    dir_b = tmp_path / "reasoner-b" / "prompts"
+    _write(dir_a, "fixture-v1.yaml", _FIXTURE_V1)
+    _write(dir_b, "fixture-v2.yaml", _FIXTURE_V2_WITH_SYSTEM)
+    registry = YamlPromptRegistry([dir_a, dir_b])
+    assert registry.registered_ids() == ["fixture-v1", "fixture-v2"]
+
+
+def test_registry_rejects_same_template_id_in_two_directories(tmp_path: Path):
+    dir_a = tmp_path / "reasoner-a" / "prompts"
+    dir_b = tmp_path / "reasoner-b" / "prompts"
+    path_a = _write(dir_a, "fixture-v1.yaml", _FIXTURE_V1)
+    path_b = _write(dir_b, "renamed-but-same-id.yaml", _FIXTURE_V1)
+    with pytest.raises(ValueError, match="declared twice") as exc_info:
+        YamlPromptRegistry([dir_a, dir_b])
+    message = str(exc_info.value)
+    assert "fixture-v1" in message
+    assert str(path_a) in message
+    assert str(path_b) in message
+
+
+# ---------------------------------------------------------------------------
+# YamlPromptRegistry — lookup and validation semantics
+# ---------------------------------------------------------------------------
 
 
 def test_registry_get_raises_for_unknown_id(registry):
@@ -108,26 +248,22 @@ def test_registry_get_raises_for_unknown_id(registry):
 
 
 def test_registry_validate_context_passes_when_all_vars_present(registry):
-    template = registry.get("ato-v1")
-    complete_vars = dict.fromkeys(template.required_vars, "test_value")
-    # Should not raise
-    registry.validate_context("ato-v1", complete_vars)
+    registry.validate_context("fixture-v1", {"risk_score": "0.5", "risk_tier": "STD"})
 
 
 def test_registry_validate_context_raises_on_missing_var(registry):
-    template = registry.get("ato-v1")
-    # Provide all required vars except one
-    required = list(template.required_vars)
-    incomplete_vars = dict.fromkeys(required[1:], "value")
     with pytest.raises(ValueError, match="requires variables"):
-        registry.validate_context("ato-v1", incomplete_vars)
+        registry.validate_context("fixture-v1", {"risk_score": "0.5"})
 
 
-def test_registry_registered_ids_returns_sorted_list(registry):
+def test_registry_registered_ids_returns_sorted_list(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(directory, "zed.yaml", _FIXTURE_V1.replace("fixture-v1", "zed-v1"))
+    _write(directory, "alpha.yaml", _FIXTURE_V1.replace("fixture-v1", "alpha-v1"))
+    registry = YamlPromptRegistry([directory])
     ids = registry.registered_ids()
     assert isinstance(ids, list)
-    assert "ato-v1" in ids
-    assert ids == sorted(ids)
+    assert ids == ["alpha-v1", "zed-v1"]
 
 
 def test_registry_satisfies_prompt_registry_protocol(registry):

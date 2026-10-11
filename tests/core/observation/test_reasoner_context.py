@@ -103,13 +103,13 @@ def test_reasoner_context_inference_latency_rejects_negative():
 
 def test_reasoner_context_carries_reasoner_identity():
     context = _make_reasoner_context(
-        reasoner_id="ato-reasoner",
-        reasoner_name="ATO Reasoner",
-        model_version="xgb-v1.2.0",
+        reasoner_id="stub-reasoner",
+        reasoner_name="Stub Reasoner",
+        model_version="stub-scorer-v1.2.0",
     )
-    assert context.reasoner_id == "ato-reasoner"
-    assert context.reasoner_name == "ATO Reasoner"
-    assert context.model_version == "xgb-v1.2.0"
+    assert context.reasoner_id == "stub-reasoner"
+    assert context.reasoner_name == "Stub Reasoner"
+    assert context.model_version == "stub-scorer-v1.2.0"
 
 
 # ---------------------------------------------------------------------------

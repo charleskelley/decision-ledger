@@ -1,16 +1,15 @@
 """Framework-runtime configuration (shared infrastructure).
 
 ``FrameworkSettings`` holds configuration for resources that are shared
-across the framework runtime and any registered reasoners — Postgres,
-Redis, Elasticsearch, LLM credentials, and process-wide logging. Tenant
-separation is logical (Postgres schemas, Redis key prefixes, ES indices),
-not connection-level — multiple reasoners share one deployment of each
-resource.
+across the framework runtime and every reasoner plugin it composes —
+Postgres, Elasticsearch, LLM credentials, process-wide logging, and the
+reasoner allowlist. Tenant separation is logical (the ``reasoner_id``
+column, per-reasoner ES documents), not connection-level — multiple
+reasoners share one deployment of each resource.
 
-Per-reasoner configuration (e.g., model artifact paths, corpus versions)
-lives in that reasoner's own ``Settings`` class with a domain-specific
-env-var prefix. See ``reasoner/account_takeover/settings.py:AtoSettings``
-for the reference implementation.
+Per-reasoner configuration (model artifact paths, corpus versions, a
+reasoner's own queue or cache) lives in that reasoner's own ``Settings``
+class with a domain-specific env-var prefix, inside the reasoner's package.
 
 Values are resolved in this precedence order (Pydantic Settings default):
 
@@ -31,10 +30,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class FrameworkSettings(BaseSettings):
     """Shared-infrastructure configuration with docker-compose defaults.
 
-    Owns Postgres / Redis / Elasticsearch connection params, LLM
-    credentials, and logging knobs. These are deployment-level concerns —
-    the framework's lifespan composer constructs the corresponding clients
-    from this object and injects them into reasoner services.
+    Owns Postgres / Elasticsearch connection params, LLM credentials,
+    logging knobs, and the reasoner allowlist. These are deployment-level
+    concerns — ``app/bootstrap.py`` constructs the corresponding clients
+    from this object and hands them to each reasoner plugin.
 
     Reasoner-specific configuration must NOT be added here; create a
     per-reasoner Settings class with a domain-specific env-var prefix.
@@ -56,9 +55,6 @@ class FrameworkSettings(BaseSettings):
     postgres_password: str = "decisionledger"  # noqa: S105
     postgres_db: str = "decisionledger"
 
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-
     elasticsearch_url: str = "http://localhost:9200"
 
     openai_api_key: str = ""
@@ -66,6 +62,10 @@ class FrameworkSettings(BaseSettings):
 
     log_json: bool = True
     log_level: str = "INFO"
+
+    #: Comma-separated allowlist of ``reasoner_id`` values to compose from the
+    #: installed plugins. Blank (the default) composes every installed plugin.
+    decisionledger_reasoners: str = ""
 
     @property
     def postgres_dsn(self) -> str:

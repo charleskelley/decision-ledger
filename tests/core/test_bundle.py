@@ -38,7 +38,7 @@ def _gate_output(verdict, *, raw: str | None = None) -> PolicyGateOutput:
 
 
 def test_retrieved_snippet_construction(retrieved_snippet):
-    assert retrieved_snippet.document_id == "NIST-800-63B"
+    assert retrieved_snippet.document_id == "STUB-POLICY-A"
     assert retrieved_snippet.relevance_score == 0.91
     assert retrieved_snippet.retrieval_path == "reranked"
 
@@ -46,11 +46,11 @@ def test_retrieved_snippet_construction(retrieved_snippet):
 def test_retrieved_snippet_rejects_negative_relevance_score():
     with pytest.raises(ValidationError):
         RetrievedSnippet(
-            document_id="NIST-800-63B",
-            title="Digital Identity Guidelines",
-            version="4.0",
-            jurisdiction="US_FEDERAL",
-            section_path="5.2.3",
+            document_id="STUB-POLICY-A",
+            title="Stub Widget Policy A",
+            version="1.0",
+            jurisdiction="REGION_A",
+            section_path="2. Calibration Review",
             text="Sample text.",
             relevance_score=-0.1,
             retrieval_path="reranked",
@@ -80,56 +80,54 @@ def test_token_cost_rejects_negative_values():
 
 
 @pytest.mark.smoke
-def test_decision_bundle_accepts_login_event_as_observation(
-    login_event,
+def test_decision_bundle_accepts_stub_event_as_observation(
+    observation,
     retrieved_snippet,
-    policy_gate_output,
+    gate_output,
     prompt_snapshot,
 ):
     bundle = DecisionBundle(
         decision_id="dec-smoke-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
-        raw_event=login_event,
+        raw_event=observation,
         idempotency_key="sha256-abc123",
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=1,
-        retrieval_query="MFA requirements for new device login",
+        retrieval_query="calibration review for thin-history widgets",
         retrieval_results=[retrieved_snippet],
         retrieval_path="reranked",
         index_version="corpus-v1.0",
         gate_input=_gate_input(prompt_snapshot),
-        gate_output=_gate_output(
-            policy_gate_output, raw='{"permitted_actions": ["ALLOW"]}'
-        ),
+        gate_output=_gate_output(gate_output, raw='{"permitted_actions": ["ALLOW"]}'),
         decision_action=DecisionAction.ALLOW,
         enforcement_rule_applied=None,
         override_log=[],
         latency_breakdown={"ingestion_ms": 1.2, "gate_ms": 420.0},
     )
     assert bundle.decision_action == DecisionAction.ALLOW
-    assert bundle.raw_event is login_event
+    assert bundle.raw_event is observation
     gate_config = bundle.raw_event.gate_context.gate_config
     assert gate_config is not None
-    assert gate_config["template_id"] == "ato-v1"
+    assert gate_config["template_id"] == "stub-v1"
     assert bundle.raw_event.fast_path_rationale is not None
     assert "FAST_PATH_ALLOW" in bundle.raw_event.fast_path_rationale
     # Subclass-typed gate contracts survive on the bundle
     assert isinstance(bundle.gate_input, PolicyGateInput)
     assert bundle.gate_input.gate_id == "policy"
     assert isinstance(bundle.gate_output, PolicyGateOutput)
-    assert bundle.gate_output.verdict is policy_gate_output
+    assert bundle.gate_output.verdict is gate_output
 
 
-def test_decision_bundle_schema_failure_shape(login_event, prompt_snapshot):
+def test_decision_bundle_schema_failure_shape(observation, prompt_snapshot):
     # gate_output is non-None; verdict is None; response_text populated.
     bundle = DecisionBundle(
         decision_id="dec-gate-fail-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
-        raw_event=login_event,
+        raw_event=observation,
         idempotency_key="sha256-abc999",
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=None,
-        retrieval_query="velocity spike new device",
+        retrieval_query="widget score above attention threshold",
         retrieval_results=[],
         retrieval_path="skipped",
         index_version="corpus-v1.0",
@@ -147,11 +145,11 @@ def test_decision_bundle_schema_failure_shape(login_event, prompt_snapshot):
     assert bundle.decision_action == DecisionAction.HOLD
 
 
-def test_decision_bundle_fast_path_has_no_gate_artifacts(login_event):
+def test_decision_bundle_fast_path_has_no_gate_artifacts(observation):
     bundle = DecisionBundle(
         decision_id="dec-fast-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
-        raw_event=login_event,
+        raw_event=observation,
         idempotency_key="sha256-fast",
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=None,
@@ -171,15 +169,15 @@ def test_decision_bundle_fast_path_has_no_gate_artifacts(login_event):
 
 
 def test_decision_bundle_is_immutable(
-    login_event,
+    observation,
     retrieved_snippet,
-    policy_gate_output,
+    gate_output,
     prompt_snapshot,
 ):
     bundle = DecisionBundle(
         decision_id="dec-frozen-001",
         created_at=datetime(2024, 1, 15, 10, 30, 2, tzinfo=UTC),
-        raw_event=login_event,
+        raw_event=observation,
         idempotency_key="sha256-frozen",
         ingestion_timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         queue_position=None,
@@ -188,7 +186,7 @@ def test_decision_bundle_is_immutable(
         retrieval_path="rrf_only",
         index_version="corpus-v1.0",
         gate_input=_gate_input(prompt_snapshot),
-        gate_output=_gate_output(policy_gate_output, raw="{}"),
+        gate_output=_gate_output(gate_output, raw="{}"),
         decision_action=DecisionAction.ALLOW,
         enforcement_rule_applied=None,
         override_log=[],

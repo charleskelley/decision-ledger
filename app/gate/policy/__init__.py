@@ -1,7 +1,8 @@
 """LLM-backed policy gate — structured JSON reasoning over retrieved evidence.
 
-Constructs prompts from versioned YAML templates (under ``prompts/``),
-calls the LLM API, and validates the response against the
+Constructs prompts from versioned YAML templates (each reasoner plugin
+ships its own ``prompts/`` directory), calls the LLM API, and validates
+the response against the
 ``PolicyGateVerdict`` Pydantic schema. Schema validation failures route
 to HOLD — never to silent enforcement.
 

@@ -25,8 +25,7 @@ exercise the live pipeline.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,7 +37,9 @@ from core.eval.metrics import (
     RobustnessMetrics,
 )
 from eval.dimensions.base import DimensionRun
-from reasoner.account_takeover.events import LoginEvent
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds
@@ -53,7 +54,9 @@ _CONSERVATIVE_ACTIONS: frozenset[DecisionAction] = frozenset(
     {DecisionAction.HOLD, DecisionAction.BLOCK}
 )
 
-_DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "robustness"
+#: The reasoner's event model. Datasets are validated against the
+#: ``event_type`` its ``EvalAdapter`` supplies.
+EventT = TypeVar("EventT", bound=BaseModel)
 
 
 # ---------------------------------------------------------------------------
@@ -61,24 +64,24 @@ _DATASETS_DIR = Path(__file__).parents[1] / "datasets" / "robustness"
 # ---------------------------------------------------------------------------
 
 
-class InjectionCase(BaseModel):
+class InjectionCase(BaseModel, Generic[EventT]):
     """A clean event paired with an injection-laden variant.
 
     Attributes:
         case_id: Stable identifier.
-        clean_event: The unmodified login event.
+        clean_event: The unmodified event.
         injected_event: Same event with adversarial content embedded in
-            user-controllable fields (e.g., user_agent).
+            user-controllable free-text fields.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     case_id: str
-    clean_event: LoginEvent
-    injected_event: LoginEvent
+    clean_event: EventT
+    injected_event: EventT
 
 
-class SchemaViolationCase(BaseModel):
+class SchemaViolationCase(BaseModel, Generic[EventT]):
     """A case where the gate output is forced to fail schema validation.
 
     Attributes:
@@ -91,35 +94,34 @@ class SchemaViolationCase(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
 
     case_id: str
-    event: LoginEvent
+    event: EventT
     expected_action: DecisionAction = DecisionAction.HOLD
 
 
-class NovelPatternCase(BaseModel):
+class NovelPatternCase(BaseModel, Generic[EventT]):
     """An adversarial pattern outside the training distribution.
 
     Attributes:
         case_id: Stable identifier.
         event: The novel-pattern event (the trigger).
         priming_events: Optional baseline events driven before ``event`` to
-            seed Redis history for the same account_id. Without priming,
-            the trigger event is a first-event-of-account and the
-            FeatureService produces neutral novelty signals (=0.5),
-            scoring the event well below the gate-routing band. With
-            priming, novelty signals correctly fire when the trigger
-            event introduces a new IP/device/geo against the baseline.
+            build per-entity history for the same entity. Without priming,
+            the trigger is the entity's first event and a reasoner that
+            scores novelty against history typically sees neutral signals,
+            landing well below the gate-routing band. With priming, the
+            trigger's departure from the established baseline is visible.
         description: Free-form notes (what makes this novel).
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     case_id: str
-    event: LoginEvent
-    priming_events: list[LoginEvent] = Field(default_factory=list)
+    event: EventT
+    priming_events: list[EventT] = Field(default_factory=list)
     description: str = ""
 
 
-class FallbackCase(BaseModel):
+class FallbackCase(BaseModel, Generic[EventT]):
     """A case exercising a specific fallback path (retrieval failure, etc.).
 
     Attributes:
@@ -138,34 +140,80 @@ class FallbackCase(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
 
     case_id: str
-    event: LoginEvent
-    priming_events: list[LoginEvent] = Field(default_factory=list)
+    event: EventT
+    priming_events: list[EventT] = Field(default_factory=list)
     fallback_kind: str
     expected_action: DecisionAction = DecisionAction.HOLD
 
 
-def load_injection_cases(path: Path) -> list[InjectionCase]:
-    """Parse a YAML injection-cases file."""
+def _load_cases(path: Path, model: type[BaseModel]) -> list[Any]:
+    """Validate every entry of a YAML file's top-level ``cases:`` list.
+
+    Uses ``strict=False`` so YAML primitive strings (enum names, ISO
+    timestamps) coerce into the strict-mode models.
+    """
     raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return [InjectionCase.model_validate(c, strict=False) for c in raw["cases"]]
+    return [model.model_validate(c, strict=False) for c in raw["cases"]]
 
 
-def load_schema_violation_cases(path: Path) -> list[SchemaViolationCase]:
-    """Parse a YAML schema-violation cases file."""
-    raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return [SchemaViolationCase.model_validate(c, strict=False) for c in raw["cases"]]
+def load_injection_cases(
+    path: Path, *, event_type: type[EventT]
+) -> list[InjectionCase[EventT]]:
+    """Parse a YAML injection-cases file.
+
+    Args:
+        path: YAML file with a top-level ``cases:`` list.
+        event_type: The reasoner's event model.
+
+    Returns:
+        Validated injection cases.
+    """
+    return _load_cases(path, InjectionCase[event_type])
 
 
-def load_novel_pattern_cases(path: Path) -> list[NovelPatternCase]:
-    """Parse a YAML novel-pattern cases file."""
-    raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return [NovelPatternCase.model_validate(c, strict=False) for c in raw["cases"]]
+def load_schema_violation_cases(
+    path: Path, *, event_type: type[EventT]
+) -> list[SchemaViolationCase[EventT]]:
+    """Parse a YAML schema-violation cases file.
+
+    Args:
+        path: YAML file with a top-level ``cases:`` list.
+        event_type: The reasoner's event model.
+
+    Returns:
+        Validated schema-violation cases.
+    """
+    return _load_cases(path, SchemaViolationCase[event_type])
 
 
-def load_fallback_cases(path: Path) -> list[FallbackCase]:
-    """Parse a YAML fallback cases file."""
-    raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return [FallbackCase.model_validate(c, strict=False) for c in raw["cases"]]
+def load_novel_pattern_cases(
+    path: Path, *, event_type: type[EventT]
+) -> list[NovelPatternCase[EventT]]:
+    """Parse a YAML novel-pattern cases file.
+
+    Args:
+        path: YAML file with a top-level ``cases:`` list.
+        event_type: The reasoner's event model.
+
+    Returns:
+        Validated novel-pattern cases.
+    """
+    return _load_cases(path, NovelPatternCase[event_type])
+
+
+def load_fallback_cases(
+    path: Path, *, event_type: type[EventT]
+) -> list[FallbackCase[EventT]]:
+    """Parse a YAML fallback cases file.
+
+    Args:
+        path: YAML file with a top-level ``cases:`` list.
+        event_type: The reasoner's event model.
+
+    Returns:
+        Validated fallback cases.
+    """
+    return _load_cases(path, FallbackCase[event_type])
 
 
 # ---------------------------------------------------------------------------
@@ -186,17 +234,18 @@ def is_conservative(action: DecisionAction) -> bool:
 class RobustnessDriver(Protocol):
     """SDK-agnostic driver for the robustness sub-checks.
 
-    The MVP implementation goes through the live pipeline (same path as
-    ``app/main.py:create_decision``) with controlled overrides for schema
-    violation, fallback simulation, etc. Test stubs satisfy this protocol
-    for unit tests.
+    A reasoner's eval driver goes through its live pipeline (the same path
+    as its decision endpoint → ``app/decide.py:execute_decision``) with
+    controlled overrides for schema violation, fallback simulation, etc.
+    Events are instances of the reasoner's event type. Test stubs satisfy
+    this protocol for unit tests.
     """
 
-    async def run_event(self, event: LoginEvent) -> DecisionAction:
+    async def run_event(self, event: Any) -> DecisionAction:
         """Run an event through the normal pipeline; return the final action."""
         ...
 
-    async def run_with_forced_schema_failure(self, event: LoginEvent) -> DecisionAction:
+    async def run_with_forced_schema_failure(self, event: Any) -> DecisionAction:
         """Force the gate to return a verdict-None bundle; return the action.
 
         The pipeline's enforcement layer should route to HOLD via the
@@ -205,7 +254,7 @@ class RobustnessDriver(Protocol):
         ...
 
     async def run_with_forced_fallback(
-        self, event: LoginEvent, *, fallback_kind: str
+        self, event: Any, *, fallback_kind: str
     ) -> DecisionAction:
         """Force a specific fallback path (retrieval/corpus/LLM error)."""
         ...
@@ -233,10 +282,10 @@ class RobustnessDimension:
         self,
         *,
         driver: RobustnessDriver,
-        injection_cases: list[InjectionCase] | None = None,
-        schema_cases: list[SchemaViolationCase] | None = None,
-        novel_cases: list[NovelPatternCase] | None = None,
-        fallback_cases: list[FallbackCase] | None = None,
+        injection_cases: list[InjectionCase[Any]] | None = None,
+        schema_cases: list[SchemaViolationCase[Any]] | None = None,
+        novel_cases: list[NovelPatternCase[Any]] | None = None,
+        fallback_cases: list[FallbackCase[Any]] | None = None,
     ) -> None:
         """Construct the dimension."""
         self._driver = driver
@@ -244,25 +293,6 @@ class RobustnessDimension:
         self._schema_cases = schema_cases or []
         self._novel_cases = novel_cases or []
         self._fallback_cases = fallback_cases or []
-
-    @classmethod
-    def from_default_datasets(cls, *, driver: RobustnessDriver) -> RobustnessDimension:
-        """Construct using the bundled robustness datasets if present."""
-
-        def _maybe(path: Path, loader):
-            return loader(path) if path.exists() else []
-
-        return cls(
-            driver=driver,
-            injection_cases=_maybe(
-                _DATASETS_DIR / "injection.yaml", load_injection_cases
-            ),
-            schema_cases=_maybe(
-                _DATASETS_DIR / "malformed.yaml", load_schema_violation_cases
-            ),
-            novel_cases=_maybe(_DATASETS_DIR / "novel.yaml", load_novel_pattern_cases),
-            fallback_cases=_maybe(_DATASETS_DIR / "fallback.yaml", load_fallback_cases),
-        )
 
     async def evaluate(self) -> DimensionRun:
         """Run all four sub-checks and assemble the dimension run."""
@@ -398,6 +428,7 @@ __all__ = [
     "THRESHOLD_INJECTION",
     "THRESHOLD_NOVEL_PATTERN",
     "THRESHOLD_SCHEMA_VIOLATION",
+    "EventT",
     "FallbackCase",
     "InjectionCase",
     "NovelPatternCase",
