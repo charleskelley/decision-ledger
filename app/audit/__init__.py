@@ -13,6 +13,7 @@ caches the output instead.
 """
 
 from app.audit.bundle import build_bundle
+from app.audit.schema import apply_canonical_schema
 from app.audit.store import BundleStore, ReplayResult
 
-__all__ = ["BundleStore", "ReplayResult", "build_bundle"]
+__all__ = ["BundleStore", "ReplayResult", "apply_canonical_schema", "build_bundle"]
