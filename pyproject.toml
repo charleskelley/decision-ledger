@@ -96,6 +96,12 @@ dev = [
 reasoners = [
     "ato-reasoner",
 ]
+# Deployment composition: the gate plugins this checkout installs (DR-28).
+# The reference policy gate is published by this root package until Phase 1b
+# moves it into its own member (see [project.entry-points] below).
+gates = [
+    "decisionledger-gate-rules",
+]
 docs = [
     # --- Documentation ---
     "mkdocs>=1.6,<2",
@@ -113,21 +119,30 @@ Repository = "https://github.com/charleskelley/decision-ledger"
 Documentation = "https://charleskelley.github.io/decision-ledger/"
 Issues = "https://github.com/charleskelley/decision-ledger/issues"
 
+# Interim (DR-28, Phase 1a): the reference policy gate still lives in
+# app/gate/policy, so the framework package publishes it through the same
+# plugin protocol every gate uses. Phase 1b moves the gate into
+# gates/policy_rag/ and this entry point with it; tests/test_framework_boundary.py
+# allows exactly this one entry.
+[project.entry-points."decisionledger.gates"]
+policy = "app.gate.policy.plugin:PLUGIN"
+
 # =============================================================================
-# uv workspace — reasoner plugins are members under reasoners/*
+# uv workspace — reasoner plugins under reasoners/*, gate plugins under gates/*
 # =============================================================================
 # Reasoners declare their own `decisionledger.reasoners` and
-# `decisionledger.eval_adapters` entry points in their member pyproject; this
-# root package declares none.
+# `decisionledger.eval_adapters` entry points, and gates their own
+# `decisionledger.gates` entry point, in their member pyproject.
 
 [tool.uv]
-default-groups = ["dev", "reasoners"]
+default-groups = ["dev", "reasoners", "gates"]
 
 [tool.uv.workspace]
-members = ["reasoners/*"]
+members = ["reasoners/*", "gates/*"]
 
 [tool.uv.sources]
 ato-reasoner = { workspace = true }
+decisionledger-gate-rules = { workspace = true }
 
 # =============================================================================
 # Hatch (build configuration)
@@ -210,9 +225,9 @@ fixture-parentheses = false
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 # `reasoners/**/src`, not `reasoners/*/src`: pyright 1.1.408 silently matches
-# nothing for a single-star directory glob. ato_reasoner itself resolves via
-# the editable install, so no extraPaths are needed.
-include = ["core", "app", "eval", "reasoners/**/src"]
+# nothing for a single-star directory glob. Member packages (ato_reasoner,
+# rules_gate) resolve via the editable install, so no extraPaths are needed.
+include = ["core", "app", "eval", "reasoners/**/src", "gates/**/src"]
 exclude = ["**/__pycache__", "build", "dist", ".venv"]
 reportMissingImports = true
 reportMissingTypeStubs = false
@@ -223,7 +238,7 @@ reportUnnecessaryTypeIgnoreComment = true
 # =============================================================================
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "reasoners/*/tests"]
+testpaths = ["tests", "reasoners/*/tests", "gates/*/tests"]
 # Repo root on sys.path so ``tests._stub_reasoner.plugin:PLUGIN`` resolves
 # through ``importlib.metadata.EntryPoint.load()`` exactly like an installed
 # plugin would.
@@ -235,7 +250,7 @@ addopts = [
     "--strict-markers",            # fail on unknown markers
     "--strict-config",             # fail on config errors
     "-q",                          # quiet output by default
-    "--import-mode=importlib",     # two test trees (tests/, reasoners/*/tests) without basename clashes
+    "--import-mode=importlib",     # several test trees without basename clashes
 ]
 markers = [
     "integration: requires Docker services (see docker-compose.yml)",

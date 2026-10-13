@@ -14,6 +14,7 @@ resolution-markers = [
 members = [
     "ato-reasoner",
     "decision-ledger",
+    "decisionledger-gate-rules",
 ]
 
 [[package]]
@@ -599,7 +600,7 @@ wheels = [
 name = "decision-ledger"
 version = "0.1.0"
 source = { editable = "." }
-default-groups = ["dev", "reasoners"]
+default-groups = ["dev", "gates", "reasoners"]
 dependencies = [
     { name = "anthropic" },
     { name = "elasticsearch" },
@@ -639,6 +640,9 @@ docs = [
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
     { name = "ruff" },
+]
+gates = [
+    { name = "decisionledger-gate-rules" },
 ]
 reasoners = [
     { name = "ato-reasoner" },
@@ -685,7 +689,29 @@ docs = [
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.27,<1" },
     { name = "ruff", specifier = ">=0.5,<1" },
 ]
+gates = [{ name = "decisionledger-gate-rules", editable = "gates/rules" }]
 reasoners = [{ name = "ato-reasoner", editable = "reasoners/account_takeover" }]
+
+[[package]]
+name = "decisionledger-gate-rules"
+version = "0.1.0"
+source = { editable = "gates/rules" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "structlog", specifier = ">=24.1,<25" },
+]
 
 [[package]]
 name = "decorator"
