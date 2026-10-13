@@ -36,6 +36,7 @@ import yaml
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.generator.factory import EventFactory
 from ato_reasoner.generator.loader import load_scenario
+from core.gate.policy import PolicyGateExtra, PolicyGateSnapshot
 
 # Scenarios to drive — each maps to one captured fixture. Choose scenarios
 # the scorer routes to the gate (not fast-path); ALLOW/CHALLENGE/HOLD/BLOCK
@@ -77,18 +78,23 @@ def _bundle_to_case(scenario_id: str, bundle) -> dict | None:
     """Translate a DecisionBundle into a faithfulness case dict.
 
     Returns None when the bundle has no usable verdict (fast-path bundles,
-    schema-validation failures). The caller skips those.
+    schema-validation failures). The caller skips those. The rationale and
+    citations come from the policy gate's ``extra`` and the retrieved
+    contexts from its ``evidence_snapshot`` (DR-28).
     """
-    if bundle.gate_output is None or bundle.gate_output.verdict is None:
+    gate_output = bundle.gate_output
+    if gate_output is None or gate_output.verdict is None:
         return None
-    verdict = bundle.gate_output.verdict
-    rationale = getattr(verdict, "rationale", None)
-    citations = getattr(verdict, "citations", None) or []
-    if rationale is None:
+    extra = PolicyGateExtra.model_validate(gate_output.extra, strict=False)
+    if extra.rationale is None:
         return None
+    rationale = extra.rationale
+    snapshot = PolicyGateSnapshot.model_validate(
+        gate_output.evidence_snapshot, strict=False
+    )
 
-    contexts = [s.text for s in bundle.retrieval_results]
-    cited_snippets = [c.snippet for c in citations]
+    contexts = [s.text for s in snapshot.retrieval_results]
+    cited_snippets = [c.snippet for c in extra.citations]
 
     return {
         "case_id": f"f-cap-{scenario_id}",

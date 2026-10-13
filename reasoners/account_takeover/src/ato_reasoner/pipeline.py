@@ -1,15 +1,17 @@
 """ATO domain pipeline — wraps framework execute_decision with domain steps.
 
 ``run_ato_decision()`` runs the ATO-specific portion of the pipeline against
-a single ``LoginEvent``: feature computation, scoring, query rendering, and
-observation assembly. It then delegates to
-``app.decide.execute_decision()`` (framework half) which handles retrieval,
-the policy gate, enforcement, bundle assembly, and persistence.
+a single ``LoginEvent``: feature computation, scoring, and observation
+assembly (which renders the policy gate's retrieval query into the gate
+context). It then delegates to ``app.decide.execute_decision()`` (framework
+half), which dispatches to the gate the observation names (the policy gate
+runs retrieval and the LLM call itself), enforces, and assembles and
+persists the bundle.
 
 This split keeps the framework domain-agnostic — ``app/decide.py`` does not
-import anything from ``reasoner.*``.
+import anything from ``ato_reasoner``.
 
-Async (DR-23): the single ``await`` point is the policy gate call inside
+Async (DR-23): the single ``await`` point is the gate call inside
 ``execute_decision``.
 """
 
@@ -21,7 +23,6 @@ from typing import TYPE_CHECKING
 from app.decide import execute_decision
 from app.monitoring import duration_ms
 from ato_reasoner.assembler import build_observation
-from ato_reasoner.retrieval_query import build_ato_query
 
 if TYPE_CHECKING:
     from app.plugin import FrameworkServices
@@ -41,16 +42,17 @@ async def run_ato_decision(
     """Run the full ATO decision pipeline for a single ``LoginEvent``.
 
     Domain steps (features → score → assemble) execute first, then the
-    framework's ``execute_decision()`` finishes the flow (retrieval → gate
-    → enforce → bundle → persist).
+    framework's ``execute_decision()`` finishes the flow (gate → enforce →
+    bundle → persist).
 
     Args:
         event: Validated login event to evaluate.
         services: ATO's own services — feature service, scorer, and the
             corpus version stamp.
-        framework: Shared framework services — retriever, gate, store, and
-            the reasoner registry (which must contain ``ATO_REGISTRATION``
-            or intake validation rejects the observation).
+        framework: Shared framework services — the composed gates, the
+            store, and the reasoner registry (which must contain
+            ``ATO_REGISTRATION`` or intake validation rejects the
+            observation).
         decision_id: Optional explicit UUID; auto-generated when omitted.
         idempotency_key: Optional explicit key; defaults to
             ``event.event_id``.
@@ -60,8 +62,8 @@ async def run_ato_decision(
 
     Side effects:
         - Updates Redis sliding-window features for the event's entity.
-        - Reads from pgvector + Elasticsearch when routed to the gate.
-        - Calls the LLM API when routed to the gate.
+        - When routed to the gate, the policy gate reads pgvector +
+          Elasticsearch and calls the LLM API.
         - Writes the bundle to Postgres.
     """
     upstream_latency: dict[str, float] = {}
@@ -76,24 +78,20 @@ async def run_ato_decision(
     scorer_output = services.scorer.score(features)
     upstream_latency["scorer_ms"] = duration_ms(t0)
 
-    # --- Query construction (domain-owned; framework retriever takes a string) ---
-    query = build_ato_query(event, scorer_output)
-
-    # --- Assembly ---
-    observation = build_observation(event, features, scorer_output)
+    # --- Assembly (includes the domain-owned retrieval query) ---
+    observation = build_observation(
+        event, features, scorer_output, corpus_version=services.corpus_version
+    )
 
     # --- Hand off to framework ---
-    # The cast is for pyright: LoginEvent satisfies the Observation protocol
+    # The ignore is for pyright: LoginEvent satisfies the Observation protocol
     # structurally, but its computed_field entity_id and Literal entity_type
     # confuse Pyright's invariance checks.
     return await execute_decision(
         observation=observation,  # type: ignore[arg-type]
-        query=query,
-        retriever=framework.retriever,
-        gate=framework.gate,
+        gates=framework.gates,
         store=framework.store,
         registry=framework.registry,
-        corpus_version=services.corpus_version,
         ingestion_timestamp=event.timestamp,
         upstream_latency=upstream_latency,
         decision_id=decision_id,

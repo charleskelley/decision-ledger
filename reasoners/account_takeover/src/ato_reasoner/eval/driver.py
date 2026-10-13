@@ -13,7 +13,10 @@ protocols) structurally — Python duck-typing, no inheritance. The ATO
 
 The robustness ``run_with_forced_*`` paths use private fault-injection
 wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
-the production failure surfaces without polluting production code.
+the production failure surfaces without polluting production code. Both
+build a policy gate around the wrapper and swap it into the framework's
+composed gates for one decision; the retriever and prompt registry they
+reuse come from the composed policy gate itself (DR-28: the gate owns them).
 """
 
 from __future__ import annotations
@@ -26,14 +29,16 @@ import structlog
 
 from app.bootstrap import build_framework_services
 from app.enforcement.resolver import resolve as resolve_enforcement
-from app.gate.policy import PolicyGate
+from app.gate.policy import POLICY_GATE_ID, PolicyGate
+from app.gates import ComposedGate
 from app.settings import FrameworkSettings
 from ato_reasoner.assembler import build_observation
 from ato_reasoner.pipeline import run_ato_decision
 from ato_reasoner.plugin import PLUGIN, AtoPlugin, resolve_model_path
 from ato_reasoner.registry import ATO_REGISTRATION
-from ato_reasoner.retrieval_query import build_ato_query
 from core.actions import DecisionAction
+from core.gate import GateOutput
+from core.gate.policy import PolicyGateExtra
 from core.routes import GateRoute
 from eval.dimensions.consistency import PipelineRunResult
 
@@ -151,12 +156,36 @@ class PipelineDriver:
 
     @property
     def retriever(self) -> PolicyRetriever:
-        """Expose the internal retriever for direct dimension consumption.
+        """Expose the policy gate's retriever for direct dimension consumption.
 
         Lets the harness's ``RetrievalDimension`` reuse the same open
         connections instead of opening a parallel set.
         """
-        return self._framework.retriever
+        return self._policy_gate().retriever
+
+    def _policy_gate(self) -> PolicyGate:
+        """Return the composed policy gate this reasoner routes to.
+
+        Raises:
+            RuntimeError: The deployment does not compose the policy gate.
+        """
+        composed = self._framework.gates.get(POLICY_GATE_ID)
+        if composed is None or not isinstance(composed.gate, PolicyGate):
+            msg = (
+                f"The {POLICY_GATE_ID!r} gate is not composed in this deployment; "
+                "the ATO eval driver needs it."
+            )
+            raise RuntimeError(msg)
+        return composed.gate
+
+    def _framework_with_policy_gate(self, gate: PolicyGate) -> FrameworkServices:
+        """Return the framework services with ``gate`` swapped in as the policy gate."""
+        composed = self._framework.gates[POLICY_GATE_ID]
+        gates = {
+            **self._framework.gates,
+            POLICY_GATE_ID: ComposedGate(plugin=composed.plugin, gate=gate),
+        }
+        return dataclasses.replace(self._framework, gates=gates)
 
     # ------------------------------------------------------------------
     # PipelineDriver protocol (consumed by ConsistencyDimension)
@@ -190,15 +219,15 @@ class PipelineDriver:
             msg = "PipelineDriver.run() requires at least one event"
             raise ValueError(msg)
 
-        verdict = (
-            last_bundle.gate_output.verdict
-            if last_bundle.gate_output is not None
+        gate_output = last_bundle.gate_output
+        verdict = gate_output.verdict if gate_output is not None else None
+        # The rationale is the policy gate's own output (its PolicyGateExtra
+        # in ``gate_output.extra``), not a field of the universal verdict.
+        rationale = (
+            PolicyGateExtra.model_validate(gate_output.extra, strict=False).rationale
+            if gate_output is not None and verdict is not None
             else None
         )
-        # rationale lives on PolicyGateVerdict (subclass), not on the
-        # universal GateVerdict — getattr gracefully handles future gate
-        # types that don't carry one.
-        rationale = getattr(verdict, "rationale", None) if verdict is not None else None
         return PipelineRunResult(
             decision_action=last_bundle.decision_action,
             confidence=verdict.confidence if verdict is not None else None,
@@ -226,42 +255,28 @@ class PipelineDriver:
 
         Tests the DR-19 Tier 1 contract directly: when the gate produces no
         valid verdict, ``app.enforcement.resolver.resolve`` must route to
-        ``HOLD``. Bypasses the LLM entirely — deterministic, free, and
+        ``HOLD``. Bypasses the gate entirely — deterministic, free, and
         decoupled from ``LLMClient`` internals.
 
         The path runs the full domain pipeline up to (but not including) the
-        gate call: feature compute → score → assemble observation → retrieve
-        snippets. The resulting ``Observation`` is forced onto the gate route
-        so the schema-failure tier is reachable; ``resolve`` is then invoked
-        with ``gate_output=None``.
+        gate call: feature compute → score → assemble observation. The
+        resulting ``Observation`` is forced onto the gate route so the
+        schema-failure tier is reachable; ``resolve`` is then invoked with a
+        policy-gate ``GateOutput`` whose ``verdict`` is ``None``.
         """
         features = self._services.feature_svc.compute(event)
         scorer_output = self._services.scorer.score(features)
-        obs = build_observation(event, features, scorer_output)
+        obs = build_observation(
+            event, features, scorer_output, corpus_version=self._services.corpus_version
+        )
         # Force gate-path so Tier 1 (schema failure) is reachable; fast-path
         # observations short-circuit before tier evaluation.
         if obs.route != GateRoute.ROUTE_TO_GATE:
             obs = obs.model_copy(update={"route": GateRoute.ROUTE_TO_GATE})
 
-        query = build_ato_query(event, scorer_output)
-        gate_config = obs.gate_context.gate_config or {}
-        reasoner_id = (
-            obs.reasoner_context.reasoner_id
-            if obs.reasoner_context is not None
-            else None
-        )
-        snippets, _ = self._framework.retriever.retrieve(
-            query=query,
-            k=5,
-            reasoner_id=reasoner_id,
-            jurisdictions=gate_config.get("jurisdictions"),
-            risk_tier=gate_config.get("risk_tier"),
-        )
-
         enforcement = resolve_enforcement(
             obs,  # type: ignore[arg-type]
-            None,
-            snippets=snippets,
+            GateOutput(gate_id=POLICY_GATE_ID, deterministic=False, verdict=None),
             decision_id=str(uuid.uuid4()),
             registration=self._framework.registry.get(ATO_REGISTRATION.reasoner_id),
         )
@@ -277,15 +292,15 @@ class PipelineDriver:
 
         ``fallback_kind`` selects the failure surface to exercise:
 
-        - ``"llm_5xx"`` — wraps the gate's ``LLMClient`` so
-          ``complete_structured`` raises. ``PolicyGate`` catches the
+        - ``"llm_5xx"`` — swaps in a policy gate whose ``LLMClient``
+          raises from ``complete_structured``. ``PolicyGate`` catches the
           exception and emits ``verdict=None``; enforcement Tier 1 routes
           to ``HOLD``. Exercises the full production failure path.
-        - ``"retrieval_error"`` — wraps the retriever so ``retrieve()``
-          raises. ``run_ato_decision`` does not yet catch retrieval
-          exceptions; the driver translates the raised error into the
-          contract's expected action (``HOLD``) so the test reflects what
-          the system *should* do.
+        - ``"retrieval_error"`` — swaps in a policy gate whose retriever
+          raises from ``retrieve()``. Neither the gate nor
+          ``run_ato_decision`` catches retrieval exceptions yet; the driver
+          translates the raised error into the contract's expected action
+          (``HOLD``) so the test reflects what the system *should* do.
         - ``"corpus_mismatch"`` — runs the pipeline with a deliberately
           stale ``corpus_version`` label. Currently a labeling-only
           mismatch (does not alter pipeline behavior); the driver returns
@@ -304,27 +319,31 @@ class PipelineDriver:
             ValueError: ``fallback_kind`` is not recognized.
         """
         if fallback_kind == "llm_5xx":
+            policy_gate = self._policy_gate()
             faulty_gate = PolicyGate(
                 client=_Raising5xxLLMClient(),
-                prompt_registry=self._framework.prompt_registry,
+                prompt_registry=policy_gate.prompt_registry,
+                retriever=policy_gate.retriever,
             )
             bundle = await run_ato_decision(
                 event=event,
                 services=self._services,
-                framework=dataclasses.replace(self._framework, gate=faulty_gate),
+                framework=self._framework_with_policy_gate(faulty_gate),
             )
             return bundle.decision_action
 
         if fallback_kind == "retrieval_error":
-            faulty_retriever = _RaisingRetriever(self._framework.retriever)
+            policy_gate = self._policy_gate()
+            faulty_gate = PolicyGate(
+                client=policy_gate.client,
+                prompt_registry=policy_gate.prompt_registry,
+                retriever=_RaisingRetriever(policy_gate.retriever),  # type: ignore[arg-type]
+            )
             try:
                 bundle = await run_ato_decision(
                     event=event,
                     services=self._services,
-                    framework=dataclasses.replace(
-                        self._framework,
-                        retriever=faulty_retriever,
-                    ),
+                    framework=self._framework_with_policy_gate(faulty_gate),
                 )
                 return bundle.decision_action
             except _RetrievalForcedError:
@@ -364,7 +383,7 @@ class _RaisingRetriever:
     """Retriever wrapper that raises from ``retrieve()`` for fallback tests.
 
     Raises a sentinel error from ``retrieve``. Duck-types as
-    ``PolicyRetriever`` for ``run_ato_decision``.
+    ``PolicyRetriever`` for the policy gate.
     """
 
     def __init__(self, original: PolicyRetriever) -> None:
