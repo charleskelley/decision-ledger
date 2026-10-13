@@ -2,13 +2,20 @@
 
 BundleStore writes complete DecisionBundles to PostgreSQL and replays them
 by re-executing the deterministic enforcement layer against cached
-intermediate states. The LLM is never re-invoked during replay.
+intermediate states. No gate — LLM or otherwise — is ever re-invoked during
+replay, and replay reads no corpus: the stored ``GateOutput`` (verdict,
+``deterministic`` flag, evidence) is all enforcement needs.
 
 DecisionLedger is the framework-owned audit ledger; reasoners are tenants
 distinguished by ``reasoner_id``. The store is reasoner-agnostic — it types
 on the ``Observation`` protocol and pulls ``reasoner_id`` from
 ``observation.reasoner_context``. Reasoner-specific business keys (account_id,
 content_id, …) live inside the JSONB bundle, never as scalar columns.
+
+The store is gate-agnostic too (DR-28): it persists the universal
+``GateInput`` / ``GateOutput`` and the gate's opaque ``evidence_snapshot`` /
+``extra`` verbatim and deserializes them as the universal types. It never
+imports a gate's own models.
 
 Schema is defined canonically in ``app/audit/sql/02_tables.sql`` under the
 ``decisionledger`` schema and applied at startup by
@@ -29,11 +36,11 @@ from typing import TYPE_CHECKING
 import structlog
 
 from app.enforcement.resolver import resolve
+from core.actions import DecisionAction
 from core.bundle import DecisionBundle
 from core.enforcement import EnforcementDecision  # noqa: TC001 (runtime use)
 from core.exceptions import UnregisteredReasonerError
-from core.gate.policy import PolicyGateInput, PolicyGateOutput
-from core.snippet import RetrievedSnippet
+from core.gate import GateInput, GateOutput
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -100,12 +107,6 @@ def _serialize_bundle(bundle: DecisionBundle) -> str:
         "idempotency_key": bundle.idempotency_key,
         "ingestion_timestamp": bundle.ingestion_timestamp.isoformat(),
         "queue_position": bundle.queue_position,
-        "retrieval_query": bundle.retrieval_query,
-        "retrieval_results": [
-            s.model_dump(mode="json") for s in bundle.retrieval_results
-        ],
-        "retrieval_path": bundle.retrieval_path,
-        "index_version": bundle.index_version,
         "gate_input": (
             bundle.gate_input.model_dump(mode="json")
             if bundle.gate_input is not None
@@ -132,8 +133,11 @@ def _deserialize_bundle(
 
     Parses each nested Pydantic layer explicitly and uses ``strict=False``
     to coerce StrEnum values from their string representations (e.g.,
-    ``"ALLOW"`` → ``DecisionAction.ALLOW``). The reasoner-specific
-    ``raw_event`` is reconstituted via the injected factory.
+    ``"ALLOW"`` → ``DecisionAction.ALLOW``) and JSON arrays into tuples and
+    frozensets. The reasoner-specific ``raw_event`` is reconstituted via the
+    injected factory. The gate layer always deserializes as the universal
+    ``GateInput`` / ``GateOutput``: a gate's ``evidence_snapshot`` and
+    ``extra`` come back as the JSON they were stored as (DR-28).
 
     Args:
         bundle_json: JSON string from the ``bundle`` JSONB column.
@@ -148,27 +152,16 @@ def _deserialize_bundle(
 
     raw_event = raw_event_factory(data["raw_event"])
 
-    retrieval_results = [
-        RetrievedSnippet.model_validate(r, strict=False)
-        for r in data["retrieval_results"]
-    ]
-
-    # Discriminated-union deserialization: pick concrete subclass by gate_id.
-    # MVP closes over a single variant (PolicyGateInput / PolicyGateOutput);
-    # a second gate kind would be added here as a Union arm.
     gate_input = (
-        PolicyGateInput.model_validate(data["gate_input"], strict=False)
+        GateInput.model_validate(data["gate_input"], strict=False)
         if data.get("gate_input") is not None
         else None
     )
-
     gate_output = (
-        PolicyGateOutput.model_validate(data["gate_output"], strict=False)
+        GateOutput.model_validate(data["gate_output"], strict=False)
         if data.get("gate_output") is not None
         else None
     )
-
-    from core.actions import DecisionAction
 
     return DecisionBundle(
         decision_id=data["decision_id"],
@@ -177,10 +170,6 @@ def _deserialize_bundle(
         idempotency_key=data["idempotency_key"],
         ingestion_timestamp=datetime.fromisoformat(data["ingestion_timestamp"]),
         queue_position=data.get("queue_position"),
-        retrieval_query=data["retrieval_query"],
-        retrieval_results=retrieval_results,
-        retrieval_path=data["retrieval_path"],
-        index_version=data["index_version"],
         gate_input=gate_input,
         gate_output=gate_output,
         decision_action=DecisionAction(data["decision_action"]),
@@ -364,10 +353,11 @@ class BundleStore:
     def replay(self, decision_id: str) -> ReplayResult:
         """Replay a decision by re-running enforcement against cached states.
 
-        Loads the stored bundle, extracts the cached ``policy_gate_output``
-        and ``retrieval_results``, and re-executes ``enforcement.resolve()``
-        deterministically with the registration the ``reasoner_id`` column
-        resolves to in the registry. The LLM is **never** re-invoked.
+        Loads the stored bundle and re-executes ``enforcement.resolve()``
+        against its ``raw_event`` and cached ``gate_output`` (verdict,
+        ``deterministic`` flag, evidence) with the registration the
+        ``reasoner_id`` column resolves to in the registry. The gate is
+        **never** re-invoked and no corpus is read.
 
         The replay result is written to ``replay_logs`` for audit purposes.
 
@@ -385,11 +375,9 @@ class BundleStore:
         reasoner_id, bundle = self._load_row(decision_id)
         registration = self._registry.get(reasoner_id)
 
-        verdict = bundle.gate_output.verdict if bundle.gate_output is not None else None
         replay_decision = resolve(
             bundle.raw_event,
-            verdict,
-            snippets=list(bundle.retrieval_results),
+            bundle.gate_output,
             decision_id=decision_id,
             registration=registration,
         )

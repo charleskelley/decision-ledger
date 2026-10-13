@@ -16,6 +16,11 @@ answers ``SELECT reasoner_id, bundle`` the way psycopg would:
   ``resolve()``, and a fast-path bundle replays to a match with no diff.
 - ``replay()`` of a row whose reasoner has a factory but no registration
   raises ``UnregisteredReasonerError`` and writes no replay log.
+- A gate-path bundle round-trips with its universal ``GateOutput`` intact —
+  verdict, ``deterministic`` flag, evidence, and the gate's opaque
+  ``evidence_snapshot`` / ``extra`` — and replays to a match from the stored
+  output alone (no gate call, no corpus), including a deterministic gate's
+  tier skips and an evidence-driven jurisdiction HOLD (DR-28).
 
 The event type is the stub reasoner's ``StubEvent`` (root ``tests/conftest.py``
 ``observation`` fixture); the two fake tenants ``alpha`` and ``beta`` are the
@@ -24,6 +29,7 @@ same shape re-attributed, which is all the store cares about.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -34,8 +40,11 @@ from app.audit.bundle import build_bundle
 from app.audit.store import BundleStore
 from app.enforcement.resolver import resolve
 from app.reasoner_registry import StaticReasonerRegistry
+from core.actions import DecisionAction
 from core.exceptions import UnregisteredReasonerError
+from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
 from core.observation import ReasonerRegistration
+from core.routes import GateRoute
 from tests._stub_reasoner.events import StubEvent
 
 if TYPE_CHECKING:
@@ -118,6 +127,10 @@ def _registration(reasoner_id: str, *, novel_feature: str) -> ReasonerRegistrati
         allowed_prompt_template_ids=frozenset({"stub-v1"}),
         allowed_jurisdictions=frozenset({"REGION_A", "REGION_B"}),
         novel_entity_feature=novel_feature,
+        jurisdiction_conflict_groups=(
+            frozenset({"REGION_A"}),
+            frozenset({"REGION_B"}),
+        ),
     )
 
 
@@ -146,7 +159,6 @@ def _fast_path_bundle(event: Any, registration: ReasonerRegistration) -> Decisio
     decision = resolve(
         event,
         None,
-        snippets=[],
         decision_id=_DECISION_ID,
         registration=registration,
     )
@@ -156,6 +168,62 @@ def _fast_path_bundle(event: Any, registration: ReasonerRegistration) -> Decisio
         idempotency_key="idem-store-001",
         ingestion_timestamp=_INGESTION_TS,
         enforcement_decision=decision,
+    )
+
+
+def _gate_path_bundle(
+    event: Any, registration: ReasonerRegistration, output: GateOutput
+) -> DecisionBundle:
+    """Build the bundle the framework would persist after a gate ran."""
+    routed = event.model_copy(
+        update={"route": GateRoute.ROUTE_TO_GATE, "fast_path_rationale": None}
+    )
+    decision = resolve(
+        routed, output, decision_id=_DECISION_ID, registration=registration
+    )
+    return build_bundle(
+        decision_id=_DECISION_ID,
+        obs=routed,
+        idempotency_key="idem-store-002",
+        ingestion_timestamp=_INGESTION_TS,
+        gate_input=GateInput(gate_id=output.gate_id),
+        gate_output=output,
+        enforcement_decision=decision,
+        latency_breakdown={"gate_ms": 12.5},
+    )
+
+
+def _gate_output(
+    *,
+    gate_id: str = "policy",
+    deterministic: bool = False,
+    actions: tuple[DecisionAction, ...] = (DecisionAction.CHALLENGE,),
+    confidence: float = 0.9,
+    jurisdictions: tuple[str, ...] = ("REGION_A",),
+) -> GateOutput:
+    return GateOutput(
+        gate_id=gate_id,
+        deterministic=deterministic,
+        verdict=GateVerdict(
+            gate_id=gate_id,
+            permitted_actions=list(actions),
+            required_controls=[],
+            confidence=confidence,
+            escalate_to_human=False,
+            escalation_reason=None,
+        ),
+        evidence=tuple(
+            EvidenceRef(
+                source_id=f"DOC-{j}", locator="2.1", jurisdictions=frozenset({j})
+            )
+            for j in jurisdictions
+        ),
+        evidence_snapshot={
+            "retrieval_query": "calibration review",
+            "retrieval_results": [{"document_id": "DOC-A", "relevance_score": 0.91}],
+            "nested": {"empty": [], "flag": True, "none": None},
+        },
+        extra={"rationale": "Thin history.", "token_cost": {"total_tokens": 1552}},
     )
 
 
@@ -334,3 +402,147 @@ def test_replay_raises_unregistered_reasoner_when_registry_lacks_the_row_id(
 
     assert exc_info.value.reasoner_id == "alpha"
     assert conn.replay_logs == []
+
+
+# ---------------------------------------------------------------------------
+# Gate path — the universal GateOutput round-trips and replays on its own
+# ---------------------------------------------------------------------------
+
+
+def test_a_gate_path_bundle_round_trips_with_its_gate_output_intact(observation):
+    conn = _FakeConn()
+    store = _store(
+        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
+    )
+    written = _gate_path_bundle(
+        _event_for(observation, "alpha"), ALPHA_REG, _gate_output()
+    )
+    store.write(written)
+
+    loaded = store.load(_DECISION_ID)
+
+    assert type(loaded.gate_output) is GateOutput
+    assert loaded.gate_output == written.gate_output
+    assert loaded.gate_input == GateInput(gate_id="policy")
+    assert loaded.decision_action == written.decision_action
+    assert loaded.override_log == written.override_log
+    assert loaded.latency_breakdown == {"gate_ms": 12.5}
+
+
+def test_the_stored_json_has_no_bundle_level_retrieval_layer(observation):
+    conn = _FakeConn()
+    store = _store(conn, factories={}, registrations=[ALPHA_REG])
+    store.write(
+        _gate_path_bundle(_event_for(observation, "alpha"), ALPHA_REG, _gate_output())
+    )
+
+    _, bundle_json = conn.rows[_DECISION_ID]
+    stored = json.loads(bundle_json)
+    assert not set(stored) & {
+        "retrieval_query",
+        "retrieval_results",
+        "retrieval_path",
+        "index_version",
+    }
+    # The gate's own record lives inside its opaque snapshot instead.
+    assert stored["gate_output"]["evidence_snapshot"]["retrieval_query"] == (
+        "calibration review"
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "expected_action", "expected_rule"),
+    [
+        (_gate_output(), DecisionAction.CHALLENGE, None),
+        (
+            _gate_output(jurisdictions=("REGION_A", "REGION_B")),
+            DecisionAction.HOLD,
+            "tier5_jurisdiction_conflict",
+        ),
+        (
+            _gate_output(
+                gate_id="rules",
+                deterministic=True,
+                actions=(DecisionAction.BLOCK,),
+                confidence=0.0,
+                jurisdictions=(),
+            ),
+            DecisionAction.BLOCK,
+            None,
+        ),
+        (
+            _gate_output(actions=(DecisionAction.BLOCK,), confidence=0.2),
+            DecisionAction.HOLD,
+            "tier4_low_confidence",
+        ),
+    ],
+    ids=["accepted", "evidence-conflict", "deterministic-skips", "low-confidence"],
+)
+def test_a_gate_path_bundle_replays_to_a_match_from_the_stored_output(
+    observation, output, expected_action, expected_rule
+):
+    conn = _FakeConn()
+    store = _store(
+        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
+    )
+    written = _gate_path_bundle(_event_for(observation, "alpha"), ALPHA_REG, output)
+    assert written.decision_action == expected_action
+    assert written.enforcement_rule_applied == expected_rule
+    store.write(written)
+
+    result = store.replay(_DECISION_ID)
+
+    assert result.actions_match is True
+    assert result.replayed_action == expected_action.value
+    assert result.enforcement_decision.override_log == written.override_log
+    _decision_id, _replayed_at, is_matched, diff = conn.replay_logs[0]
+    assert is_matched is True
+    assert diff is None
+
+
+def test_a_replay_that_disagrees_logs_a_mismatch_with_the_diff(observation):
+    # Simulate a stored decision that enforcement no longer reproduces (the
+    # stored action was CHALLENGE; re-running enforcement yields HOLD).
+    conn = _FakeConn()
+    store = _store(
+        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
+    )
+    store.write(
+        _gate_path_bundle(
+            _event_for(observation, "alpha"),
+            ALPHA_REG,
+            _gate_output(actions=(DecisionAction.HOLD,)),
+        )
+    )
+    reasoner_id, bundle_json = conn.rows[_DECISION_ID]
+    tampered = json.loads(bundle_json)
+    tampered["decision_action"] = "CHALLENGE"
+    conn.rows[_DECISION_ID] = (reasoner_id, json.dumps(tampered))
+
+    result = store.replay(_DECISION_ID)
+
+    assert result.actions_match is False
+    assert (result.original_action, result.replayed_action) == ("CHALLENGE", "HOLD")
+    _decision_id, _replayed_at, is_matched, diff = conn.replay_logs[0]
+    assert is_matched is False
+    assert json.loads(diff) == {
+        "original_action": "CHALLENGE",
+        "replayed_action": "HOLD",
+        "override_log": list(result.enforcement_decision.override_log),
+    }
+
+
+def test_write_refuses_a_bundle_without_a_reasoner_context(observation):
+    conn = _FakeConn()
+    store = _store(conn, factories={}, registrations=[ALPHA_REG])
+    bundle = _fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG)
+    orphan = bundle.model_copy(
+        update={
+            "raw_event": bundle.raw_event.model_copy(update={"reasoner_context": None})
+        }
+    )
+
+    with pytest.raises(ValueError, match="reasoner_context"):
+        store.write(orphan)
+
+    assert conn.rows == {}

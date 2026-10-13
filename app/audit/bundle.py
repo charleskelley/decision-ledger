@@ -16,10 +16,9 @@ from typing import TYPE_CHECKING
 from core.bundle import DecisionBundle
 
 if TYPE_CHECKING:
-    from app.gate.policy.gate import GateResult
     from core.enforcement import EnforcementDecision
+    from core.gate import GateInput, GateOutput
     from core.observation import Observation
-    from core.snippet import RetrievedSnippet
 
 
 def build_bundle(
@@ -29,11 +28,8 @@ def build_bundle(
     idempotency_key: str,
     ingestion_timestamp: datetime,
     queue_position: int | None = None,
-    retrieval_query: str = "",
-    retrieval_results: list[RetrievedSnippet] | None = None,
-    retrieval_path: str = "skipped",
-    index_version: str = "unknown",
-    gate_result: GateResult | None = None,
+    gate_input: GateInput | None = None,
+    gate_output: GateOutput | None = None,
     enforcement_decision: EnforcementDecision,
     latency_breakdown: dict[str, float] | None = None,
 ) -> DecisionBundle:
@@ -43,16 +39,12 @@ def build_bundle(
     fully resolved before calling. The result is the canonical audit record
     for the decision.
 
-    On the fast path, ``gate_result`` is ``None``: the gate was not invoked
-    and ``gate_input`` / ``gate_output`` on the bundle are both ``None``. On
-    the gate path, ``gate_result.gate_input`` and ``gate_result.gate_output``
-    are passed straight through to the bundle.
-
-    Gate-specific artifact versions (model version, corpus version, prompt
-    template metadata, token cost, etc.) live inside the typed
-    ``GateInput`` / ``GateOutput`` contracts on the bundle, populated by the
-    gate at invocation time. The framework does not interpret them; per-gate
-    docstrings enumerate what each gate writes.
+    On the fast path no gate ran: ``gate_input`` and ``gate_output`` are both
+    ``None``. On the gate path both are populated: ``gate_input`` is the
+    framework's record of the invocation and ``gate_output`` the universal
+    ``GateOutput`` the gate returned, whose opaque ``evidence_snapshot`` and
+    ``extra`` carry everything gate-specific (DR-28). The framework does not
+    interpret them; each gate documents what it writes.
 
     Args:
         decision_id: UUID string for this decision record.
@@ -60,15 +52,9 @@ def build_bundle(
         idempotency_key: SHA-256 dedup key computed at ingestion.
         ingestion_timestamp: UTC timestamp when the event was pulled from queue.
         queue_position: Stream sequence number from the event queue, if available.
-        retrieval_query: Query sent to the retriever. Empty string on the
-            fast path.
-        retrieval_results: Corpus chunks returned by the retriever. Defaults
-            to empty list when not provided (fast path or retrieval skipped).
-        retrieval_path: Free-form label indicating which retrieval path was
-            taken (e.g., ``"reranked"``, ``"rrf_only"``, ``"skipped"``).
-        index_version: Version of the retrieval index used.
-        gate_result: Full output of the gate evaluation, or ``None`` on the
-            fast path (gate was not invoked).
+        gate_input: The framework's record of the gate invocation, or
+            ``None`` when no gate ran.
+        gate_output: The gate's ``GateOutput``, or ``None`` when no gate ran.
         enforcement_decision: Resolved decision action with override log from
             the enforcement layer.
         latency_breakdown: Per-component duration in milliseconds. Defaults to
@@ -76,16 +62,20 @@ def build_bundle(
 
     Returns:
         Fully assembled ``DecisionBundle``.
+
+    Raises:
+        ValueError: Exactly one of ``gate_input`` and ``gate_output`` is set;
+            a gate invocation records both or neither.
     """
-    snippets: list[RetrievedSnippet] = (
-        retrieval_results if retrieval_results is not None else []
-    )
+    if (gate_input is None) != (gate_output is None):
+        msg = (
+            "gate_input and gate_output must both be set (a gate ran) or both be "
+            "None (no gate ran)"
+        )
+        raise ValueError(msg)
     latency: dict[str, float] = (
         latency_breakdown if latency_breakdown is not None else {}
     )
-
-    gate_input = gate_result.gate_input if gate_result is not None else None
-    gate_output = gate_result.gate_output if gate_result is not None else None
 
     return DecisionBundle(
         decision_id=decision_id,
@@ -94,10 +84,6 @@ def build_bundle(
         idempotency_key=idempotency_key,
         ingestion_timestamp=ingestion_timestamp,
         queue_position=queue_position,
-        retrieval_query=retrieval_query,
-        retrieval_results=snippets,
-        retrieval_path=retrieval_path,
-        index_version=index_version,
         gate_input=gate_input,
         gate_output=gate_output,
         decision_action=enforcement_decision.decision_action,
