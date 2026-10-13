@@ -1,14 +1,14 @@
-"""PolicyGateVerdict — LLM-backed policy gate's verdict subclass.
+"""PolicyGateVerdict — the policy gate's LLM structured-output schema.
 
-Extends the universal ``GateVerdict`` with explanation artifacts the
-policy gate produces: natural-language rationale grounded in retrieved
-policy snippets, plus typed citations linking each claim to its source.
+The policy gate asks the LLM for this shape: the universal ``GateVerdict``
+fields plus a natural-language ``rationale`` grounded in the retrieved
+policy snippets and typed ``citations`` linking claims to sources.
 
-The framework's enforcement layer reads only the universal fields
-(``permitted_actions``, ``required_controls``, ``confidence``,
-``escalate_to_human``, ``escalation_reason``). ``rationale`` and
-``citations`` are audit-side artifacts surfaced to humans reviewing
-HOLDs, debugging schema-failures, or tracing decisions.
+It is the gate's private schema, not a bundle type. The gate converts it into
+the universal ``GateVerdict`` (what enforcement reads and the bundle stores)
+and records ``rationale`` and ``citations`` in its ``PolicyGateExtra``
+(``GateOutput.extra``), per DR-28. Audit consumers — reviewers of HOLDs,
+faithfulness and citation evaluation — read them from there.
 """
 
 from __future__ import annotations
@@ -22,16 +22,10 @@ from core.gate.verdict import GateVerdict
 
 
 class PolicyGateVerdict(GateVerdict):
-    """Verdict from the LLM-backed policy gate.
-
-    Adds rationale and citations to the universal verdict. The framework
-    does not interpret these fields; they are surfaced to audit consumers.
+    """Structured output the policy gate requests from the LLM.
 
     Attributes:
-        gate_id: Discriminator value ``"policy"``. Pydantic ``Literal``
-            narrowing of the universal ``GateVerdict.gate_id`` field —
-            drives discriminated-union deserialization at the bundle
-            layer (``app/audit/store.py``).
+        gate_id: Always ``"policy"`` — the policy gate's identifier.
         rationale: Plain-language reasoning grounded in retrieved policy
             evidence. Maximum 200 words by convention.
         citations: Policy citations supporting the rationale. Each
@@ -45,3 +39,19 @@ class PolicyGateVerdict(GateVerdict):
     gate_id: Literal["policy"] = "policy"
     rationale: str
     citations: list[Citation]
+
+    def universal(self) -> GateVerdict:
+        """Return the universal ``GateVerdict`` part of this verdict.
+
+        Returns:
+            A plain ``GateVerdict`` with the same enforcement fields — the
+            only verdict type the bundle stores.
+        """
+        return GateVerdict(
+            gate_id=self.gate_id,
+            permitted_actions=list(self.permitted_actions),
+            required_controls=list(self.required_controls),
+            confidence=self.confidence,
+            escalate_to_human=self.escalate_to_human,
+            escalation_reason=self.escalation_reason,
+        )

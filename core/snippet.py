@@ -17,7 +17,7 @@ LLM-policy-gate-specific.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class RetrievedSnippet(BaseModel):
@@ -40,7 +40,10 @@ class RetrievedSnippet(BaseModel):
             (e.g., "3.2 — Scope").
         text: Chunk text as retrieved (verbatim from the corpus).
         relevance_score: Score produced by the retriever for this chunk
-            against the query, in the retriever's own scoring scheme.
+            against the query, in the retriever's own scoring scheme: cosine
+            similarity on the dense leg, the RRF score after fusion, the raw
+            cross-encoder logit after reranking. Unbounded — similarities
+            and logits are negative for poor matches.
         retrieval_path: Free-form label indicating which retrieval path
             produced this chunk. Reference implementation uses values
             like ``"reranked"`` or ``"rrf_only"``; the framework does
@@ -55,5 +58,5 @@ class RetrievedSnippet(BaseModel):
     jurisdiction: str
     section_path: str
     text: str
-    relevance_score: float = Field(ge=0.0)
+    relevance_score: float
     retrieval_path: str

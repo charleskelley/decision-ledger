@@ -58,3 +58,29 @@ def test_policy_gate_verdict_inherits_universal_validation():
     # confidence > 1.0 should fail per the universal GateVerdict constraint
     with pytest.raises(ValidationError):
         _make(confidence=1.5)
+
+
+def test_universal_returns_a_plain_gate_verdict_with_the_enforcement_fields():
+    # The bundle stores only the universal verdict (DR-28); the rationale and
+    # citations travel in the gate's extra instead.
+    verdict = _make(
+        permitted_actions=[DecisionAction.CHALLENGE, DecisionAction.HOLD],
+        required_controls=["step_up_mfa"],
+        confidence=0.7,
+        escalate_to_human=True,
+        escalation_reason="Needs review.",
+    )
+
+    universal = verdict.universal()
+
+    assert type(universal) is GateVerdict
+    assert universal.gate_id == "policy"
+    assert universal.permitted_actions == [
+        DecisionAction.CHALLENGE,
+        DecisionAction.HOLD,
+    ]
+    assert universal.required_controls == ["step_up_mfa"]
+    assert universal.confidence == 0.7
+    assert universal.escalate_to_human is True
+    assert universal.escalation_reason == "Needs review."
+    assert not hasattr(universal, "rationale")

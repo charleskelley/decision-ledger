@@ -66,7 +66,7 @@ from app.audit.schema import apply_canonical_schema
 from app.plugins import discover_plugins
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
-from core.gate import PolicyDocument
+from core.gate.policy.corpus import PolicyDocument
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

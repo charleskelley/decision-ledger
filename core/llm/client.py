@@ -52,9 +52,9 @@ class CompletionResult(BaseModel, Generic[T]):
     """Wrap a parsed structured completion with its operational metadata.
 
     ``parsed`` is the validated Pydantic instance the caller asked for.
-    ``usage`` and ``latency_ms`` are universal observability fields the
-    audit layer (``PolicyGateOutput.token_cost``) and the eval layer
-    (cost tracking, latency telemetry) both record.
+    ``usage`` and ``latency_ms`` are universal observability fields that an
+    LLM-backed gate records in its ``GateOutput.extra`` and the eval layer
+    (cost tracking, latency telemetry) records for judges.
 
     Attributes:
         parsed: Pydantic-validated response; type narrowed by the
@@ -74,8 +74,8 @@ class LLMClient(Protocol):
     """SDK-agnostic structured-completion contract.
 
     Implementations live in ``app/llm/`` (one per provider). Consumers
-    (``PolicyGate``, ``llm_judge``) accept this protocol; they never
-    import an LLM SDK directly. Swapping providers is a constructor
+    (the LLM-backed policy gate, ``llm_judge``) accept this protocol; they
+    never import an LLM SDK directly. Swapping providers is a constructor
     swap at the wiring edge.
 
     All implementations are async — LLM calls are I/O-bound and the

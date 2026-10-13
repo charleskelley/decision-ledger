@@ -12,9 +12,10 @@ satisfies. The reference implementation (YamlPromptRegistry in
 ``app/gate/policy/``) loads templates from YAML files at startup.
 
 Design rationale:
-    ``prompt_template_id`` in ``GateContext`` is the audit key — recorded
-    in every ``DecisionBundle`` (under ``gate_input.prompt_template_id``)
-    and queryable across the decision log. The policy gate resolves the
+    ``template_id`` in ``GateContext.gate_config`` is the audit key —
+    recorded in every ``DecisionBundle`` the policy gate decides (under
+    ``gate_output.evidence_snapshot["prompt_template_id"]``) and queryable
+    across the decision log. The policy gate resolves the
     full template content from the registry at render time. Keeping the
     template out of ``GateContext`` enforces immutability: a reasoner
     cannot inject arbitrary prompt content per-observation.
@@ -30,16 +31,17 @@ from pydantic import BaseModel, ConfigDict
 class PromptSnapshot(BaseModel):
     """Point-in-time snapshot of the prompt template used for a gate invocation.
 
-    Stored verbatim inside ``PolicyGateInput`` to make the bundle
-    self-contained for audit and replay. Because ``PromptTemplate`` is
+    Stored verbatim inside the policy gate's ``PolicyGateSnapshot`` (its
+    ``GateOutput.evidence_snapshot``) to make the bundle self-contained for
+    audit and replay. Because ``PromptTemplate`` is
     immutable once deployed this snapshot will match the live registry
     entry, but storing it here removes the dependency on registry
     availability for historical audit and compliance review.
 
-    Combined with ``raw_event.gate_context.template_vars`` and
-    ``retrieval_results`` (both already in the bundle), an auditor can
-    fully verify that ``rendered_prompt`` was correctly constructed from
-    the template without querying the registry.
+    Combined with the snapshot's ``template_vars`` and
+    ``retrieval_results``, an auditor can fully verify that
+    ``rendered_prompt`` was correctly constructed from the template without
+    querying the registry.
 
     Attributes:
         template_id: Stable template identifier (e.g., ``"example-v1"``).
@@ -77,7 +79,7 @@ class PromptTemplate(BaseModel):
 
     Attributes:
         template_id: Stable identifier used as the audit key in
-            ``PolicyGateInput.prompt_template_id`` and as the lookup key
+            ``PolicyGateSnapshot.prompt_template_id`` and as the lookup key
             in ``PromptRegistry``. Matches the filename stem of the source
             YAML (e.g., ``"example-v1"`` from ``example-v1.yaml``). Immutable once
             deployed — changing this value requires a new file.

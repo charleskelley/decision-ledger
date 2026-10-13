@@ -1,27 +1,28 @@
-"""PolicyGateOutput — LLM-backed policy gate's output subclass.
+"""Policy gate output extension — ``TokenCost`` and ``PolicyGateExtra``.
 
-Extends the universal ``GateOutput`` with LLM-specific output artifacts:
-the raw text response (forensic evidence when validation fails) and
-token-cost billing data. Discriminator value: ``gate_id="policy"``.
+The LLM-backed policy gate returns the universal ``GateOutput`` (DR-28).
+Everything it produces beyond the universal verdict goes into
+``GateOutput.extra`` as a ``PolicyGateExtra`` serialized with
+``model_dump(mode="json")``: the model's rationale and citations, the raw
+response text, token cost, the gate's internal retrieval latency, and, when
+there is no verdict, which stage failed. The framework stores it verbatim and
+never reads it; readers that know this gate re-validate it with
+``PolicyGateExtra.model_validate(...)``.
 
-How ``verdict`` and ``response_text`` interact — three concrete cases:
+How ``verdict`` and the extension interact — three concrete cases:
 
-  * ``verdict`` is a ``PolicyGateVerdict``, ``response_text`` is the raw
-    LLM string: the gate ran and the LLM's JSON validated.
-    ``response_text`` enables forensic round-tripping of the model's
-    output.
-  * ``verdict is None``, ``response_text`` is the raw LLM string: the
-    gate ran but the JSON failed schema validation. ``response_text``
-    carries the emitted artifact for HOLD-review investigation;
-    enforcement routes via the schema-failure tier (DR-19).
-  * ``verdict is None``, ``response_text is None``: the LLM call itself
-    errored (network failure, timeout, refusal) before producing any
-    text. ``token_cost`` is also ``None`` in this case.
+  * ``verdict`` present: the LLM's structured output validated.
+    ``rationale`` and ``citations`` carry its explanation and
+    ``token_cost`` is populated.
+  * ``verdict is None``, ``failure`` is ``"missing_retrieval_query"`` or
+    ``"render_error"``: the gate stopped before calling the LLM;
+    ``token_cost`` is ``None``.
+  * ``verdict is None``, ``failure == "llm_error"``: the LLM call errored or
+    its output failed schema validation at the SDK boundary;
+    ``token_cost`` is ``None``.
 
-The bundle-level *gate not invoked* case (``bundle.gate_output is None``,
-e.g. fast path) is a bundle concern, not a ``PolicyGateOutput`` state —
-this type only exists when the gate ran. See ``core/gate/output.py`` for
-the universal contract.
+Enforcement routes every ``verdict is None`` case to HOLD through the
+schema-failure tier (DR-19).
 """
 
 from __future__ import annotations
@@ -30,10 +31,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.gate.output import GateOutput
-from core.gate.policy.verdict import (
-    PolicyGateVerdict,  # noqa: TC001 (runtime Pydantic field)
-)
+from core.gate.policy.citation import Citation
+
+#: Stage at which the policy gate failed to produce a verdict.
+PolicyGateFailure = Literal["missing_retrieval_query", "render_error", "llm_error"]
 
 
 class TokenCost(BaseModel):
@@ -60,25 +61,30 @@ class TokenCost(BaseModel):
     model: str
 
 
-class PolicyGateOutput(GateOutput):
-    """Output from the LLM-backed policy gate.
+class PolicyGateExtra(BaseModel):
+    """Schema of the policy gate's ``GateOutput.extra``.
 
     Attributes:
-        gate_id: Discriminator value ``"policy"``.
-        verdict: ``PolicyGateVerdict`` (narrowed from the universal
-            ``GateVerdict``) when validation succeeded; ``None`` when the
-            LLM response failed schema validation.
-        response_text: Raw LLM string output, pre-validation. Carries the
-            forensic evidence that backs ``verdict``; populated for both
-            success and validation-failure cases. ``None`` only when the
-            LLM call itself errored before producing text.
-        token_cost: Token usage and cost. Populated when the LLM call
-            completed; ``None`` on API errors before completion.
+        rationale: The model's plain-language reasoning grounded in the
+            retrieved evidence. ``None`` when there is no verdict.
+        citations: Policy citations supporting the rationale. Empty when
+            there is no verdict or the model cited nothing.
+        response_text: Raw LLM output, pre-validation, when the client
+            surfaces it. The strict structured-output client does not, so
+            this is ``None`` in the reference deployment.
+        token_cost: Token usage and cost. ``None`` when the LLM call did not
+            complete.
+        retrieval_ms: Time the gate spent in hybrid retrieval, in
+            milliseconds (part of the bundle's ``gate_ms``).
+        failure: Stage at which the gate failed to produce a verdict;
+            ``None`` when a verdict is present.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
 
-    gate_id: Literal["policy"] = "policy"
-    verdict: PolicyGateVerdict | None
+    rationale: str | None = None
+    citations: list[Citation] = Field(default_factory=list)
     response_text: str | None = None
     token_cost: TokenCost | None = None
+    retrieval_ms: float = Field(default=0.0, ge=0.0)
+    failure: PolicyGateFailure | None = None
