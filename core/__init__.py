@@ -11,17 +11,22 @@ Top-level modules (framework output artifacts and vocabulary):
                    ``observation/`` and ``gate/`` need it; placing it in
                    either subpackage forces a cross-subpackage import.
     bundle.py:     DecisionBundle and bundle-composition types.
-    resolution.py: ResolutionAttempt — append-only resolution log surface for
-                   non-terminal decisions (CHALLENGE, HOLD).
+    gate_request.py: GateRequest — what the framework hands a gate. Lives at
+                   the root because it carries the Observation into the gate
+                   layer, and ``gate/`` never imports ``observation/``.
+    enforcement.py: EnforcementDecision — enforcement's typed output.
     exceptions.py: Framework exception types.
 
 Subpackages (self-contained functional concerns):
     observation/   Everything a domain reasoner must supply as the intake
                    contract: Observation protocol, GateContext, ReasonerContext,
                    registration contracts, and the intake validator.
-    gate/          Universal gate contracts (GateInput, GateOutput, GateVerdict)
-                   plus per-gate-kind subpackages (e.g., ``gate/policy/`` for
-                   the LLM-backed policy gate's concrete subclasses).
+    gate/          Universal gate contracts (GateInput, the open GateOutput and
+                   EvidenceRef, GateVerdict) and the predicate language, plus
+                   ``gate/policy/`` for the reference policy gate's own typed
+                   models (DR-28).
+    resolution/    ResolutionAttempt subclasses — the append-only resolution
+                   log for non-terminal decisions (CHALLENGE, HOLD).
     eval/          Evaluation dimension contracts and metric interfaces.
 
 Dependency rule: subpackages never import from top-level bundle.py.

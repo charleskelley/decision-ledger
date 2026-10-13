@@ -4,26 +4,22 @@ The domain reasoner builds a GateContext to tell the framework which gate
 should process the observation and what configuration that gate needs.
 
 Gate dispatch:
-    ``gate_id`` selects the gate implementation (e.g., ``"policy"``). The
-    framework validates this against the registration's ``allowed_gate_ids``
-    before routing.
+    ``gate_id`` selects the gate (e.g., ``"policy"``). The framework
+    validates it against the registration's ``allowed_gate_ids`` and, when
+    the observation routes to a gate, dispatches to the gate composed under
+    that id (``decisionledger.gates`` entry points, DR-28).
 
 Gate configuration:
-    ``gate_config`` is an opaque dict the framework transports without
-    interpretation. The selected gate implementation validates and extracts
-    what it needs on consumption. Well-known keys used by the reference
-    policy gate:
-
-    - ``template_id`` (``str``) — Versioned prompt template identifier,
-      used as the ``PromptRegistry`` lookup key. Validated by the framework
-      against ``allowed_prompt_template_ids`` when present.
-    - ``template_vars`` (``dict[str, str]``) — Domain-rendered substitutions
-      for template placeholders.
-    - ``jurisdictions`` (``list[str]``) — Retrieval filter for regulatory
-      jurisdiction codes. Validated by the framework against
-      ``allowed_jurisdictions`` when present.
-    - ``risk_tier`` (``str``) — Retrieval filter applied to pgvector only.
-    - ``target_model`` (``str``) — LLM model identifier hint.
+    ``gate_config`` is a dict the framework transports to the gate without
+    interpreting it. A gate that declares a ``config_model`` has the dict
+    validated against that model at intake, so a malformed configuration is
+    rejected before anything runs; a gate without one validates on
+    consumption. Each gate documents its own keys (the reference policy
+    gate's are listed in ``app/gate/policy``). Two keys are still checked
+    against the registration by convention, until the policy gate takes
+    over that validation: ``template_id`` (against
+    ``allowed_prompt_template_ids``) and ``jurisdictions`` (against
+    ``allowed_jurisdictions``).
 
 Shadow evaluation:
     GateContext is required on every Observation. Populating it on all
@@ -50,10 +46,10 @@ class GateContext(BaseModel):
         gate_id: Identifier for the gate that should process this
             observation (e.g., ``"policy"``). Validated against the
             registration's ``allowed_gate_ids``.
-        gate_config: Gate-type-specific configuration the framework
-            transports opaquely. The gate implementation validates and
-            interprets this dict. ``None`` means no gate-specific config.
-            See module docstring for well-known keys.
+        gate_config: Gate-specific configuration. Validated against the
+            gate's declared ``config_model`` at intake when it has one;
+            otherwise interpreted only by the gate. ``None`` means no
+            gate-specific config.
     """
 
     # No dedicated test file — GateContext has no custom validators or

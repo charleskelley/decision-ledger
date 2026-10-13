@@ -1,18 +1,16 @@
 """GateVerdict — universal, enforcement-consumable verdict contract.
 
-Every gate implementation produces a ``GateVerdict`` (or a subclass) that
-the framework's deterministic enforcement layer reads to produce a
-``decision_action``. Per DR-20 this contract is genuinely universal:
-fields are limited to those enforcement actually consumes.
+Every gate produces a ``GateVerdict`` that the framework's deterministic
+enforcement layer reads to produce a ``decision_action``. Per DR-20 this
+contract is genuinely universal: fields are limited to those enforcement
+actually consumes.
 
-Gate-implementation-specific explanation artifacts (LLM rationale + policy
-citations, rule-engine triggered-rule trace, ML feature contributions,
-etc.) live on per-gate-type subclasses in their own subpackage — see
-``core/gate/policy/verdict.py`` for the reference LLM policy gate's
-``PolicyGateVerdict``.
-
-Discrimination across subclasses is by ``gate_id`` (Pydantic discriminator
-narrowed to ``Literal[...]`` in each subclass).
+Gate-specific explanation artifacts (an LLM rationale and its citations, a
+rule-engine trace, model feature contributions) are not verdict fields. A
+gate records them in its ``GateOutput.extra`` / ``evidence_snapshot``
+(DR-28), and the bundle stores exactly this universal verdict. A gate may
+use a richer model internally (for example as an LLM structured-output
+schema) as long as what it returns is this base type.
 """
 
 from __future__ import annotations
@@ -25,14 +23,13 @@ from core.actions import DecisionAction
 class GateVerdict(BaseModel):
     """Universal, enforcement-consumable verdict.
 
-    Carries only the fields ``app.enforcement.resolver.resolve()`` reads.
-    Concrete gate-type subclasses (e.g., ``PolicyGateVerdict``) extend
-    with explanation artifacts the framework does not interpret.
+    Carries only the fields ``app.enforcement.resolver`` reads.
+    Explanation artifacts the framework does not interpret live in the
+    gate's ``GateOutput`` extension, not here.
 
     Attributes:
-        gate_id: Identifier of the gate that produced this verdict.
-            Subclasses narrow this to ``Literal[...]`` for Pydantic
-            discriminated-union deserialization.
+        gate_id: Identifier of the gate that produced this verdict. Equals
+            the enclosing ``GateOutput.gate_id``.
         permitted_actions: Actions the gate permits for this event.
             Enforcement selects the most conservative action from this list.
         required_controls: Controls that must be applied alongside the
