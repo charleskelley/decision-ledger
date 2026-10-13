@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-26.** The next record is DR-27.
+**Current head: DR-28.** The next record is DR-29.
 
 ### Status values
 
@@ -2208,3 +2208,196 @@ thing.
 keep shipping one reasoner's assets, the retriever would keep reading
 reasoner files, and a second reasoner would edit framework directories.
 `prompts_dir` and `corpus_dir` on the plugin keep both with their owner.
+
+---
+
+## DR-27: Positioning: decision system of record with a gating service
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Recorded with DR-28 so the record sequence has no gap. Rationale,
+> rejected-alternative detail, and cross-references land with the
+> documentation pass that closes this plan; the README and architecture
+> pages still describe the earlier framing until then.
+
+**Decision.** DecisionLedger is (a) one immutable Decision Bundle schema for
+every automated decision about a subject, (b) a subject-centric ledger with
+replay, (c) a gating service for ambiguous cases, and (d) eval-gated release
+of the artifacts that gates and reasoners depend on. Reasoners and gates are
+external to the framework. The framework ships one reference reasoner and two
+reference gates (rules, RAG) as workspace members. This supersedes the README
+"reasoners inside the framework" framing, and the "UI out of scope" line only
+insofar as a later single-pane-of-glass decision adds one.
+
+**Alternatives rejected.** Keeping the RAG gate as framework core (it is why
+the framework needs torch). "Governed runtime" positioning (the 2026 market
+filled that in).
+
+---
+
+## DR-28: Gate contract and gate plugins
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
+> open contract. Implementation notes on those records, the full rationale,
+> and cross-references land with the documentation pass that closes this
+> plan. The seam is implemented (Phase 1a, below); moving the RAG gate into
+> its own workspace member is the next phase.
+
+**Decision.**
+
+- Entry-point group `decisionledger.gates`. A `GatePlugin` publishes
+  `gate_id`, `kind` (`llm | lookup | rules`), `deterministic: bool`, an
+  optional `config_model`, its compose fragment and prompts/corpus/tables if
+  any, and `build(framework) -> Gate`. `Gate.evaluate(GateRequest) ->
+  GateOutput`.
+- `GateOutput` generalizes: typed base = `gate_id`, `verdict: GateVerdict |
+  None` (`permitted_actions`, `required_controls`, `confidence`,
+  `escalate_to_human`, `escalation_reason`), `deterministic`,
+  `evidence: tuple[EvidenceRef, ...]`, `evidence_snapshot: JsonValue`
+  (opaque, gate-owned, stored verbatim for replay), and `extra: dict` for
+  gate-specific fields. The framework stores the base and the opaque
+  extension; it never imports a gate's subclass.
+- The bundle layers `retrieval_query`, `retrieval_results`,
+  `retrieval_path`, and `index_version` move inside the RAG gate's
+  `evidence_snapshot`. Replay no longer needs any corpus.
+- Enforcement tiers split into **gate-level** (1 schema failure, 2
+  adversarial probe, 4 low confidence, 5 jurisdiction conflict), applied per
+  gate output, and **decision-level** (3 novel entity), applied once. Tiers 2
+  and 4 are skipped when `deterministic=True`; Tier 5 runs only when the
+  gate's `evidence` carries jurisdictions.
+- Gates own their infrastructure and their eval. The framework ships
+  `gates/rules/` (zero-infra, declarative predicates over
+  `reasoner_context.feature_set` / `label_value`; the default real gate) and
+  the RAG policy gate (Elasticsearch, pgvector chunks in its own schema,
+  prompt registry, corpus loader, embedder, cross-encoder, LLM adapters, and
+  the faithfulness, retrieval, and citation eval dimensions).
+  `tests/_fake_gate/` is test-only.
+- Lookup gates (do-not-contact, sanctions) are adapters to enterprise
+  systems. The framework never hosts a reference lookup table.
+
+**Alternatives rejected.** Gate pipelines with data flow between gates;
+configurable combinators; a shared `decisionledger` schema for gate tables.
+
+**Implementation (Phase 1a, the seam).**
+
+- **Contracts (`core/`).** `core/gate/output.py`: `EvidenceRef(source_id,
+  locator, jurisdictions)` and the open `GateOutput` (strict, frozen; a
+  validator ties `verdict.gate_id` to `gate_id`;
+  `evidence_jurisdictions()` is the union Tier 5 reads). `GateInput` keeps
+  only `gate_id` and becomes the framework's record that it invoked a gate.
+  `core/gate_request.py`: `GateRequest(decision_id, observation,
+  gate_context, budget_ms)`. `core/gate/predicate.py`: the closed predicate
+  language (`Compare`, `AllOf`, `AnyOf`, `Not`, discriminated by `kind`) and
+  its pure evaluator, shared with the bypass rules of DR-30.
+  `GatePluginError` and `PredicateError` join `core/exceptions.py`.
+  `core.gate` no longer re-exports the policy gate's corpus types, so
+  importing the universal contracts loads none of that gate's models.
+- **Seam (`app/`).** `app/gates.py` holds `GateKind`, the `Gate` and
+  `GatePlugin` protocols, `ComposedGate` (plugin plus built gate),
+  `discover_gates`, `build_gates` (which also rejects a gate whose
+  `evaluate` is not a coroutine function), and `close_gates` (which closes
+  every gate even if one raises). The bootstrap opens
+  Postgres, applies the DDL, builds the store and registry, then builds every
+  gate against those services; `FrameworkServices` is `settings`, `pg_conn`,
+  `store`, `registry`, `reasoners`, and a read-only `gates` map. Elasticsearch,
+  the models, the prompt registry, and the LLM client are no longer framework
+  services. `create_app(plugins, gate_plugins)` discovers gates by default.
+- **Dispatch.** `execute_decision(observation, gates, store, registry, ...)`
+  replaces the `query`, `retriever`, `gate`, and `corpus_version` parameters.
+  At intake it validates `gate_config` against the named gate's
+  `config_model` on every route, so a recorded decision always carries a
+  context its gate could evaluate for shadow evaluation. On the gate route it
+  requires the gate to be composed (`GatePluginError` otherwise), builds a
+  `GateRequest`, and rejects an output that is not exactly `GateOutput`,
+  whose verdict is not exactly `GateVerdict` or whose evidence is not
+  exactly `EvidenceRef`, that names another gate, or that misstates
+  `deterministic`. That keeps the bundle the caller receives equal to the
+  bundle the store reloads. The latency breakdown
+  records `gate_ms` for the whole gate call; there is no framework
+  `retrieval_ms`.
+- **Enforcement.** `resolve_gate_output` applies tiers 1, 2, 4, 5, 6 to one
+  output; `resolve` adds Tier 3 once and combines the two in the historical
+  tier priority: gate Tiers 1 and 2 outrank Tier 3, which outranks gate Tiers
+  4, 5, and the default, so a novel entity is still held for review whatever
+  its single gate let through or blocked (DR-6). Gate-level log lines come
+  first, then the Tier 3 line.
+- **Bundle and store.** `DecisionBundle` loses the four retrieval fields.
+  The store serializes and deserializes the universal `GateInput` /
+  `GateOutput` only and replays from the stored output.
+- **The RAG gate (interim).** It still lives in `app/gate/policy` and is
+  published by the framework package through the interim entry point
+  `policy = "app.gate.policy.plugin:PLUGIN"`, as DR-26 Phase 1 did for the
+  first reasoner. Its plugin builds everything the gate owns: a dedicated
+  autocommit Postgres connection with pgvector adapters, the Elasticsearch
+  client, the models, the retriever, the prompt registry over every composed
+  reasoner's `prompts_dir`, and the OpenAI client. The gate runs retrieval
+  itself. The reasoner supplies `retrieval_query` and `corpus_version` in
+  `gate_config`, and the gate fails closed (`verdict=None`) without a query.
+  It returns the universal verdict, one `EvidenceRef` per retrieved snippet
+  carrying that snippet's jurisdiction, a `PolicyGateSnapshot`
+  (`evidence_snapshot`: retrieval plus exact prompt), and a `PolicyGateExtra`
+  (`extra`: rationale, citations, token cost, retrieval latency, failing
+  stage). `PolicyGateInput` and `PolicyGateOutput` are gone. It declares no
+  `config_model` yet.
+- **The rules gate.** It is the workspace member `gates/rules/`
+  (distribution `decisionledger-gate-rules`, package `rules_gate`,
+  `gate_id` `rules`), installed by the root `gates` dependency group. Rule
+  sets are YAML files under `RULES_GATE_RULESETS_DIR`, each owned by one
+  `reasoner_id`. A reasoner selects one with `gate_config = {"ruleset_id":
+  ...}` (`RulesGateConfig`) and never authors rules. The verdict permits every
+  matching rule's action, or the rule set's default action when none matches.
+  An unknown rule set, a rule set owned by another reasoner, or a predicate
+  that cannot evaluate fails closed.
+- **Boundary.** `tests/test_framework_boundary.py` adds the following:
+  - Gate-member import and token scans; framework code may not import
+    anything from `tests` either.
+  - Seam scans keeping the RAG gate's internals out of the generic framework
+    modules, by name and by import. The gate's interim homes are listed
+    explicitly, the two eval files that wire its eval dimensions get per-file
+    allowances, and a guard fails when an exemption is no longer needed.
+  - An alias-aware AST check that no framework module defines or imports a
+    `GateOutput` or `GateInput` subclass.
+  - Member checks for `gates/*`.
+  - The root package may declare only the interim `decisionledger.gates`
+    entry.
+- **Pre-existing defect fixed on the way.** The reranker writes raw
+  cross-encoder logits into `RetrievedSnippet.relevance_score`, and the dense
+  leg writes cosine similarities; both go negative for poor matches. The field
+  required `>= 0`, so the old store failed to reload most reranked gate-path
+  bundles: 48 of 62 in the local ledger carried a negative score. The
+  constraint is dropped and the field documented as unbounded.
+
+**Judgment calls (Phase 1a).**
+
+- `GateRequest` lives at `core/gate_request.py`, not `core/gate/request.py`:
+  DR-11 forbids `core/gate/` from importing `core/observation/`, and the
+  request carries the `Observation`.
+- The RAG gate's evidence is the retrieved snippets, not the model's
+  citations. That keeps Tier 5's input identical to the retrieval set it read
+  before; citations carry no jurisdiction.
+- The decision-level Tier 3 keeps its historical priority over the
+  gate-level tiers instead of combining by most-restrictive action. A
+  most-restrictive floor would have changed outcomes: in the local ledger
+  every gate-routed ATO decision was a novel entity, and 4 of those 39 HOLDs
+  came from a verdict permitting BLOCK. How the decision-level tier composes
+  with several gates, including whether it may hold a mandatory gate's BLOCK
+  for review, belongs to the gate-set combinator (DR-29).
+- Tier 5 is skipped when a gate's evidence carries no jurisdictions, even if
+  the verdict carries the conflict control or a conflict-worded escalation.
+  This is the one rule of this phase that changes an outcome for the RAG
+  gate, and only when retrieval returns nothing. `tests/app/test_enforcement.py`
+  pins every other combination against a transcription of the single-pass
+  resolver. The Tier 3 reason now reads "Insufficient entity history …", and
+  the Tier 1 reason drops "Policy".
+- `budget_ms` is recorded on every request (default 30 000) but not
+  enforced. Gate errors propagate as before. Fail-closed timeout and error
+  handling arrive with the gate set and combinator (DR-29).
+- Gate-path bundles written before Phase 1a do not deserialize into the new
+  shape: their `gate_output` lacks `deterministic`. Fast-path bundles still
+  load and replay. As with DR-18 to DR-20, `docker compose down -v` is the
+  migration path, and a `schema_version` column (with a 409 for old bundles)
+  arrives with bundle v2.
