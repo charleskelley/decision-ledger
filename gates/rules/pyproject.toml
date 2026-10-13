@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# decisionledger-gate-rules — the zero-infrastructure rules gate (DR-28)
+# =============================================================================
+#
+# A uv workspace member. The framework (`decision-ledger`) never depends on
+# this package; deployment composition lives in the root `gates` dependency
+# group. Discovery happens through the entry point below, whose name must
+# equal the plugin's `gate_id`.
+
+[project]
+name = "decisionledger-gate-rules"
+version = "0.1.0"
+description = "Declarative rules gate for DecisionLedger: predicates over a reasoner's evidence."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+]
+
+[project.entry-points."decisionledger.gates"]
+rules = "rules_gate.plugin:PLUGIN"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rules_gate"]
