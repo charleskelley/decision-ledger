@@ -1,11 +1,13 @@
 """Framework-runtime configuration (shared infrastructure).
 
 ``FrameworkSettings`` holds configuration for resources that are shared
-across the framework runtime and every reasoner plugin it composes —
-Postgres, Elasticsearch, LLM credentials, process-wide logging, and the
-reasoner allowlist. Tenant separation is logical (the ``reasoner_id``
-column, per-reasoner ES documents), not connection-level — multiple
-reasoners share one deployment of each resource.
+across the framework runtime and every plugin it composes — Postgres (the
+audit ledger), process-wide logging, and the reasoner allowlist — plus, until
+the reference policy gate moves into its own workspace member with its own
+settings (Phase 1b), that gate's search-index URL (``ELASTICSEARCH_URL``) and
+LLM credentials, which its plugin reads from here. Tenant separation is
+logical (the ``reasoner_id`` column, per-reasoner index documents), not
+connection-level — multiple reasoners share one deployment of each resource.
 
 Per-reasoner configuration (model artifact paths, corpus versions, a
 reasoner's own queue or cache) lives in that reasoner's own ``Settings``
@@ -30,10 +32,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class FrameworkSettings(BaseSettings):
     """Shared-infrastructure configuration with docker-compose defaults.
 
-    Owns Postgres / Elasticsearch connection params, LLM credentials,
-    logging knobs, and the reasoner allowlist. These are deployment-level
-    concerns — ``app/bootstrap.py`` constructs the corresponding clients
-    from this object and hands them to each reasoner plugin.
+    Owns the Postgres connection params, logging knobs, and the reasoner
+    allowlist — ``app/bootstrap.py`` opens the framework's Postgres
+    connection from them — plus the interim policy gate's search-index URL
+    and LLM credentials, which that gate's plugin reads when it builds its
+    own clients.
 
     Reasoner-specific configuration must NOT be added here; create a
     per-reasoner Settings class with a domain-specific env-var prefix.

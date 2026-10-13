@@ -1,9 +1,9 @@
 """Shared fixtures for the framework test suite — built on the stub reasoner.
 
-Every fixture here is either framework-generic (gate verdicts, citations,
-snippets, prompt snapshots, token costs) or typed on the stub reasoner under
-``tests/_stub_reasoner``. Nothing in this file imports a real reasoner, so a
-``core/`` or ``app/`` test can never depend on ATO by accident.
+Every fixture here is either framework-generic (gate verdicts and outputs,
+citations, snippets, prompt snapshots, token costs) or typed on the stub
+reasoner under ``tests/_stub_reasoner``. Nothing in this file imports a real
+reasoner, so a ``core/`` or ``app/`` test can never depend on ATO by accident.
 
 All fixtures produce valid, fully-constructed objects. Tests that need an
 edge-case variant build one via ``model_copy(update=...)`` or construct the
@@ -22,7 +22,8 @@ import pytest
 
 from app.reasoner_registry import StaticReasonerRegistry
 from core.actions import DecisionAction
-from core.gate.policy import Citation, PolicyGateVerdict, PromptSnapshot, TokenCost
+from core.gate import EvidenceRef, GateOutput, GateVerdict
+from core.gate.policy import Citation, PromptSnapshot, TokenCost
 from core.observation import (
     AttributionSummary,
     Contribution,
@@ -156,18 +157,36 @@ def prompt_snapshot() -> PromptSnapshot:
 
 
 @pytest.fixture
-def gate_output(citation: Citation) -> PolicyGateVerdict:
-    """A confident ALLOW verdict with one citation."""
-    return PolicyGateVerdict(
+def gate_verdict() -> GateVerdict:
+    """A confident ALLOW verdict from the policy gate (universal fields only)."""
+    return GateVerdict(
+        gate_id="policy",
         permitted_actions=[DecisionAction.ALLOW],
         required_controls=[],
-        rationale=(
-            "Low widget score. No anomalous signals detected. History sufficient."
-        ),
-        citations=[citation],
         confidence=0.92,
         escalate_to_human=False,
         escalation_reason=None,
+    )
+
+
+@pytest.fixture
+def gate_output(gate_verdict: GateVerdict) -> GateOutput:
+    """A non-deterministic policy-gate output: the ALLOW verdict, one ``REGION_A``
+    evidence reference (so the jurisdiction tier runs and finds no conflict),
+    and a small opaque extension."""
+    return GateOutput(
+        gate_id="policy",
+        deterministic=False,
+        verdict=gate_verdict,
+        evidence=(
+            EvidenceRef(
+                source_id="STUB-POLICY-A",
+                locator="2. Calibration Review",
+                jurisdictions=frozenset({"REGION_A"}),
+            ),
+        ),
+        evidence_snapshot={"retrieval_query": "calibration review"},
+        extra={"rationale": "Low widget score. History sufficient."},
     )
 
 

@@ -25,9 +25,15 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from app.audit.bundle import build_bundle
 from app.audit.store import BundleStore
+from app.enforcement.resolver import resolve
 from app.main import create_app
+from core.actions import DecisionAction
 from core.exceptions import UnregisteredReasonerError
+from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
+from core.routes import GateRoute
+from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -46,14 +52,15 @@ def store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     bundle_store = MagicMock(spec=BundleStore)
     framework = MagicMock(name="framework", store=bundle_store)
     monkeypatch.setattr(
-        "app.main.build_framework_services", lambda settings, plugins: framework
+        "app.main.build_framework_services",
+        lambda settings, plugins, gate_plugins: framework,
     )
     return bundle_store
 
 
 @pytest.fixture
 def client(store: MagicMock) -> Iterator[TestClient]:
-    with TestClient(create_app(plugins=[])) as test_client:
+    with TestClient(create_app(plugins=[], gate_plugins=[])) as test_client:
         yield test_client
 
 
@@ -128,3 +135,53 @@ def test_replay_reports_the_store_result_when_dispatch_succeeds(
         "actions_match": True,
     }
     store.replay.assert_called_once_with(_DECISION_ID)
+
+
+def test_get_decision_returns_the_bundle_with_the_gates_opaque_extension(
+    client: TestClient, store: MagicMock, observation
+):
+    event = observation.model_copy(
+        update={"route": GateRoute.ROUTE_TO_GATE, "fast_path_rationale": None}
+    )
+    output = GateOutput(
+        gate_id="fake",
+        deterministic=False,
+        verdict=GateVerdict(
+            gate_id="fake",
+            permitted_actions=[DecisionAction.CHALLENGE],
+            required_controls=[],
+            confidence=0.9,
+            escalate_to_human=False,
+            escalation_reason=None,
+        ),
+        evidence=(EvidenceRef(source_id="doc", jurisdictions=frozenset({"REGION_A"})),),
+        evidence_snapshot={"retrieval_query": "q", "results": [{"score": -4.3}]},
+        extra={"rationale": "why"},
+    )
+    store.load.return_value = build_bundle(
+        decision_id=_DECISION_ID,
+        obs=event,
+        idempotency_key="idem",
+        ingestion_timestamp=event.timestamp,
+        gate_input=GateInput(gate_id="fake"),
+        gate_output=output,
+        enforcement_decision=resolve(
+            event, output, decision_id=_DECISION_ID, registration=STUB_REGISTRATION
+        ),
+    )
+
+    response = client.get(f"/api/v1/decisions/{_DECISION_ID}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["decision_action"] == "CHALLENGE"
+    assert body["gate_input"] == {"gate_id": "fake"}
+    assert body["gate_output"]["evidence_snapshot"] == {
+        "retrieval_query": "q",
+        "results": [{"score": -4.3}],
+    }
+    assert body["gate_output"]["extra"] == {"rationale": "why"}
+    assert body["gate_output"]["evidence"] == [
+        {"source_id": "doc", "locator": None, "jurisdictions": ["REGION_A"]}
+    ]
+    assert "retrieval_results" not in body

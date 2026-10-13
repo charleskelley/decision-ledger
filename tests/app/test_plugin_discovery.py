@@ -24,6 +24,8 @@ the shape an installed package declares, and composed through
   on ``app.state``, closes reasoners before the framework on shutdown,
   cleans up when a plugin fails to build, and warns when no plugin is
   composed. No infrastructure is touched.
+- ``create_app`` hands explicit gate plugins to the bootstrap unchanged and,
+  without them, composes every installed gate (``decisionledger.gates``).
 
 The multi-plugin lifecycle cases need a second, instrumented plugin; the
 small ``_FakePlugin`` below provides it (with a close-order journal). It is
@@ -57,6 +59,7 @@ from app.retrieval.corpus_loader import chunk_document, parse_document
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
 from core.observation import ReasonerRegistration
+from tests._fake_gate.plugin import FakeGatePlugin
 from tests._stub_reasoner.plugin import PLUGIN, StubServices
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
@@ -283,7 +286,7 @@ def _route_paths(app) -> set[str]:
 
 def test_create_app_mounts_stub_router_next_to_framework_routes():
     """The 'second reasoner, zero framework diff' proof: no app/ edit needed."""
-    app = create_app(plugins=[PLUGIN])
+    app = create_app(plugins=[PLUGIN], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/api/v1/stub/ping" in paths
@@ -293,7 +296,7 @@ def test_create_app_mounts_stub_router_next_to_framework_routes():
 
 
 def test_create_app_mounts_every_plugin_router():
-    app = create_app(plugins=[ALPHA, PLUGIN])
+    app = create_app(plugins=[ALPHA, PLUGIN], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/api/v1/alpha/decisions" in paths
@@ -301,7 +304,7 @@ def test_create_app_mounts_every_plugin_router():
 
 
 def test_create_app_with_no_plugins_keeps_framework_routes():
-    app = create_app(plugins=[])
+    app = create_app(plugins=[], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/health" in paths
@@ -318,12 +321,18 @@ def test_create_app_with_no_plugins_keeps_framework_routes():
 def fake_framework(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Replace ``build_framework_services`` so no infrastructure is touched.
 
-    Returns the ``FrameworkServices`` double the lifespan will receive.
+    Returns the ``FrameworkServices`` double the lifespan will receive; the
+    gate plugins the lifespan handed to the bootstrap are recorded on its
+    ``received_gate_plugins`` attribute.
     """
     framework = MagicMock(spec=FrameworkServices)
-    monkeypatch.setattr(
-        "app.main.build_framework_services", lambda settings, plugins: framework
-    )
+    framework.gates = {}
+
+    def _build(settings: Any, plugins: Any, gate_plugins: Any) -> MagicMock:
+        framework.received_gate_plugins = gate_plugins
+        return framework
+
+    monkeypatch.setattr("app.main.build_framework_services", _build)
     return framework
 
 
@@ -343,7 +352,7 @@ def journal(fake_framework: MagicMock) -> list[str]:
 def test_lifespan_builds_each_plugin_against_the_framework_services(
     fake_framework: MagicMock, journal: list[str]
 ):
-    app = create_app(plugins=[PLUGIN, ALPHA])
+    app = create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])
 
     with TestClient(app) as client:
         assert app.state.framework is fake_framework
@@ -359,7 +368,7 @@ def test_lifespan_builds_each_plugin_against_the_framework_services(
 def test_lifespan_serves_stub_routes_once_started(
     fake_framework: MagicMock, journal: list[str]
 ):
-    with TestClient(create_app(plugins=[PLUGIN])) as client:
+    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[])) as client:
         response = client.get("/api/v1/stub/ping")
 
     assert response.status_code == 200
@@ -369,7 +378,7 @@ def test_lifespan_serves_stub_routes_once_started(
 def test_shutdown_closes_reasoners_before_the_framework(
     fake_framework: MagicMock, journal: list[str]
 ):
-    with TestClient(create_app(plugins=[PLUGIN, ALPHA])):
+    with TestClient(create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])):
         assert journal == []
         assert PLUGIN.services is not None
         assert not PLUGIN.services.closed
@@ -385,7 +394,7 @@ def test_plugin_build_failure_closes_built_services_and_propagates(
     fake_framework: MagicMock, journal: list[str]
 ):
     exploding = _ExplodingPlugin("gamma-reasoner", "/api/v1/gamma")
-    app = create_app(plugins=[ALPHA, exploding])
+    app = create_app(plugins=[ALPHA, exploding], gate_plugins=[])
 
     with (
         pytest.raises(RuntimeError, match="gamma-reasoner cannot start"),
@@ -402,7 +411,7 @@ def test_plugin_build_failure_closes_built_services_and_propagates(
 def test_lifespan_with_no_plugins_warns_and_serves_framework_routes(
     fake_framework: MagicMock, caplog: pytest.LogCaptureFixture
 ):
-    app = create_app(plugins=[])
+    app = create_app(plugins=[], gate_plugins=[])
 
     with caplog.at_level(logging.WARNING), TestClient(app) as client:
         assert app.state.reasoners == {}
@@ -410,6 +419,25 @@ def test_lifespan_with_no_plugins_warns_and_serves_framework_routes(
 
     assert any("api.no_reasoners" in rec.getMessage() for rec in caplog.records)
     fake_framework.close.assert_called_once()
+
+
+def test_lifespan_hands_explicit_gate_plugins_to_the_bootstrap(
+    fake_framework: MagicMock, journal: list[str]
+):
+    gate = FakeGatePlugin("fake")
+
+    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[gate])):
+        assert fake_framework.received_gate_plugins == [gate]
+
+
+def test_create_app_without_gate_plugins_composes_every_installed_gate(
+    fake_framework: MagicMock, journal: list[str], monkeypatch: pytest.MonkeyPatch
+):
+    discovered = [FakeGatePlugin("fake")]
+    monkeypatch.setattr("app.main.discover_gates", lambda: discovered)
+
+    with TestClient(create_app(plugins=[PLUGIN])):
+        assert fake_framework.received_gate_plugins == discovered
 
 
 # ---------------------------------------------------------------------------

@@ -1,20 +1,28 @@
 """Behavioral tests for ``app.bootstrap.build_framework_services``.
 
 ``build_framework_services`` is the single place the framework wires its
-shared services from a ``FrameworkSettings`` and the composed plugins. Every
-lifespan test replaces it with a fake, so without this module the wiring
-itself — which plugin fields feed which service — has no unit coverage.
+shared services from a ``FrameworkSettings``, the composed reasoner plugins,
+and the composed gate plugins. Every lifespan test replaces it with a fake,
+so without this module the wiring itself — which plugin fields feed which
+service, and how gates are built — has no unit coverage.
 
-Infrastructure clients and models are replaced with recording fakes at the
-``app.bootstrap`` module boundary. No Postgres, Elasticsearch, model download,
-or OpenAI client is touched. What is asserted is the composition:
+The Postgres connection and the DDL step are replaced with recording fakes
+at the ``app.bootstrap`` module boundary, and gates are the scripted fakes
+from ``tests/_fake_gate``. No Postgres, Elasticsearch, model download, or LLM
+client is touched. What is asserted is the composition:
 
-- the canonical DDL is applied before pgvector adapters are registered (the
-  DDL creates the ``vector`` type that ``register_vector`` looks up);
-- the prompt registry is built from every plugin's ``prompts_dir``;
+- the canonical DDL is applied to the framework's connection, and that
+  connection is all the framework itself opens (DR-28: gates own their
+  infrastructure);
 - the bundle store receives one raw-event factory per ``reasoner_id`` and the
   registry built from the plugins' registrations;
-- two plugins shipping the same ``template_id`` fail bootstrap loudly.
+- every gate plugin is built once against the services, ``FrameworkServices``
+  exposes the composed gates read-only, and a gate sees the composed
+  reasoners but never another gate;
+- a gate that fails to build closes the gates built before it and the
+  connection, and the error propagates; a malformed gate plugin fails
+  bootstrap with ``GatePluginError``;
+- ``close()`` closes the gates, then the connection.
 """
 
 from __future__ import annotations
@@ -23,21 +31,19 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import APIRouter
 
 from app import bootstrap
 from app.audit.store import BundleStore
-from app.gate.policy.gate import PolicyGate
+from app.gates import ComposedGate
 from app.plugin import FrameworkServices
-from app.retrieval.retriever import PolicyRetriever
 from app.settings import FrameworkSettings
-from core.observation import ReasonerRegistration
+from core.exceptions import GatePluginError
+from tests._fake_gate.plugin import FakeGate, FakeGatePlugin
 from tests._stub_reasoner.plugin import PLUGIN
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from core.observation import ReasonerRegistry
 
@@ -56,39 +62,23 @@ class _RecordingStore(BundleStore):
         _RecordingStore.last_registry = registry
 
 
-class _OtherPlugin:
-    """A second plugin whose prompts directory collides with the stub's."""
+class _ExplodingGatePlugin(FakeGatePlugin):
+    """A gate plugin whose build fails at startup."""
 
-    def __init__(self, prompts_dir: Path) -> None:
-        self.registration = ReasonerRegistration(
-            reasoner_id="other-reasoner",
-            reasoner_name="Other Reasoner",
-            allowed_gate_ids=frozenset({"policy"}),
-            allowed_prompt_template_ids=frozenset({"stub-v1"}),
-            allowed_jurisdictions=frozenset({"REGION_A"}),
-        )
-        self.router = APIRouter(prefix="/api/v1/other")
-        self.prompts_dir = prompts_dir
-        self.corpus_dir = prompts_dir
-        self.raw_event_factory = dict
-
-    def build_services(self, framework: FrameworkServices) -> Any:
-        return MagicMock()
+    def build(self, framework: FrameworkServices) -> FakeGate:
+        raise RuntimeError(f"{self.gate_id} cannot start")
 
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replace every infrastructure constructor in ``app.bootstrap`` with a fake.
+    """Replace the framework's Postgres connect and DDL step with fakes.
 
-    Returns the fakes plus a shared ``calls`` journal recording the order in
-    which the DDL was applied and pgvector adapters were registered.
+    Returns the fakes plus a shared ``calls`` journal recording what the
+    bootstrap opened and applied, in order.
     """
     calls: list[str] = []
     pg_conn = MagicMock(name="pg_conn")
-    es = MagicMock(name="es")
-    embed_model = MagicMock(name="embed_model")
-    cross_encoder = MagicMock(name="cross_encoder")
-    llm_client = MagicMock(name="llm_client", model="fake-llm")
+    pg_conn.close.side_effect = lambda: calls.append("pg_conn.close")
 
     def _connect(dsn: str) -> MagicMock:
         calls.append(f"connect:{dsn}")
@@ -98,28 +88,12 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         assert conn is pg_conn
         calls.append("apply_canonical_schema")
 
-    def _register_vector(conn: Any) -> None:
-        assert conn is pg_conn
-        calls.append("register_vector")
-
     monkeypatch.setattr(bootstrap.psycopg, "connect", _connect)
     monkeypatch.setattr(bootstrap, "apply_canonical_schema", _apply_schema)
-    monkeypatch.setattr(bootstrap, "register_vector", _register_vector)
-    monkeypatch.setattr(bootstrap, "Elasticsearch", lambda url: es)
-    monkeypatch.setattr(bootstrap, "SentenceTransformer", lambda name: embed_model)
-    monkeypatch.setattr(bootstrap, "CrossEncoder", lambda name: cross_encoder)
-    monkeypatch.setattr(bootstrap, "OpenAILLMClient", lambda: llm_client)
     monkeypatch.setattr(bootstrap, "BundleStore", _RecordingStore)
     _RecordingStore.last_factories = None
     _RecordingStore.last_registry = None
-    return {
-        "calls": calls,
-        "pg_conn": pg_conn,
-        "es": es,
-        "embed_model": embed_model,
-        "cross_encoder": cross_encoder,
-        "llm_client": llm_client,
-    }
+    return {"calls": calls, "pg_conn": pg_conn}
 
 
 @pytest.fixture
@@ -138,39 +112,31 @@ def settings() -> FrameworkSettings:
 def test_bootstrap_returns_framework_services_bound_to_the_settings(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    services = bootstrap.build_framework_services(settings, [PLUGIN])
+    services = bootstrap.build_framework_services(settings, [PLUGIN], [])
 
     assert isinstance(services, FrameworkServices)
     assert services.settings is settings
     assert services.pg_conn is fakes["pg_conn"]
-    assert services.es is fakes["es"]
-    assert isinstance(services.retriever, PolicyRetriever)
-    assert isinstance(services.gate, PolicyGate)
     assert isinstance(services.store, BundleStore)
+    assert services.reasoners == (PLUGIN,)
     assert fakes["calls"][0] == f"connect:{settings.postgres_dsn}"
 
 
-def test_bootstrap_applies_canonical_schema_before_registering_pgvector(
+def test_bootstrap_opens_only_postgres_and_applies_the_canonical_ddl(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    bootstrap.build_framework_services(settings, [PLUGIN])
+    bootstrap.build_framework_services(settings, [PLUGIN], [])
 
-    order = [c for c in fakes["calls"] if not c.startswith("connect:")]
-    assert order == ["apply_canonical_schema", "register_vector"]
-
-
-def test_bootstrap_loads_prompt_registry_from_each_plugin_prompts_dir(
-    fakes: dict[str, Any], settings: FrameworkSettings
-):
-    services = bootstrap.build_framework_services(settings, [PLUGIN])
-
-    assert services.prompt_registry.registered_ids() == ["stub-v1"]
+    assert fakes["calls"] == [
+        f"connect:{settings.postgres_dsn}",
+        "apply_canonical_schema",
+    ]
 
 
 def test_bootstrap_gives_the_store_one_raw_event_factory_per_reasoner(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    bootstrap.build_framework_services(settings, [PLUGIN])
+    bootstrap.build_framework_services(settings, [PLUGIN], [])
 
     assert _RecordingStore.last_factories is not None
     assert set(_RecordingStore.last_factories) == {STUB_REGISTRATION.reasoner_id}
@@ -183,26 +149,160 @@ def test_bootstrap_gives_the_store_one_raw_event_factory_per_reasoner(
 def test_bootstrap_registry_holds_each_plugin_registration(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    services = bootstrap.build_framework_services(settings, [PLUGIN])
+    services = bootstrap.build_framework_services(settings, [PLUGIN], [])
 
     assert services.registry.get(STUB_REGISTRATION.reasoner_id) is STUB_REGISTRATION
     assert _RecordingStore.last_registry is services.registry
 
 
-def test_bootstrap_with_no_plugins_builds_an_empty_registry_and_store(
+def test_bootstrap_with_no_plugins_builds_an_empty_registry_store_and_gate_set(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    services = bootstrap.build_framework_services(settings, [])
+    services = bootstrap.build_framework_services(settings, [], [])
 
-    assert services.prompt_registry.registered_ids() == []
     assert not services.registry.is_registered(STUB_REGISTRATION.reasoner_id)
     assert _RecordingStore.last_factories == {}
+    assert dict(services.gates) == {}
 
 
-def test_bootstrap_rejects_two_plugins_shipping_the_same_template_id(
+# ---------------------------------------------------------------------------
+# Gates
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_builds_each_gate_plugin_once_and_exposes_the_composed_gates(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
-    colliding = _OtherPlugin(PLUGIN.prompts_dir)
+    fake = FakeGatePlugin("fake")
+    rules = FakeGatePlugin("fake-rules", deterministic=True)
 
-    with pytest.raises(ValueError, match="stub-v1"):
-        bootstrap.build_framework_services(settings, [PLUGIN, colliding])
+    services = bootstrap.build_framework_services(settings, [PLUGIN], [fake, rules])
+
+    assert list(services.gates) == ["fake", "fake-rules"]
+    assert len(fake.built) == 1
+    assert len(rules.built) == 1
+    composed = services.gates["fake"]
+    assert isinstance(composed, ComposedGate)
+    assert composed.plugin is fake
+    assert composed.gate is fake.built[0]
+
+
+def test_a_gate_is_built_against_the_reasoners_but_never_sees_another_gate(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    fake = FakeGatePlugin("fake")
+    rules = FakeGatePlugin("fake-rules", deterministic=True)
+
+    services = bootstrap.build_framework_services(settings, [PLUGIN], [fake, rules])
+
+    built_against = rules.built[0].framework
+    assert built_against.reasoners == (PLUGIN,)
+    assert built_against.store is services.store
+    assert dict(built_against.gates) == {}
+
+
+def test_the_composed_gate_map_is_read_only(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    services = bootstrap.build_framework_services(
+        settings, [PLUGIN], [FakeGatePlugin("fake")]
+    )
+
+    with pytest.raises(TypeError):
+        services.gates["other"] = services.gates["fake"]  # type: ignore[index]
+
+
+def test_bootstrap_discovers_installed_gate_plugins_by_default(
+    fakes: dict[str, Any], settings: FrameworkSettings, monkeypatch: pytest.MonkeyPatch
+):
+    discovered = FakeGatePlugin("fake")
+    monkeypatch.setattr(bootstrap, "discover_gates", lambda: [discovered])
+
+    services = bootstrap.build_framework_services(settings, [PLUGIN])
+
+    assert list(services.gates) == ["fake"]
+
+
+def test_a_gate_build_failure_closes_earlier_gates_and_the_connection(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    first = FakeGatePlugin("fake")
+    exploding = _ExplodingGatePlugin("fake-rules", deterministic=True)
+
+    with pytest.raises(RuntimeError, match="fake-rules cannot start"):
+        bootstrap.build_framework_services(settings, [PLUGIN], [first, exploding])
+
+    assert first.built[0].closed is True
+    assert fakes["calls"][-1] == "pg_conn.close"
+
+
+def test_a_malformed_gate_plugin_fails_bootstrap(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    unknown_kind = FakeGatePlugin("fake")
+    unknown_kind.kind = "oracle"  # type: ignore[assignment]
+
+    with pytest.raises(GatePluginError, match="unknown kind 'oracle'"):
+        bootstrap.build_framework_services(settings, [PLUGIN], [unknown_kind])
+
+    assert fakes["calls"][-1] == "pg_conn.close"
+
+
+def test_two_gate_plugins_with_one_gate_id_fail_bootstrap(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    with pytest.raises(GatePluginError, match="share this gate_id"):
+        bootstrap.build_framework_services(
+            settings, [PLUGIN], [FakeGatePlugin("fake"), FakeGatePlugin("fake")]
+        )
+
+
+class _JournalingGatePlugin(FakeGatePlugin):
+    """Builds fake gates whose close() lands in the bootstrap call journal."""
+
+    def __init__(self, gate_id: str, calls: list[str], *, fail_close: bool = False):
+        super().__init__(gate_id)
+        self._calls = calls
+        self._fail_close = fail_close
+
+    def build(self, framework: FrameworkServices) -> FakeGate:
+        gate = super().build(framework)
+        calls, fail, gate_id = self._calls, self._fail_close, self.gate_id
+
+        def _close() -> None:
+            calls.append(f"gate.close:{gate_id}")
+            if fail:
+                raise RuntimeError(f"{gate_id} close failed")
+
+        gate.close = _close  # type: ignore[method-assign]
+        return gate
+
+
+def test_close_closes_the_gates_in_reverse_order_then_the_connection(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    calls = fakes["calls"]
+    gates = [_JournalingGatePlugin("a", calls), _JournalingGatePlugin("b", calls)]
+    services = bootstrap.build_framework_services(settings, [PLUGIN], gates)
+    calls.clear()
+
+    services.close()
+
+    assert calls == ["gate.close:b", "gate.close:a", "pg_conn.close"]
+
+
+def test_close_releases_the_connection_even_when_a_gate_close_raises(
+    fakes: dict[str, Any], settings: FrameworkSettings
+):
+    calls = fakes["calls"]
+    gates = [
+        _JournalingGatePlugin("a", calls),
+        _JournalingGatePlugin("b", calls, fail_close=True),
+    ]
+    services = bootstrap.build_framework_services(settings, [PLUGIN], gates)
+    calls.clear()
+
+    with pytest.raises(RuntimeError, match="b close failed"):
+        services.close()
+
+    assert calls == ["gate.close:b", "gate.close:a", "pg_conn.close"]
