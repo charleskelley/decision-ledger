@@ -46,9 +46,10 @@ def build_framework_services(
     """Construct every shared service the framework runs on.
 
     Applies the canonical DDL to Postgres before building anything else so
-    the store, the journal, and any gate that shares the database can rely
-    on a fresh schema. Gates are built last, against the services built so
-    far; a gate that fails to build closes the gates built before it and the
+    the store and the journal can rely on a fresh schema. A gate that keeps
+    tables in the same database applies its own DDL, in its own schema, when
+    it is built. Gates are built last, against the services built so far; a
+    gate that fails to build closes the gates built before it and the
     Postgres connection, then the error propagates.
 
     Args:

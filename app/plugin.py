@@ -65,8 +65,8 @@ class FrameworkServices:
         store: Decision-bundle persistence and replay.
         registry: Registry of every reasoner this deployment composes.
         reasoners: The composed reasoner plugins, in composition order.
-            Gates read reasoner-shipped assets from them (the policy gate
-            loads each reasoner's ``prompts_dir``).
+            Gates read reasoner-shipped assets from them (a retrieving gate
+            loads each reasoner's ``prompts_dir`` and ``corpus_dir``).
         gates: Composed gates keyed by ``gate_id``. Empty while the gates
             themselves are being built: a gate never reaches another gate.
     """
@@ -109,12 +109,12 @@ class ReasonerPlugin(Protocol):
 
     Attributes:
         registration: The reasoner's ``ReasonerRegistration`` — identity,
-            allowed gates/templates/jurisdictions, and enforcement profile.
-            Its ``reasoner_id`` must equal the entry-point name.
+            allowed gates, and enforcement profile. Its ``reasoner_id`` must
+            equal the entry-point name.
         router: FastAPI router mounted by ``create_app``.
-        prompts_dir: Directory of ``*.yaml`` prompt templates the policy
+        prompts_dir: Directory of ``*.yaml`` prompt templates an LLM-backed
             gate loads for this reasoner.
-        corpus_dir: Directory of Markdown policy documents the corpus loader
+        corpus_dir: Directory of Markdown policy documents a retrieving gate
             indexes for this reasoner.
         raw_event_factory: Deserializer from the stored ``raw_event`` JSON
             dict back to the reasoner's typed Observation, used by replay.

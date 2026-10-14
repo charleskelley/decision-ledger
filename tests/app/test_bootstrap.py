@@ -104,8 +104,6 @@ def settings() -> FrameworkSettings:
         postgres_user="u",
         postgres_password="p",
         postgres_db="d",
-        elasticsearch_url="http://es.example:9200",
-        openai_api_key="",
     )
 
 
