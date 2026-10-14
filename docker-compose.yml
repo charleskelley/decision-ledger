@@ -1,16 +1,20 @@
 # Docker Compose V2 — no version key (deprecated; omit entirely for Compose V2)
 #
 # Brings up the framework-owned local stack for DecisionLedger:
-#   PostgreSQL 16 + pgvector — shared vector store (dense retrieval) + audit
-#                  store. All reasoners share the database; tenant separation
-#                  is row-level via `reasoner_id`. The init scripts are the
-#                  canonical DDL shipped in app/audit/sql/.
-#   Elasticsearch 8 — shared BM25 sparse retrieval for the policy corpus.
+#   PostgreSQL 16 — the Decision Bundle audit store, the framework's only
+#                  infrastructure. All reasoners share the database; tenant
+#                  separation is row-level via `reasoner_id`. The init scripts
+#                  are the canonical DDL shipped in app/audit/sql/.
 #
-# Reasoner-owned infrastructure lives in each reasoner's own compose file and
-# is pulled in with `include:` (Compose >= 2.20):
+# Plugin-owned infrastructure lives in each plugin's own compose file and is
+# pulled in with `include:` (Compose >= 2.20):
 #   reasoners/account_takeover/compose.yaml — Redis 7 (ATO feature windows,
 #                  dedup store, login-event stream).
+#   gates/policy_rag/compose.yaml — Elasticsearch 8 (the RAG policy gate's
+#                  BM25 index). The gate's dense-retrieval chunks live in this
+#                  Postgres, in the gate's own `policy_rag` schema, which the
+#                  gate's DDL creates (with the vector extension this image
+#                  ships).
 #
 # M1 Max (ARM64) compatible: all images publish linux/arm64 manifests.
 #
@@ -21,10 +25,13 @@
 
 include:
   - reasoners/account_takeover/compose.yaml
+  - gates/policy_rag/compose.yaml
 
 services:
   # ---------------------------------------------------------------------------
-  # PostgreSQL 16 + pgvector — dense vector store + Decision Bundle audit store
+  # PostgreSQL 16 — Decision Bundle audit store (+ the gates' own schemas)
+  # The pgvector image is plain Postgres plus the vector extension, available
+  # for a gate's DDL to create; the framework's DDL creates no extension.
   # ---------------------------------------------------------------------------
   postgres:
     image: pgvector/pgvector:pg16
@@ -49,34 +56,5 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # ---------------------------------------------------------------------------
-  # Elasticsearch 8 — BM25 sparse retrieval for policy corpus
-  # Security disabled for local dev only. Never expose to public network.
-  # ---------------------------------------------------------------------------
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-      - xpack.security.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - cluster.routing.allocation.disk.threshold_enabled=false
-    ports:
-      - "${ELASTICSEARCH_PORT:-9200}:9200"
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'curl -sf http://localhost:9200/_cluster/health | grep -qE ''"status":"(green|yellow)"''',
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-    restart: unless-stopped
-
 volumes:
   postgres_data:
-  es_data:

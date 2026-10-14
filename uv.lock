@@ -14,6 +14,7 @@ resolution-markers = [
 members = [
     "ato-reasoner",
     "decision-ledger",
+    "decisionledger-gate-policy-rag",
     "decisionledger-gate-rules",
 ]
 
@@ -224,6 +225,7 @@ version = "0.1.0"
 source = { editable = "reasoners/account_takeover" }
 dependencies = [
     { name = "decision-ledger" },
+    { name = "decisionledger-gate-policy-rag" },
     { name = "fastapi" },
     { name = "numpy" },
     { name = "pandas" },
@@ -243,6 +245,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "decision-ledger", editable = "." },
+    { name = "decisionledger-gate-policy-rag", editable = "gates/policy_rag" },
     { name = "fastapi", specifier = ">=0.111,<1" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "pandas", specifier = ">=2.2,<3" },
@@ -602,19 +605,13 @@ version = "0.1.0"
 source = { editable = "." }
 default-groups = ["dev", "gates", "reasoners"]
 dependencies = [
-    { name = "anthropic" },
-    { name = "elasticsearch" },
     { name = "fastapi" },
-    { name = "openai" },
     { name = "orjson" },
-    { name = "pgvector" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
-    { name = "sentence-transformers" },
     { name = "structlog" },
-    { name = "torch" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -629,7 +626,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
-    { name = "ragas" },
     { name = "rich" },
     { name = "ruff" },
     { name = "sqlfluff" },
@@ -642,6 +638,7 @@ docs = [
     { name = "ruff" },
 ]
 gates = [
+    { name = "decisionledger-gate-policy-rag", extra = ["eval"] },
     { name = "decisionledger-gate-rules" },
 ]
 reasoners = [
@@ -650,19 +647,13 @@ reasoners = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.97.0" },
-    { name = "elasticsearch", specifier = ">=8.13,<9" },
     { name = "fastapi", specifier = ">=0.111,<1" },
-    { name = "openai", specifier = ">=1.30,<2" },
     { name = "orjson", specifier = ">=3.10,<4" },
-    { name = "pgvector", specifier = ">=0.3,<1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "sentence-transformers", specifier = ">=3.0,<4" },
     { name = "structlog", specifier = ">=24.1,<25" },
-    { name = "torch", specifier = ">=2.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
 
@@ -677,7 +668,6 @@ dev = [
     { name = "pytest-cov", specifier = ">=5.0,<6" },
     { name = "pytest-timeout", specifier = ">=2.3,<3" },
     { name = "pytest-xdist", specifier = ">=3.5,<4" },
-    { name = "ragas", specifier = ">=0.1.10,<1" },
     { name = "rich", specifier = ">=13.7,<14" },
     { name = "ruff", specifier = ">=0.5,<1" },
     { name = "sqlfluff", specifier = ">=3.1,<4" },
@@ -689,8 +679,55 @@ docs = [
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.27,<1" },
     { name = "ruff", specifier = ">=0.5,<1" },
 ]
-gates = [{ name = "decisionledger-gate-rules", editable = "gates/rules" }]
+gates = [
+    { name = "decisionledger-gate-policy-rag", extras = ["eval"], editable = "gates/policy_rag" },
+    { name = "decisionledger-gate-rules", editable = "gates/rules" },
+]
 reasoners = [{ name = "ato-reasoner", editable = "reasoners/account_takeover" }]
+
+[[package]]
+name = "decisionledger-gate-policy-rag"
+version = "0.1.0"
+source = { editable = "gates/policy_rag" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "decision-ledger" },
+    { name = "elasticsearch" },
+    { name = "openai" },
+    { name = "pgvector" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "sentence-transformers" },
+    { name = "structlog" },
+    { name = "torch" },
+]
+
+[package.optional-dependencies]
+eval = [
+    { name = "langchain-openai" },
+    { name = "ragas" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.97.0" },
+    { name = "decision-ledger", editable = "." },
+    { name = "elasticsearch", specifier = ">=8.13,<9" },
+    { name = "langchain-openai", marker = "extra == 'eval'", specifier = ">=0.2,<2" },
+    { name = "openai", specifier = ">=1.30,<2" },
+    { name = "pgvector", specifier = ">=0.3,<1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "ragas", marker = "extra == 'eval'", specifier = ">=0.2,<1" },
+    { name = "sentence-transformers", specifier = ">=3.0,<4" },
+    { name = "structlog", specifier = ">=24.1,<25" },
+    { name = "torch", specifier = ">=2.3" },
+]
+provides-extras = ["eval"]
 
 [[package]]
 name = "decisionledger-gate-rules"
