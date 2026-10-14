@@ -14,12 +14,10 @@ Gate configuration:
     interpreting it. A gate that declares a ``config_model`` has the dict
     validated against that model at intake, so a malformed configuration is
     rejected before anything runs; a gate without one validates on
-    consumption. Each gate documents its own keys (the reference policy
-    gate's are listed in ``app/gate/policy``). Two keys are still checked
-    against the registration by convention, until the policy gate takes
-    over that validation: ``template_id`` (against
-    ``allowed_prompt_template_ids``) and ``jurisdictions`` (against
-    ``allowed_jurisdictions``).
+    consumption. A gate may also authorize the configuration per submitting
+    reasoner at intake (for example, only resources that reasoner ships).
+    Each gate documents its own keys in its own package (DR-28); the
+    framework reads none of them.
 
 Shadow evaluation:
     GateContext is required on every Observation. Populating it on all

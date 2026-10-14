@@ -64,8 +64,6 @@ def _registration(
         reasoner_id="stub-reasoner",
         reasoner_name="Test Reasoner",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset({"stub-v1"}),
-        allowed_jurisdictions=frozenset({"REGION_A", "REGION_A_COAST", "REGION_B"}),
         novel_entity_feature=novel_entity_feature,
         jurisdiction_conflict_groups=jurisdiction_conflict_groups,
     )

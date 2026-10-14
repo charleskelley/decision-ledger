@@ -22,9 +22,9 @@ Subpackages (self-contained functional concerns):
                    contract: Observation protocol, GateContext, ReasonerContext,
                    registration contracts, and the intake validator.
     gate/          Universal gate contracts (GateInput, the open GateOutput and
-                   EvidenceRef, GateVerdict) and the predicate language, plus
-                   ``gate/policy/`` for the reference policy gate's own typed
-                   models (DR-28).
+                   EvidenceRef, GateVerdict) and the predicate language. A
+                   gate's own typed models live in that gate's workspace
+                   member, never here (DR-28).
     resolution/    ResolutionAttempt subclasses — the append-only resolution
                    log for non-terminal decisions (CHALLENGE, HOLD).
     eval/          Evaluation dimension contracts and metric interfaces.

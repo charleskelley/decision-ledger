@@ -18,12 +18,11 @@ Defines what every gate satisfies and what the framework stores (DR-28):
 root in ``core.gate_request`` because it carries the intake ``Observation``,
 and ``core/gate/`` does not import ``core/observation/`` (DR-11).
 
-The ``core.gate.policy`` subpackage holds the reference policy gate's own
-typed models (its structured-output verdict schema, citations, prompt
-templates, corpus metadata, and the schemas of its ``evidence_snapshot`` /
-``extra``). They are that gate's private vocabulary: this package does not
-re-export them, and the framework's generic modules never import them
-(``tests/test_framework_boundary.py`` enforces both).
+A gate's own typed models (a structured-output verdict schema, citations,
+prompt templates, the schemas of its ``evidence_snapshot`` / ``extra``) live
+in that gate's workspace member, never here: they are the gate's private
+vocabulary, and the framework stores only the universal contracts above
+(``tests/test_framework_boundary.py`` enforces it).
 
 Public API at this level:
     GateInput:        The framework's record of one gate invocation.

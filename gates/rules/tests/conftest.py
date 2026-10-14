@@ -179,8 +179,6 @@ def registration() -> ReasonerRegistration:
         reasoner_id=REASONER_ID,
         reasoner_name="Widget Reasoner",
         allowed_gate_ids=frozenset({"rules"}),
-        allowed_prompt_template_ids=frozenset(),
-        allowed_jurisdictions=frozenset(),
     )
 
 

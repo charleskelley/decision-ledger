@@ -1,10 +1,12 @@
 """ReasonerRegistration and ReasonerRegistry — framework registration contracts.
 
 A ReasonerRegistration is the framework's declaration of a known domain
-reasoner: its stable identifier, display name, the set of resources
-(prompt templates, jurisdictions) it is authorized to use, and the
-enforcement profile (novel-entity feature, jurisdiction conflict groups)
-that the deterministic enforcement layer reads for Tiers 3 and 5.
+reasoner: its stable identifier, display name, the gates it may route to,
+and the enforcement profile (novel-entity feature, jurisdiction conflict
+groups) that the deterministic enforcement layer reads for Tiers 3 and 5.
+What a reasoner may put in a gate's configuration is that gate's business,
+not the registration's (DR-28): a gate validates its own ``gate_config`` and
+may authorize it per reasoner at intake.
 
 A ReasonerRegistry is the protocol any registry implementation must satisfy.
 The reference implementation (StaticReasonerRegistry in app/) loads from a
@@ -13,7 +15,7 @@ or secrets manager — the framework is agnostic to the backing store.
 
 Registration is a startup-time configuration concern. The framework validates
 that an incoming Observation's reasoner_id is registered and that its
-gate_context references only resources the registration permits.
+gate_context names a gate the registration permits.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ class ReasonerRegistration(BaseModel):
     Submitted at startup to declare a reasoner to the DecisionLedger
     framework. The framework uses this record during Observation intake to
     verify that the submitting reasoner is known and that its gate_context
-    references only the resources it is authorized to use.
+    names a gate it may route to.
 
     Attributes:
         reasoner_id: Stable machine identifier. Must match
@@ -41,14 +43,6 @@ class ReasonerRegistration(BaseModel):
         allowed_gate_ids: Gate types this reasoner is authorized to
             target via ``GateContext.gate_id``. The framework rejects any
             Observation whose gate_id is not in this set.
-        allowed_prompt_template_ids: Prompt templates this reasoner is
-            authorized to reference via ``gate_config["template_id"]``.
-            Validated by convention — skipped when the key is absent
-            from gate_config. An empty frozenset means no restriction.
-        allowed_jurisdictions: Regulatory jurisdictions this reasoner is
-            authorized to claim via ``gate_config["jurisdictions"]``.
-            Validated by convention — skipped when the key is absent
-            from gate_config. An empty frozenset means no restriction.
         novel_entity_feature: Enforcement profile for Tier 3 (novel
             entity). Names the ``ReasonerContext.feature_set`` key whose
             truthy value signals that the decision subject has too little
@@ -58,9 +52,9 @@ class ReasonerRegistration(BaseModel):
         jurisdiction_conflict_groups: Enforcement profile for Tier 5
             (jurisdiction conflict). Each member is a group of
             jurisdiction tags whose policies are mutually consistent;
-            enforcement treats a decision as conflicted when the
-            retrieved policy snippets span at least two distinct groups
-            and routes it to ``HOLD``. An empty tuple (the default)
+            enforcement treats a decision as conflicted when the gate's
+            evidence spans at least two distinct groups and routes it to
+            ``HOLD``. An empty tuple (the default)
             disables the structural check — Tier 5 then fires only when
             the gate itself signals a conflict.
     """
@@ -70,8 +64,6 @@ class ReasonerRegistration(BaseModel):
     reasoner_id: str
     reasoner_name: str
     allowed_gate_ids: frozenset[str]
-    allowed_prompt_template_ids: frozenset[str]
-    allowed_jurisdictions: frozenset[str]
     novel_entity_feature: str | None = None
     jurisdiction_conflict_groups: tuple[frozenset[str], ...] = ()
 

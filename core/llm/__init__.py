@@ -1,11 +1,10 @@
 """Universal LLM-call abstraction.
 
-Single SDK-agnostic primitive (``LLMClient``) that both the policy gate
-and the eval-harness judge consume. Concrete adapters live in
-``app/llm/`` (one per provider). Adding a provider is a new file under
-``app/llm/`` plus a wiring change at the construction edges
-(``app/gate/policy/plugin.py`` for the gate, ``eval/runners/harness.py``
-for the judges).
+Single SDK-agnostic primitive (``LLMClient``) for any component that calls
+a model — an LLM-backed gate, an eval judge. The framework ships the
+protocol only; concrete adapters (one per provider) live with the gate that
+uses them, in its workspace member, and are wired at that gate's
+construction edge (DR-23, DR-28).
 
 See DR-23 in ``docs/design/decisions.md`` for the rationale.
 """
