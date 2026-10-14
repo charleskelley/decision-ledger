@@ -4,7 +4,10 @@
 ``DETERMINISTIC_PLUGIN`` (``gate_id="fake-rules"``, deterministic, kind
 ``rules``) satisfy ``app.gates.GatePlugin``. Each ``build`` returns a fresh
 ``FakeGate`` and remembers it on ``plugin.built`` so tests can assert on the
-requests a gate received and on its lifecycle.
+requests a gate received and on its lifecycle. A plugin built with
+``refused_reasoners`` returns an ``AuthorizingFakeGate`` instead — the same
+gate plus the optional ``ConfigAuthorizer`` capability, refusing exactly
+those reasoners.
 """
 
 from __future__ import annotations
@@ -122,6 +125,36 @@ class FakeGate:
         self.closed = True
 
 
+class AuthorizingFakeGate(FakeGate):
+    """A ``FakeGate`` that also authorizes ``gate_config`` per reasoner.
+
+    Attributes:
+        refused_reasoners: Reasoners whose configurations it refuses.
+        authorizations: Every ``(config, reasoner_id)`` it was asked about.
+    """
+
+    def __init__(
+        self,
+        *,
+        gate_id: str,
+        deterministic: bool,
+        framework: FrameworkServices,
+        refused_reasoners: frozenset[str],
+    ) -> None:
+        super().__init__(
+            gate_id=gate_id, deterministic=deterministic, framework=framework
+        )
+        self.refused_reasoners = refused_reasoners
+        self.authorizations: list[tuple[object, str]] = []
+
+    def authorize_config(self, config: object, *, reasoner_id: str) -> None:
+        """Record the question; refuse the listed reasoners."""
+        self.authorizations.append((config, reasoner_id))
+        if reasoner_id in self.refused_reasoners:
+            msg = f"reasoner {reasoner_id!r} may not use fake gate {self.gate_id!r}"
+            raise ValueError(msg)
+
+
 class FakeGatePlugin:
     """``GatePlugin`` for a scripted fake gate.
 
@@ -129,6 +162,9 @@ class FakeGatePlugin:
         gate_id: The id it registers under.
         deterministic: Whether its outputs are deterministic.
         kind: Its declared ``GateKind``.
+        refused_reasoners: When given, ``build`` returns an
+            ``AuthorizingFakeGate`` that refuses these reasoners (an empty
+            set authorizes everyone but still records each question).
 
     Attributes:
         built: Every ``FakeGate`` this plugin has built, in order.
@@ -140,17 +176,30 @@ class FakeGatePlugin:
         *,
         deterministic: bool = False,
         kind: GateKind = GateKind.LLM,
+        refused_reasoners: frozenset[str] | None = None,
     ) -> None:
         self.gate_id = gate_id
         self.kind = kind
         self.deterministic = deterministic
         self.config_model: type[BaseModel] | None = FakeGateConfig
+        self.refused_reasoners = refused_reasoners
         self.built: list[FakeGate] = []
 
     def build(self, framework: FrameworkServices) -> FakeGate:
-        """Build a fresh ``FakeGate`` against ``framework``."""
-        gate = FakeGate(
-            gate_id=self.gate_id, deterministic=self.deterministic, framework=framework
+        """Build a fresh ``FakeGate`` (or ``AuthorizingFakeGate``)."""
+        gate = (
+            FakeGate(
+                gate_id=self.gate_id,
+                deterministic=self.deterministic,
+                framework=framework,
+            )
+            if self.refused_reasoners is None
+            else AuthorizingFakeGate(
+                gate_id=self.gate_id,
+                deterministic=self.deterministic,
+                framework=framework,
+                refused_reasoners=self.refused_reasoners,
+            )
         )
         self.built.append(gate)
         return gate

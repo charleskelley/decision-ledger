@@ -8,13 +8,17 @@ group. The framework never imports a gate package: it discovers the plugins
 dispatches to a gate by the ``gate_id`` an observation's ``GateContext``
 names (``app/decide.py``).
 
-The seam is four types:
+The seam is five types:
 
 - ``GateKind`` — what a gate is: ``llm``, ``lookup``, or ``rules``.
 - ``Gate`` — the runtime object: ``evaluate(GateRequest) -> GateOutput`` and
   ``close()``. A gate owns its own infrastructure (indexes, model clients,
   rule files) and returns the universal ``GateOutput``; anything
   gate-specific goes into the output's ``evidence_snapshot`` / ``extra``.
+- ``ConfigAuthorizer`` — an optional ``Gate`` capability: decide, per
+  submitting reasoner, whether a validated ``gate_config`` is allowed (for
+  example only resources that reasoner ships). The framework calls it at
+  intake, on every route, right after ``config_model`` validation.
 - ``GatePlugin`` — what the entry point publishes: ``gate_id``, ``kind``,
   ``deterministic``, an optional ``config_model`` that validates
   ``GateContext.gate_config`` at intake, and ``build(framework) -> Gate``.
@@ -45,6 +49,7 @@ from core.exceptions import GatePluginError
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from importlib.metadata import EntryPoint
+    from typing import Any
 
     from app.plugin import FrameworkServices
     from core.gate import GateOutput
@@ -91,6 +96,35 @@ class Gate(Protocol):
 
     def close(self) -> None:
         """Release any connections or models the gate opened."""
+        ...
+
+
+@runtime_checkable
+class ConfigAuthorizer(Protocol):
+    """Optional ``Gate`` capability: authorize ``gate_config`` per reasoner.
+
+    ``config_model`` validates the shape of a configuration; some gates also
+    decide who may send which configuration — a gate that serves several
+    reasoners may, for example, accept only resources the submitting
+    reasoner ships. A built gate that defines ``authorize_config`` is asked
+    at intake, on every route (fast path included), after ``config_model``
+    validation; a refusal rejects the observation before any gate runs.
+    """
+
+    def authorize_config(
+        self, config: BaseModel | Mapping[str, Any], *, reasoner_id: str
+    ) -> None:
+        """Accept ``config`` from ``reasoner_id`` or raise ``ValueError``.
+
+        Args:
+            config: The ``config_model`` instance when the plugin declares
+                one, else the raw ``gate_config`` mapping.
+            reasoner_id: The submitting reasoner.
+
+        Raises:
+            ValueError: ``reasoner_id`` may not submit ``config``; the
+                message says why.
+        """
         ...
 
 

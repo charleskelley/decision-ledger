@@ -6,11 +6,12 @@ its intake contract, its dispatch, and its gate-output checks without
 touching infrastructure or an LLM, using the stub reasoner
 (``tests/_stub_reasoner``) and the scripted fake gates (``tests/_fake_gate``):
 
-- Intake validation runs first, against the registry and the named gate's
-  ``config_model``: an unregistered reasoner, a disallowed gate, a
-  disallowed prompt template, a malformed gate configuration, or a route to
-  a gate this deployment does not compose is rejected before any gate runs,
-  and nothing is persisted.
+- Intake validation runs first, against the registry, the named gate's
+  ``config_model``, and — when the built gate is a ``ConfigAuthorizer`` —
+  that gate's per-reasoner authorization: an unregistered reasoner, a
+  disallowed gate, a malformed gate configuration, a configuration the gate
+  refuses for this reasoner, or a route to a gate this deployment does not
+  compose is rejected before any gate runs, and nothing is persisted.
 - On the fast path no gate is called and the bundle is still persisted.
 - On the gate route the framework dispatches by ``gate_context.gate_id``,
   hands the gate a ``GateRequest``, and stores the universal ``GateOutput``
@@ -34,7 +35,7 @@ import pytest
 from pydantic import Field
 
 from app.decide import DEFAULT_GATE_BUDGET_MS, execute_decision
-from app.gates import ComposedGate
+from app.gates import ComposedGate, ConfigAuthorizer
 from app.reasoner_registry import StaticReasonerRegistry
 from core.actions import DecisionAction
 from core.exceptions import (
@@ -45,7 +46,13 @@ from core.exceptions import (
 from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
 from core.observation import GateContext
 from core.routes import GateRoute
-from tests._fake_gate.plugin import FakeGate, FakeGateError, FakeGatePlugin
+from tests._fake_gate.plugin import (
+    AuthorizingFakeGate,
+    FakeGate,
+    FakeGateConfig,
+    FakeGateError,
+    FakeGatePlugin,
+)
 
 if TYPE_CHECKING:
     from core.bundle import DecisionBundle
@@ -188,23 +195,95 @@ async def test_execute_decision_rejects_unregistered_reasoner(
     assert _fake(gates).requests == []
 
 
-async def test_execute_decision_rejects_disallowed_prompt_template(
-    observation, stub_registration
+def _authorizing_gates(*refused: str) -> dict[str, ComposedGate]:
+    return _compose(FakeGatePlugin("fake", refused_reasoners=frozenset(refused)))
+
+
+async def test_execute_decision_rejects_config_the_gate_refuses_for_the_reasoner(
+    observation, stub_registry
 ):
-    # The fixture's gate_config names template_id "stub-v1"; register the
-    # reasoner with a different allow-list so the convention check fires.
+    # Which configuration a reasoner may send is the gate's call (DR-28):
+    # the framework asks the built gate and rejects on refusal.
     store = _RecordingStore()
-    registry = _registry_with(
-        stub_registration.model_copy(
-            update={"allowed_prompt_template_ids": frozenset({"other-template-v9"})}
-        )
-    )
+    gates = _authorizing_gates("stub-reasoner")
 
     with pytest.raises(ObservationContractError) as exc_info:
-        await _run(observation, registry=registry, store=store)
+        await _run(
+            _routed(observation), registry=stub_registry, store=store, gates=gates
+        )
 
-    assert "template_id 'stub-v1'" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "gate_config for gate 'fake' is not authorized for this reasoner" in message
+    assert "may not use fake gate 'fake'" in message
     assert store.written == []
+    assert _fake(gates).requests == []
+
+
+async def test_gate_authorization_runs_on_the_fast_path_too(observation, stub_registry):
+    # A recorded decision may not carry a gate context its gate would refuse.
+    store = _RecordingStore()
+    obs = observation.model_copy(
+        update={"gate_context": GateContext(gate_id="fake", gate_config={})}
+    )
+
+    with pytest.raises(ObservationContractError, match="not authorized"):
+        await _run(
+            obs,
+            registry=stub_registry,
+            store=store,
+            gates=_authorizing_gates("stub-reasoner"),
+        )
+
+    assert store.written == []
+
+
+async def test_the_gate_authorizes_the_validated_config_for_the_submitting_reasoner(
+    observation, stub_registry
+):
+    gates = _authorizing_gates("some-other-reasoner")
+
+    bundle = await _run(
+        _routed(observation, permitted_actions=["CHALLENGE"]),
+        registry=stub_registry,
+        store=_RecordingStore(),
+        gates=gates,
+    )
+
+    gate = _fake(gates)
+    assert isinstance(gate, AuthorizingFakeGate)
+    ((config, reasoner_id),) = gate.authorizations
+    assert reasoner_id == "stub-reasoner"
+    # The gate is asked about its config_model instance, not the raw dict.
+    assert isinstance(config, FakeGateConfig)
+    assert config.permitted_actions == (DecisionAction.CHALLENGE,)
+    assert bundle.decision_action == DecisionAction.CHALLENGE
+
+
+async def test_a_gate_without_a_config_model_is_asked_about_the_raw_config(
+    observation, stub_registry
+):
+    plugin = FakeGatePlugin("fake", refused_reasoners=frozenset())
+    plugin.config_model = None
+    gates = _compose(plugin)
+
+    await _run(
+        _routed(observation, permitted_actions=["HOLD"]),
+        registry=stub_registry,
+        store=_RecordingStore(),
+        gates=gates,
+    )
+
+    gate = _fake(gates)
+    assert isinstance(gate, AuthorizingFakeGate)
+    assert gate.authorizations == [({"permitted_actions": ["HOLD"]}, "stub-reasoner")]
+
+
+def test_only_a_gate_with_authorize_config_is_a_config_authorizer():
+    (plain,) = _compose(FakeGatePlugin("fake")).values()
+    (authorizing,) = _authorizing_gates().values()
+
+    assert not isinstance(plain.gate, ConfigAuthorizer)
+    assert isinstance(authorizing.gate, ConfigAuthorizer)
 
 
 async def test_execute_decision_rejects_disallowed_gate_id(

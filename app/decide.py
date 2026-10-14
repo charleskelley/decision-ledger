@@ -2,10 +2,11 @@
 
 ``execute_decision()`` runs the framework's portion of the pipeline against a
 fully-assembled ``Observation``: intake validation against the reasoner
-registry and the named gate's declared configuration model, dispatch to the
-gate the observation's ``GateContext`` names (when the reasoner routed
-``ROUTE_TO_GATE``), deterministic enforcement, bundle assembly, and
-persistence. Returns the persisted ``DecisionBundle``.
+registry, the named gate's declared configuration model, and — when the
+built gate is a ``ConfigAuthorizer`` — that gate's per-reasoner
+authorization; dispatch to the gate the observation's ``GateContext`` names
+(when the reasoner routed ``ROUTE_TO_GATE``), deterministic enforcement,
+bundle assembly, and persistence. Returns the persisted ``DecisionBundle``.
 
 The reasoner pipeline is responsible for everything *before* this function:
 feature computation, scoring, and assembly — including every input its gate
@@ -36,6 +37,7 @@ from pydantic import ValidationError
 
 from app.audit import build_bundle
 from app.enforcement.resolver import resolve
+from app.gates import ConfigAuthorizer
 from app.monitoring import duration_ms
 from core.exceptions import GatePluginError, ObservationContractError
 from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
@@ -46,6 +48,9 @@ from core.routes import GateRoute
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
+    from typing import Any
+
+    from pydantic import BaseModel
 
     from app.audit import BundleStore
     from app.gates import ComposedGate
@@ -76,9 +81,10 @@ async def execute_decision(
     scoring, and ``build_observation`` (or its equivalent) before calling
     this function. The framework first validates the observation against
     the intake contract, the reasoner registry, and — when the named gate is
-    composed and declares a ``config_model`` — the gate's configuration
-    model. On the gate route it dispatches to that gate; then it enforces,
-    assembles the bundle, and persists it.
+    composed — the gate's ``config_model`` (if it declares one) and the
+    gate's per-reasoner authorization (if it is a ``ConfigAuthorizer``). On
+    the gate route it dispatches to that gate; then it enforces, assembles
+    the bundle, and persists it.
 
     Args:
         observation: Fully-assembled Observation from the reasoner.
@@ -108,8 +114,8 @@ async def execute_decision(
 
     Raises:
         ObservationContractError: The observation violates an intake
-            contract (shape, gate authorization, gate_config convention, or
-            the named gate's ``config_model``).
+            contract (shape, gate authorization, the named gate's
+            ``config_model``, or that gate's per-reasoner authorization).
         UnregisteredReasonerError: The observation's ``reasoner_id`` is not
             in ``registry``.
         GatePluginError: The observation routes to a gate this deployment
@@ -199,30 +205,49 @@ def _validate_gate_config(
     *,
     reasoner_id: str,
 ) -> None:
-    """Validate ``gate_config`` against the gate's declared ``config_model``.
+    """Validate ``gate_config`` for the gate it names, for this reasoner.
 
-    Runs on every route (fast path included) so a recorded decision always
-    carries a gate context its gate could evaluate for shadow evaluation.
+    Two checks, both owned by the gate: its declared ``config_model`` (the
+    shape), then — when the built gate is a ``ConfigAuthorizer`` — whether
+    this reasoner may send that configuration. Runs on every route (fast
+    path included) so a recorded decision always carries a gate context its
+    gate could evaluate for shadow evaluation.
 
     Raises:
         ObservationContractError: The configuration does not satisfy the
-            gate's ``config_model``.
+            gate's ``config_model``, or the gate refuses it for this
+            reasoner.
     """
+    raw = gate_context.gate_config or {}
+    config: BaseModel | Mapping[str, Any] = raw
     config_model = composed.plugin.config_model
-    if config_model is None:
+    if config_model is not None:
+        try:
+            config = config_model.model_validate(raw)
+        except ValidationError as err:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in e['loc']) or '<root>'}: {e['msg']}"
+                for e in err.errors()
+            )
+            raise ObservationContractError(
+                reasoner_id=reasoner_id,
+                violation=(
+                    f"gate_config for gate {composed.gate_id!r} does not satisfy "
+                    f"{config_model.__name__}: {problems}"
+                ),
+            ) from err
+
+    gate = composed.gate
+    if not isinstance(gate, ConfigAuthorizer):
         return
     try:
-        config_model.model_validate(gate_context.gate_config or {})
-    except ValidationError as err:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in e['loc']) or '<root>'}: {e['msg']}"
-            for e in err.errors()
-        )
+        gate.authorize_config(config, reasoner_id=reasoner_id)
+    except ValueError as err:
         raise ObservationContractError(
             reasoner_id=reasoner_id,
             violation=(
-                f"gate_config for gate {composed.gate_id!r} does not satisfy "
-                f"{config_model.__name__}: {problems}"
+                f"gate_config for gate {composed.gate_id!r} is not authorized "
+                f"for this reasoner: {err}"
             ),
         ) from err
 
