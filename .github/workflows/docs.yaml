@@ -35,8 +35,9 @@ jobs:
   build:
     name: Build (mkdocs build --strict)
     runs-on: ubuntu-latest
-    # Main deps include torch/sentence-transformers/xgboost, which
-    # mkdocstrings imports on a cold cache — 5 minutes is too tight.
+    # The default reasoners/gates groups pull in torch, sentence-transformers,
+    # and xgboost, which a cold uv cache installs slowly — 5 minutes is too
+    # tight.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +54,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install docs dependencies
-        # mkdocstrings imports the project modules to introspect them,
-        # so main deps must be present. --no-dev skips pytest/ragas/etc.
-        # The `reasoners` default group stays installed, so the workspace
-        # reasoner packages (e.g. ato_reasoner) are importable for their
-        # reference pages.
+        # mkdocstrings introspects the project modules, so main deps must
+        # be present. --no-dev skips pytest and the other dev tools. The
+        # `reasoners` and `gates` default groups stay installed, so the
+        # workspace member packages (e.g. ato_reasoner) are importable for
+        # their reference pages.
         run: uv sync --frozen --group docs --no-dev
 
       - name: Build site

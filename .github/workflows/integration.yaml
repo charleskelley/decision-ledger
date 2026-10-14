@@ -1,8 +1,9 @@
 name: Integration
 
-# Integration + smoke tests against live Postgres+pgvector + Elasticsearch
-# (framework services) plus each matrix reasoner's own infrastructure (Redis
-# for account_takeover). Trunk-based development: also runs on direct push to
+# Integration + smoke tests against live Postgres (the framework's only
+# infrastructure) plus each matrix gate's and reasoner's own infrastructure
+# (Elasticsearch and the vector extension for the policy_rag gate, Redis for
+# account_takeover). Trunk-based development: also runs on direct push to
 # main so solo trunk pushes are validated even without a PR cycle.
 # OpenAI/Anthropic spend stays bounded because the smoke suite hits the
 # fast-path scorer; only gate-routed events make LLM calls.
@@ -20,19 +21,21 @@ concurrency:
 
 jobs:
   integration:
-    name: Integration + smoke (${{ matrix.reasoner }})
+    name: Integration + smoke (${{ matrix.reasoner }}, ${{ matrix.gate }})
     # Fork PRs cannot see repository secrets (OPENAI/ANTHROPIC keys), so the
     # suite would fail spuriously — maintainers run it before merge instead.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # One job per reasoner workspace member (reasoners/<name>). Framework
-    # integration tests run once per entry; fine while there is one reasoner.
+    # One job per (reasoner, gate) pair of workspace members (reasoners/<name>,
+    # gates/<name>). Framework integration tests run once per entry; fine
+    # while there is one of each.
     strategy:
       fail-fast: false
       matrix:
         reasoner: [account_takeover]
+        gate: [policy_rag]
 
     services:
       # Reasoner infrastructure (mirrors reasoners/account_takeover/compose.yaml).
@@ -46,6 +49,8 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
+      # The pgvector image ships the extension the policy_rag gate's DDL
+      # creates in its own schema; the framework's DDL creates none.
       postgres:
         image: pgvector/pgvector:pg16
         env:
@@ -60,6 +65,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      # Gate infrastructure (mirrors gates/policy_rag/compose.yaml).
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
         env:
@@ -86,7 +92,7 @@ jobs:
       POSTGRES_PASSWORD: decisionledger
       POSTGRES_DB: decisionledger
       ATO_REDIS_URL: redis://localhost:6379
-      ELASTICSEARCH_URL: http://localhost:9200
+      POLICY_RAG_GATE_ELASTICSEARCH_URL: http://localhost:9200
 
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +113,7 @@ jobs:
 
       # Service containers don't support volume mounts for init scripts the
       # way docker-compose does, so apply Postgres init SQL explicitly.
-      - name: Initialize Postgres schema (pgvector + tables)
+      - name: Initialize Postgres schema (framework tables)
         env:
           PGPASSWORD: decisionledger
         run: |
@@ -115,6 +121,10 @@ jobs:
             -f app/audit/sql/01_init.sql
           psql -h localhost -U decisionledger -d decisionledger \
             -f app/audit/sql/02_tables.sql
+
+      # The gate's own schema (gates/<name>/gate.mk).
+      - name: Prepare gate (own schema)
+        run: make prepare-gate-${{ matrix.gate }}
 
       # Index the reasoner's policy corpus and train its model if missing
       # (reasoners/<name>/reasoner.mk).
