@@ -4,10 +4,9 @@
 --
 -- The framework owns a single schema (`decisionledger`). All reasoners write
 -- to the same tables; tenant separation is via the `reasoner_id` column.
+-- The framework needs no Postgres extension: a gate that needs one (for
+-- example for embeddings) creates it in its own DDL, next to its own schema.
 -- =============================================================================
-
--- Enable pgvector for dense vector operations (HNSW index on policy embeddings)
-create extension if not exists vector;
 
 -- Framework-owned schema — all DecisionLedger tables live here.
 -- All SQL in app/* schema-qualifies tables (decisionledger.<table>) so we

@@ -1,10 +1,12 @@
 -- =============================================================================
 -- DecisionLedger — initial table definitions
--- Depends on 01_init.sql (pgvector extension + decisionledger schema)
+-- Depends on 01_init.sql (decisionledger schema)
 --
 -- All tables live in the framework-owned `decisionledger` schema. Reasoners
--- are tenants distinguished by the `reasoner_id` column on row-level. The
--- policy gate, retrieval corpus, and audit ledger are shared resources.
+-- are tenants distinguished by the `reasoner_id` column on row-level. These
+-- are the audit ledger's tables only: decision bundles, replay logs, and
+-- resolution attempts. Gates keep whatever they store in their own schemas,
+-- created by their own DDL.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -51,60 +53,10 @@ create index if not exists idx_decision_bundles_decision_action
 on decisionledger.decision_bundles (decision_action);
 
 -- ---------------------------------------------------------------------------
--- policy_chunks — pgvector HNSW index for dense policy retrieval (shared)
---
--- Each row is one paragraph-level chunk from a reasoner's policy corpus.
--- The framework retriever filters by reasoner_id so each reasoner sees
--- only its own corpus. The embedding column dimensionality must match the
--- sentence-transformer model in use. Current model: all-MiniLM-L6-v2 →
--- 384 dimensions. Update vector(384) here and in the corpus loader if
--- the model changes.
---
--- risk_tier is nullable: null means the chunk applies to all tiers.
--- Populated chunks are filtered by reasoner_id, jurisdiction, and risk_tier
--- at retrieval time before the HNSW index is queried.
---
--- title is the owning document's human-readable title, denormalized onto
--- every chunk so the retriever can build a citation without reading the
--- corpus directory. Defaults to '' so rows written before the column
--- existed stay valid.
--- ---------------------------------------------------------------------------
-create table if not exists decisionledger.policy_chunks (
-    chunk_id uuid primary key default gen_random_uuid(),
-    reasoner_id text not null,
-    policy_id text not null,
-    policy_version text not null,
-    title text not null default '',
-    jurisdiction text not null,
-    risk_tier text,
-    section_path text not null,
-    chunk_text text not null,
-    embedding vector(384) not null,
-    created_at timestamptz not null default now()
-);
-
--- Idempotent migration for volumes created before title existed.
-alter table decisionledger.policy_chunks
-add column if not exists title text not null default '';
-
-create index if not exists idx_policy_chunks_hnsw
-on decisionledger.policy_chunks
-using hnsw (embedding vector_cosine_ops);
-
-create index if not exists idx_policy_chunks_reasoner_id
-on decisionledger.policy_chunks (reasoner_id);
-
-create index if not exists idx_policy_chunks_policy_version
-on decisionledger.policy_chunks (policy_id, policy_version);
-
-create index if not exists idx_policy_chunks_jurisdiction
-on decisionledger.policy_chunks (jurisdiction);
-
--- ---------------------------------------------------------------------------
 -- replay_logs — deterministic enforcement replay audit trail
 --
 -- One row per replay invocation. is_matched = true means re-executing
--- enforcement against the cached policy_gate_output produced the same
+-- enforcement against the cached gate output produced the same
 -- decision_action as the original decision. diff is populated only when
 -- is_matched = false and contains the action discrepancy for investigation.
 -- Reasoner identity is reachable via the decision_id join — no column.
