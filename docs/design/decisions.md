@@ -2244,8 +2244,8 @@ filled that in).
 > Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
 > open contract. Implementation notes on those records, the full rationale,
 > and cross-references land with the documentation pass that closes this
-> plan. The seam is implemented (Phase 1a, below); moving the RAG gate into
-> its own workspace member is the next phase.
+> plan. The seam is implemented (Phase 1a, below), and the RAG gate is its
+> own workspace member (Phase 1b, below).
 
 **Decision.**
 
@@ -2401,3 +2401,102 @@ configurable combinators; a shared `decisionledger` schema for gate tables.
   load and replay. As with DR-18 to DR-20, `docker compose down -v` is the
   migration path, and a `schema_version` column (with a 409 for old bundles)
   arrives with bundle v2.
+
+**Implementation (Phase 1b, the move).**
+
+- **Member.** `gates/policy_rag/` is the workspace member
+  `decisionledger-gate-policy-rag` (package `policy_rag_gate`, `gate_id`
+  `policy`), installed by the root `gates` dependency group with its `eval`
+  extra (RAGAS). Its own entry point replaces the interim one on the
+  framework package. `git mv` carried the runtime (`app/gate/policy`), the
+  retrieval stack and its Elasticsearch mapping (`app/retrieval`), the LLM
+  adapters (`app/llm`; `_pricing` became `pricing`), the typed models
+  (`core/gate/policy` and `core/snippet.py`, now `policy_rag_gate.models`),
+  and the gate's eval (below). The `LLMClient` protocol stays in
+  `core/llm/`.
+- **Infrastructure.** The chunk table lives in the gate's own `policy_rag`
+  schema inside the framework's database. The gate's DDL (`sql/`) creates
+  the schema, the table, and the vector extension, idempotently, on every
+  plugin build (before registering the pgvector adapters) and before every
+  corpus load; `python -m policy_rag_gate.schema` applies it alone. The
+  framework's DDL keeps the ledger (bundles, replay logs, resolution
+  attempts) and creates no extension. Elasticsearch moved to the member's
+  `compose.yaml`, included by the root compose file, and its URL to
+  `PolicyRagGateSettings` (`POLICY_RAG_GATE_ELASTICSEARCH_URL`).
+  `FrameworkSettings` keeps Postgres, logging, and the reasoner allowlist.
+  The framework's runtime dependencies are pydantic, fastapi, uvicorn,
+  psycopg, orjson, pyyaml, structlog, and pydantic-settings.
+- **Configuration.** The gate declares `config_model = PolicyGateConfig`
+  (`template_id`, `template_vars`, `retrieval_query`, `jurisdictions`,
+  `risk_tier`, `corpus_version`; lax, unknown keys rejected), which the
+  framework validates at intake on every route and the gate parses in
+  `evaluate`.
+- **Per-reasoner authorization.** `ReasonerRegistration` loses
+  `allowed_prompt_template_ids` and `allowed_jurisdictions`, and
+  `validate_observation` reads no `gate_config` key. When built, the gate
+  derives a `ReasonerProfile` for every composed reasoner from what it
+  ships: the template ids in its `prompts_dir` and the `jurisdiction` front
+  matter of its `corpus_dir` documents. The framework gains an optional
+  capability of a built gate, `ConfigAuthorizer.authorize_config(config, *,
+  reasoner_id)`, which `app/decide.py` calls at intake right after
+  `config_model` validation, on every route; a `ValueError` becomes an
+  `ObservationContractError` before any gate runs. For ATO and the stub
+  reasoner the derived sets equal the allow-lists they replace.
+- **Eval.** The retrieval, faithfulness, and citation dimensions, the LLM
+  judge and its prompts, and the RAGAS adapter moved to
+  `policy_rag_gate.eval`. The gate's harness (`python -m
+  policy_rag_gate.eval`, `make eval-gate-policy_rag`) runs them against the
+  datasets each reasoner ships for the gate (every installed eval adapter
+  that ships one, or `--reasoner-id`) through the framework's `run_eval`.
+  The framework harness runs consistency and robustness and checks no API
+  key; `EvalDriver` no longer exposes a retriever. Reports are staged at
+  `outputs/stage/eval/reasoner/<reasoner_id>/` and
+  `outputs/stage/eval/gate/policy/<reasoner_id>/`; tracked baselines follow
+  `outputs/eval/<kind>/<id>/eval-report-v<N>.json`.
+- **Make and CI.** The root Makefile includes `gates/*/gate.mk`
+  (`prepare-gate-policy_rag`, the pattern target
+  `build-policy-index-<reasoner_id>`, `eval-gate-policy_rag`), aggregates
+  them in `prepare-gates` and `eval`, and lints every gate's DDL. CI
+  matrices add `gate: [policy_rag]`, and the DR-23 grep allows LLM SDK
+  imports only in the gate's `llm/`.
+- **Boundary.** The interim exemptions are gone. No framework file names
+  the gate's internals or the infrastructure gates own (search index,
+  vector extension, embedding library, LLM SDKs, eval scorer, chunk
+  table); none of the gate's former homes holds a file; the framework DDL
+  creates no extension; a gate's DDL never touches the framework schema;
+  the root dependencies are exactly the framework set and the root
+  declares no entry point; `GateVerdict` joins the closed gate bases.
+
+**Judgment calls (Phase 1b).**
+
+- The plan's Phase 1b list names the runtime, retrieval, LLM adapters,
+  mapping, and chunk DDL; the gate's typed models moved too, as Phase 1a's
+  interim homes scheduled. `RetrievedSnippet`, which DR-21 placed at the
+  framework root, is now the gate's own type.
+- Template and jurisdiction authorization is derived from what each
+  reasoner ships rather than declared again somewhere else: no new
+  registration data, and identical sets for both reasoners. A declared
+  allow-list (for a reasoner that ships a template it may not use yet)
+  can return as per-binding gate configuration with DR-29's
+  `GateBinding`.
+- Enforcing it at intake needed a framework hook. `ConfigAuthorizer` is a
+  capability of the built gate, not a `GatePlugin` attribute, because the
+  profiles exist only after `build` has seen the composed reasoners.
+- `retrieval_query` stays optional in `PolicyGateConfig`, so a missing
+  query still fails closed at the gate (held, failure recorded) rather
+  than rejecting the decision; `template_id` is required, since an unknown
+  template was already a hard error.
+- ATO depends on the gate member: its eval driver builds fault-injected
+  `PolicyGate`s and its baseline capture re-validates the gate's models. A
+  reasoner's runtime still reaches a gate only through `GateContext`.
+- The gate's tests run on copies of the stub reasoner's prompt and corpus
+  under `gates/policy_rag/tests/fixtures/`, so the member's suite never
+  imports the framework's `tests/` tree.
+- Upgrading an existing local stack needs a re-index: chunks now live in
+  `policy_rag.policy_chunks`, which the gate's DDL creates empty, so until
+  `make prepare-reasoners` runs the dense leg finds nothing and the gate
+  retrieves on BM25 evidence alone. The old `decisionledger.policy_chunks`
+  table stays behind unread (`docker compose down -v` removes it), and the
+  old `ELASTICSEARCH_URL` / `ELASTICSEARCH_PORT` names are ignored in favor
+  of the gate's `POLICY_RAG_GATE_` ones. `.env.example` and the local
+  runbook say so; there is no production data to migrate.

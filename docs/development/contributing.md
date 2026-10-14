@@ -121,8 +121,8 @@ Prompt changes are treated as code changes with extra scrutiny:
 1. Create a new prompt version file in the reasoner's `prompts/` directory (ATO: `reasoners/account_takeover/src/ato_reasoner/prompts/ato-v{n+1}.yaml`), carrying its own `system:` text if the reasoner needs domain framing
 2. Do **not** modify the existing version file — old versions are immutable for
    audit trail integrity.
-3. Point the reasoner's assembler at the new `template_id` and add it to the registration's `allowed_prompt_template_ids`.
-4. Run the full eval harness against the new prompt version (`make eval-<reasoner>`).
+3. Point the reasoner's assembler at the new `template_id`. There is no registration edit: the RAG policy gate authorizes every template the reasoner ships in its `prompts/` directory (DR-28).
+4. Run both eval harnesses against the new prompt version: the framework's (`make eval-<reasoner>`) and the policy gate's retrieval, faithfulness, and citation dimensions on that reasoner's datasets (`make eval-gate-policy_rag REASONER=<reasoner_id>`); `make eval` runs both for every reasoner.
 5. Include the eval results in the PR description. The eval workflow is manual, so this run is the gate.
 
 ---
@@ -133,20 +133,21 @@ Prompt changes are treated as code changes with extra scrutiny:
 decision-ledger/
 ├── core/                    # Framework contracts — no infrastructure dependencies
 │   ├── observation/         # Observation protocol, ReasonerContext, GateContext, registration
-│   ├── gate/                # Universal gate contracts; gate/policy/ for the LLM policy gate
+│   ├── gate/                # Universal gate contracts (GateOutput, GateVerdict, EvidenceRef, predicates)
 │   ├── resolution/          # Resolution attempt log
 │   ├── llm/                 # LLMClient protocol
 │   └── eval/                # Eval metric contracts
 ├── app/                     # Framework runtime — imports from core/, never from a reasoner
 │   ├── main.py, plugin.py, plugins.py, bootstrap.py   # create_app factory + plugin seam
 │   ├── decide.py            # execute_decision (framework half of the handoff)
-│   ├── retrieval/           # Hybrid RAG (pgvector + Elasticsearch + reranker), corpus loader, ES mapping
-│   ├── gate/policy/         # LLM policy gate + prompt registry
+│   ├── gates.py             # GatePlugin / Gate / ConfigAuthorizer seam, gate discovery
 │   ├── enforcement/         # Deterministic rule-based action resolution
 │   ├── audit/               # Decision Bundle construction + replay, canonical DDL (sql/)
-│   ├── llm/                 # LLMClient adapters (OpenAI, Anthropic)
 │   └── monitoring/          # Structured logging, latency tracking
-├── eval/                    # Reasoner-agnostic evaluation harness (5 dimensions, EvalAdapter)
+├── eval/                    # Reasoner-agnostic evaluation harness (consistency, robustness; EvalAdapter)
+├── gates/                   # One uv workspace member per gate
+│   ├── rules/               # Zero-infrastructure rules gate (rules_gate)
+│   └── policy_rag/          # RAG policy gate (policy_rag_gate): retrieval, prompts, LLM adapters, own schema, eval, gate.mk, compose.yaml
 ├── reasoners/               # One uv workspace member per reasoner
 │   └── account_takeover/    # pyproject.toml, reasoner.mk, compose.yaml, src/ato_reasoner/, tests/
 ├── tests/                   # Framework tests (+ _stub_reasoner/, a test-only second reasoner)
@@ -256,8 +257,8 @@ GitHub Actions runs three workflows:
 | Workflow             | Trigger                            | What it runs                                                                     |
 |----------------------|------------------------------------|----------------------------------------------------------------------------------|
 | `ci.yaml`            | Push to `main`, PR to `main`       | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
-| `integration.yaml`   | Push to `main`, PR to `main`       | Per reasoner (`matrix.reasoner`): `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers |
-| `eval.yaml`          | `workflow_dispatch` only           | Per reasoner: `make prepare-<reasoner>`, then `make eval-<reasoner>` — full 5D harness; uploads the report as a workflow artifact |
+| `integration.yaml`   | Push to `main`, PR to `main`       | Per (reasoner, gate) pair (`matrix.reasoner`, `matrix.gate`): `make prepare-gate-<gate>`, `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers |
+| `eval.yaml`          | `workflow_dispatch` only           | Per (reasoner, gate) pair: prepare both, then `make eval-<reasoner>` (framework harness) and `make eval-gate-<gate>` on that reasoner's datasets; uploads the reports as a workflow artifact |
 
 - **Gate check.** The eval harness compares each dimension's score against its
   threshold. Any regression below threshold fails the workflow.
