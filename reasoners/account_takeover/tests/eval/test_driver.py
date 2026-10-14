@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
+from app.gates import discover_gates
 from app.settings import FrameworkSettings
+from ato_reasoner.eval import driver as driver_module
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.events import (
     AuthMethod,
@@ -27,6 +30,8 @@ from ato_reasoner.events import (
     LoginEvent,
 )
 from ato_reasoner.settings import AtoSettings
+from policy_rag_gate.plugin import PolicyGatePlugin
+from policy_rag_gate.settings import PolicyRagGateSettings
 
 
 def _make_event() -> LoginEvent:
@@ -56,19 +61,54 @@ def _make_event() -> LoginEvent:
 
 
 def test_constructor_raises_when_openai_api_key_missing():
-    """An empty OPENAI_API_KEY surfaces as ValueError before any connection."""
-    fw = FrameworkSettings(openai_api_key="")
+    """An empty OPENAI_API_KEY surfaces as ValueError before any connection.
+
+    The key belongs to the policy gate ATO routes to, so the driver reads it
+    from that gate's settings.
+    """
+    gate = PolicyRagGateSettings(openai_api_key="")
     with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
-        PipelineDriver(framework_settings=fw)
+        PipelineDriver(framework_settings=FrameworkSettings(), gate_settings=gate)
 
 
 def test_constructor_raises_when_scorer_model_missing(tmp_path):
     """A missing scorer model file surfaces as FileNotFoundError."""
     bad_path = tmp_path / "definitely-not-here.ubj"
-    fw = FrameworkSettings(openai_api_key="sk-test")
+    gate = PolicyRagGateSettings(openai_api_key="sk-test")
     ato = AtoSettings(scorer_model_path=str(bad_path))
     with pytest.raises(FileNotFoundError, match="Scorer model not found"):
-        PipelineDriver(framework_settings=fw, ato_settings=ato)
+        PipelineDriver(
+            framework_settings=FrameworkSettings(),
+            ato_settings=ato,
+            gate_settings=gate,
+        )
+
+
+def test_constructor_builds_the_policy_gate_from_the_checked_settings(monkeypatch):
+    """The settings whose key was checked are the ones the policy gate uses.
+
+    ``build_framework_services`` is replaced by a recorder, so no
+    infrastructure is touched; the other installed gates pass through.
+    """
+    received: list[list] = []
+
+    def _record(settings, plugins, gate_plugins=None):
+        received.append(list(gate_plugins))
+        return MagicMock(name="framework")
+
+    monkeypatch.setattr(driver_module, "build_framework_services", _record)
+    gate = PolicyRagGateSettings(
+        elasticsearch_url="http://es-eval.example:9200", openai_api_key="sk-test"
+    )
+
+    PipelineDriver(framework_settings=FrameworkSettings(), gate_settings=gate)
+
+    (gate_plugins,) = received
+    by_id = {p.gate_id: p for p in gate_plugins}
+    assert set(by_id) == {"policy", "rules"}
+    assert isinstance(by_id["policy"], PolicyGatePlugin)
+    assert by_id["policy"].settings is gate
+    assert by_id["rules"] is next(p for p in discover_gates() if p.gate_id == "rules")
 
 
 # ---------------------------------------------------------------------------

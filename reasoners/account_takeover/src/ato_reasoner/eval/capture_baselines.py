@@ -12,11 +12,8 @@ Stale fixtures across model swaps produce false-positive eval failures.
 
 Prerequisites:
     docker compose up -d
-    make build-policy-index-account_takeover   # pgvector + ES seeded
-    export OPENAI_API_KEY=sk-...
-    export ANTHROPIC_API_KEY=sk-ant-...   # not used by this script, but
-                                          # required by PipelineDriver
-                                          # constructor when available
+    make build-policy-index-ato-reasoner   # the policy gate's stores seeded
+    export OPENAI_API_KEY=sk-...           # the policy gate calls OpenAI
 
 Usage:
     make capture-baselines-account_takeover
@@ -36,7 +33,7 @@ import yaml
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.generator.factory import EventFactory
 from ato_reasoner.generator.loader import load_scenario
-from core.gate.policy import PolicyGateExtra, PolicyGateSnapshot
+from policy_rag_gate.models import PolicyGateExtra, PolicyGateSnapshot
 
 # Scenarios to drive — each maps to one captured fixture. Choose scenarios
 # the scorer routes to the gate (not fast-path); ALLOW/CHALLENGE/HOLD/BLOCK
@@ -199,7 +196,7 @@ def _write_yaml(cases: list[dict], path: Path) -> None:
         "# capturing more scenarios as polish §6 (calibration notebook)\n"
         "# tightens scorer routing.\n"
         "#\n"
-        "# Schema (from eval/dimensions/faithfulness.py):\n"
+        "# Schema (from policy_rag_gate/eval/faithfulness.py):\n"
         "#   case_id          — stable identifier\n"
         "#   rationale        — gate's natural-language justification\n"
         "#   contexts         — full retrieved snippet text list (the haystack)\n"

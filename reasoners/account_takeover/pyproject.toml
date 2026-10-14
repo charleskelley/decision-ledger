@@ -23,6 +23,10 @@ authors = [
 ]
 dependencies = [
     "decision-ledger",
+    # --- The gate this reasoner routes to ---
+    # ATO ships prompts, a policy corpus, and golden datasets for the RAG
+    # policy gate, and its eval driver exercises that gate's failure paths.
+    "decisionledger-gate-policy-rag",
     # --- ML scorer ---
     "xgboost>=2.0,<3",
     "numpy>=1.26,<3",
@@ -50,6 +54,7 @@ dev = [
 
 [tool.uv.sources]
 decision-ledger = { workspace = true }
+decisionledger-gate-policy-rag = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ato_reasoner"]

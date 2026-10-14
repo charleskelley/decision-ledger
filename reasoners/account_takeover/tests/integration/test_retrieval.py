@@ -1,17 +1,19 @@
 """Integration tests for hybrid retrieval over the ATO policy corpus.
 
-Requires Docker services (PostgreSQL + pgvector, Elasticsearch) with the
-ATO policy corpus already loaded via:
+Requires Docker services (PostgreSQL with the RAG policy gate's
+``policy_rag`` schema, Elasticsearch) with the ATO policy corpus already
+loaded into the gate's stores via:
 
-    uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
+    uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 
 (``make build-policy-index``). Run with: make test-integration
 
 These are the ATO-specific retrieval assertions (NIST, AAL2, credential
-stuffing, EU_GDPR filtering). The framework's own retriever contract is
-exercised against the stub corpus in ``tests/integration/test_retriever.py``;
-this file checks that the real corpus is indexed and discoverable under the
-``ato-reasoner`` tenant.
+stuffing, EU_GDPR filtering). The policy gate's own retriever contract is
+exercised against its fixture corpus in
+``gates/policy_rag/tests/integration/test_retriever.py``; this file checks
+that the real corpus is indexed and discoverable under the ``ato-reasoner``
+tenant.
 """
 
 from __future__ import annotations
@@ -22,17 +24,18 @@ from elasticsearch import Elasticsearch
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
-from app.retrieval.retriever import PolicyRetriever
 from app.settings import FrameworkSettings
 from ato_reasoner.registry import ATO_REGISTRATION
+from policy_rag_gate.retriever import PolicyRetriever
+from policy_rag_gate.settings import PolicyRagGateSettings
 
 pytestmark = pytest.mark.integration
 
-# Read the DSN + ES URL from FrameworkSettings so the tests honor whatever
-# the local .env / docker-compose stack actually configured.
-_FW = FrameworkSettings()
-_PG_DSN = _FW.postgres_dsn
-_ES_URL = _FW.elasticsearch_url
+# Read the DSN from FrameworkSettings and the ES URL from the policy gate's
+# own settings, so the tests honor whatever the local .env / docker-compose
+# stack actually configured.
+_PG_DSN = FrameworkSettings().postgres_dsn
+_ES_URL = PolicyRagGateSettings().elasticsearch_url
 _MODEL_NAME = "all-MiniLM-L6-v2"
 _ATO = ATO_REGISTRATION.reasoner_id
 

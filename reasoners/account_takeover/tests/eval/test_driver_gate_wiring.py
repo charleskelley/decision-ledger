@@ -1,12 +1,13 @@
 """Unit tests for the eval driver's gate wiring and the baseline capture's extraction.
 
-Since DR-28 the policy gate owns its retriever, prompt registry, and LLM
-client, so the eval ``PipelineDriver`` reaches them through the composed
-policy gate and injects faults by swapping in a policy gate built around the
-failing piece. ``capture_baselines`` reads the gate's rationale, citations,
-and retrieved contexts from its ``extra`` / ``evidence_snapshot``. All of it
-runs here without infrastructure: the driver is built without ``__init__``
-around stub services, a stub retriever, and ATO's real prompt templates.
+Since DR-28 the policy gate owns its retriever, prompt registry, LLM
+client, and per-reasoner profiles, so the eval ``PipelineDriver`` reaches
+them through the composed policy gate and injects faults by swapping in a
+policy gate built around the failing piece. ``capture_baselines`` reads the
+gate's rationale, citations, and retrieved contexts from its ``extra`` /
+``evidence_snapshot``. All of it runs here without infrastructure: the driver
+is built without ``__init__`` around stub services, a stub retriever, and
+ATO's real prompt templates.
 
 Per project rules no LLM response is mocked: the policy gate's client either
 fails the test if called or raises (the robustness fault-injection path), and
@@ -25,9 +26,6 @@ from uuid import uuid4
 
 import pytest
 
-from app.gate.policy.gate import PolicyGate
-from app.gate.policy.plugin import PolicyGatePlugin
-from app.gate.policy.prompt_registry import YamlPromptRegistry
 from app.gates import ComposedGate
 from app.plugin import FrameworkServices
 from app.reasoner_registry import StaticReasonerRegistry
@@ -39,15 +37,20 @@ from ato_reasoner.plugin import PLUGIN, AtoServices
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
 from core.actions import DecisionAction
+from core.exceptions import ObservationContractError
 from core.gate import GateOutput, GateVerdict
-from core.gate.policy import (
+from core.routes import GateRoute
+from policy_rag_gate.config import ReasonerProfile
+from policy_rag_gate.gate import PolicyGate
+from policy_rag_gate.models import (
     Citation,
     PolicyGateExtra,
     PolicyGateSnapshot,
     PromptSnapshot,
 )
-from core.routes import GateRoute
-from core.snippet import RetrievedSnippet
+from policy_rag_gate.models.snippet import RetrievedSnippet
+from policy_rag_gate.plugin import PolicyGatePlugin
+from policy_rag_gate.prompt_registry import YamlPromptRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures and doubles
@@ -193,11 +196,11 @@ def _driver(gates: dict[str, Any]) -> PipelineDriver:
 # ---------------------------------------------------------------------------
 
 
-def test_the_retriever_comes_from_the_composed_policy_gate():
-    retriever = _StubRetriever()
-    driver = _driver({"policy": _composed(_policy_gate(retriever))})
+def test_the_driver_reaches_the_composed_policy_gate():
+    gate = _policy_gate(_StubRetriever())
+    driver = _driver({"policy": _composed(gate)})
 
-    assert driver.retriever is retriever
+    assert driver._policy_gate() is gate
 
 
 @pytest.mark.parametrize(
@@ -207,7 +210,7 @@ def test_the_retriever_comes_from_the_composed_policy_gate():
 )
 def test_reaching_the_policy_gate_fails_loudly_when_it_is_not_composed(gates):
     with pytest.raises(RuntimeError, match="'policy' gate is not composed"):
-        _ = _driver(gates).retriever
+        _driver(gates)._policy_gate()
 
 
 def test_swapping_in_a_policy_gate_leaves_the_driver_and_other_gates_alone():
@@ -223,6 +226,30 @@ def test_swapping_in_a_policy_gate_leaves_the_driver_and_other_gates_alone():
     assert swapped.gates["rules"] is rules
     assert driver._framework.gates["policy"] is original
     assert swapped.store is driver._framework.store
+
+
+def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
+    # The composed gate lets ATO use only ato-v1; the swapped-in faulty gate
+    # must enforce the same profile, so the assembler's ato-v3 context is
+    # refused at intake instead of slipping through the fault-injection run.
+    profiles = {
+        ATO_REGISTRATION.reasoner_id: ReasonerProfile(
+            template_ids=frozenset({"ato-v1"}),
+            jurisdictions=frozenset({"INTERNAL", "US_FEDERAL"}),
+        )
+    }
+    gate = PolicyGate(
+        client=_ForbiddenClient(),  # type: ignore[arg-type]
+        prompt_registry=YamlPromptRegistry([PLUGIN.prompts_dir]),
+        retriever=_StubRetriever(),  # type: ignore[arg-type]
+        profiles=profiles,
+    )
+    driver = _driver({"policy": _composed(gate)})
+
+    with pytest.raises(ObservationContractError, match="'ato-v3' is not a prompt"):
+        asyncio.run(driver.run_with_forced_fallback(_event(), fallback_kind="llm_5xx"))
+
+    driver._framework.store.write.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -14,9 +14,11 @@ protocols) structurally — Python duck-typing, no inheritance. The ATO
 The robustness ``run_with_forced_*`` paths use private fault-injection
 wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
 the production failure surfaces without polluting production code. Both
-build a policy gate around the wrapper and swap it into the framework's
-composed gates for one decision; the retriever and prompt registry they
-reuse come from the composed policy gate itself (DR-28: the gate owns them).
+build a policy gate (``policy_rag_gate.PolicyGate``, the RAG policy gate ATO
+routes to) around the wrapper and swap it into the framework's composed
+gates for one decision; the retriever, prompt registry, and per-reasoner
+profiles they reuse come from the composed policy gate itself (DR-28: the
+gate owns them).
 """
 
 from __future__ import annotations
@@ -29,8 +31,7 @@ import structlog
 
 from app.bootstrap import build_framework_services
 from app.enforcement.resolver import resolve as resolve_enforcement
-from app.gate.policy import POLICY_GATE_ID, PolicyGate
-from app.gates import ComposedGate
+from app.gates import ComposedGate, discover_gates
 from app.settings import FrameworkSettings
 from ato_reasoner.assembler import build_observation
 from ato_reasoner.pipeline import run_ato_decision
@@ -38,20 +39,23 @@ from ato_reasoner.plugin import PLUGIN, AtoPlugin, resolve_model_path
 from ato_reasoner.registry import ATO_REGISTRATION
 from core.actions import DecisionAction
 from core.gate import GateOutput
-from core.gate.policy import PolicyGateExtra
 from core.routes import GateRoute
 from eval.dimensions.consistency import PipelineRunResult
+from policy_rag_gate import POLICY_GATE_ID, PolicyGate
+from policy_rag_gate.models import PolicyGateExtra
+from policy_rag_gate.plugin import PolicyGatePlugin
+from policy_rag_gate.settings import PolicyRagGateSettings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from app.plugin import FrameworkServices
-    from app.retrieval.retriever import PolicyRetriever
     from ato_reasoner.events import LoginEvent
     from ato_reasoner.plugin import AtoServices
     from ato_reasoner.settings import AtoSettings
     from core.llm.client import CompletionResult
-    from core.snippet import RetrievedSnippet
+    from policy_rag_gate.models.snippet import RetrievedSnippet
+    from policy_rag_gate.retriever import PolicyRetriever
 
 log = structlog.get_logger(__name__)
 
@@ -60,16 +64,20 @@ class PipelineDriver:
     """In-process driver into the live decision pipeline.
 
     Constructed once per harness run; holds open connections to Redis,
-    Postgres, and Elasticsearch for the duration. Call ``close()`` (or
-    use as a context manager) on shutdown to release them.
+    Postgres, and (through the composed policy gate) Elasticsearch for the
+    duration. Call ``close()`` (or use as a context manager) on shutdown to
+    release them.
 
     Args:
         framework_settings: Optional ``FrameworkSettings`` override. Defaults
             to a fresh ``FrameworkSettings()`` reading from the environment.
-            ``OPENAI_API_KEY`` must be set; the constructor raises
-            ``ValueError`` otherwise.
         ato_settings: Optional ``AtoSettings`` override. Defaults to a fresh
             ``AtoSettings()`` reading ``ATO_*`` vars from the environment.
+        gate_settings: Optional ``PolicyRagGateSettings`` for the policy
+            gate ATO routes to. Defaults to a fresh one reading from the
+            environment. The driver checks its ``OPENAI_API_KEY`` (raising
+            ``ValueError`` when empty) and builds the composed policy gate
+            from it, so its Elasticsearch URL and key are the ones used.
 
     Raises:
         ValueError: ``OPENAI_API_KEY`` is empty.
@@ -82,6 +90,7 @@ class PipelineDriver:
         *,
         framework_settings: FrameworkSettings | None = None,
         ato_settings: AtoSettings | None = None,
+        gate_settings: PolicyRagGateSettings | None = None,
     ) -> None:
         """Construct the driver and open all infrastructure connections."""
         fw = (
@@ -89,21 +98,29 @@ class PipelineDriver:
             if framework_settings is not None
             else FrameworkSettings()
         )
+        gate = gate_settings if gate_settings is not None else PolicyRagGateSettings()
 
         # Fail-fast configuration validation — before any infrastructure
-        # connection so misconfiguration surfaces immediately.
-        if not fw.openai_api_key:
+        # connection so misconfiguration surfaces immediately. The policy
+        # gate ATO routes to calls OpenAI.
+        if not gate.openai_api_key:
             msg = (
-                "OPENAI_API_KEY is required for PipelineDriver. "
-                "Set the env var or pass "
-                "FrameworkSettings(openai_api_key=...)."
+                "OPENAI_API_KEY is required for PipelineDriver (the policy "
+                "gate calls OpenAI). Set the env var or pass "
+                "PolicyRagGateSettings(openai_api_key=...)."
             )
             raise ValueError(msg)
 
         plugin = PLUGIN if ato_settings is None else AtoPlugin(settings=ato_settings)
         resolve_model_path(plugin.settings)
 
-        self._framework = build_framework_services(fw, [plugin])
+        # Every installed gate, with the policy gate bound to the settings
+        # checked above rather than to the entry point's own lazy settings.
+        gate_plugins = [
+            PolicyGatePlugin(settings=gate) if p.gate_id == POLICY_GATE_ID else p
+            for p in discover_gates()
+        ]
+        self._framework = build_framework_services(fw, [plugin], gate_plugins)
         self._services = plugin.build_services(self._framework)
 
         log.info(
@@ -153,15 +170,6 @@ class PipelineDriver:
     def services(self) -> AtoServices:
         """The ATO reasoner's services (feature service, scorer, Redis)."""
         return self._services
-
-    @property
-    def retriever(self) -> PolicyRetriever:
-        """Expose the policy gate's retriever for direct dimension consumption.
-
-        Lets the harness's ``RetrievalDimension`` reuse the same open
-        connections instead of opening a parallel set.
-        """
-        return self._policy_gate().retriever
 
     def _policy_gate(self) -> PolicyGate:
         """Return the composed policy gate this reasoner routes to.
@@ -324,6 +332,7 @@ class PipelineDriver:
                 client=_Raising5xxLLMClient(),
                 prompt_registry=policy_gate.prompt_registry,
                 retriever=policy_gate.retriever,
+                profiles=policy_gate.profiles,
             )
             bundle = await run_ato_decision(
                 event=event,
@@ -338,6 +347,7 @@ class PipelineDriver:
                 client=policy_gate.client,
                 prompt_registry=policy_gate.prompt_registry,
                 retriever=_RaisingRetriever(policy_gate.retriever),  # type: ignore[arg-type]
+                profiles=policy_gate.profiles,
             )
             try:
                 bundle = await run_ato_decision(
