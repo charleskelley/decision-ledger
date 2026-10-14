@@ -8,7 +8,8 @@ in the live eval run only.
 RAGAS itself depends transitively on LangChain — accepted because RAGAS
 implements paper-backed faithfulness scoring (claim decomposition +
 entailment) we'd otherwise have to reproduce. The coupling is encapsulated
-here; nothing in ``eval/dimensions/`` imports RAGAS directly.
+here; the faithfulness dimension imports nothing from RAGAS directly. RAGAS
+is the member's ``eval`` extra.
 """
 
 from __future__ import annotations

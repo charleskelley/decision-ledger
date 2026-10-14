@@ -28,7 +28,7 @@ from core.eval.metrics import (
     EvalDimension,
 )
 from eval.dimensions.base import DimensionRun
-from eval.judge import (
+from policy_rag_gate.eval.judge import (
     JudgePromptRegistry,
     JudgePromptTemplate,
     llm_judge,

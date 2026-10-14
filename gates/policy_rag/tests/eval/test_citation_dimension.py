@@ -18,14 +18,14 @@ from pydantic import BaseModel
 
 from core.eval.metrics import CitationMetrics, EvalDimension
 from core.llm import CompletionResult, LLMClient, TokenUsage
-from eval.dimensions.citation import (
+from policy_rag_gate.eval.citation import (
     SUPERFICIAL_BOUNDARY,
     CitationCase,
     CitationDimension,
     load_citation_cases,
     superficial_rate,
 )
-from eval.judge import JudgePromptRegistry
+from policy_rag_gate.eval.judge import JudgePromptRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path

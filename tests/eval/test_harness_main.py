@@ -7,7 +7,8 @@ Covers the exit-code and side-effect contracts of the CLI surface:
 - Exit 2 + no report file when no dimensions are registered.
 - Exit 0 when every dimension passes thresholds.
 - Exit 1 when any dimension fails its thresholds.
-- ``--output`` flag overrides the default staging path.
+- ``--output`` flag overrides the default staging path, which is per
+  reasoner (``outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json``).
 
 Stub dimensions are minimal and local — they don't depend on the
 ``test_harness.py`` stubs, so the file stays self-contained. Adapter
@@ -172,6 +173,22 @@ def test_main_exits_1_when_a_dimension_fails(
 
     assert rc == 1
     assert output_path.exists()
+
+
+def test_main_stages_the_report_per_reasoner_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without --output or $EVAL_OUTPUT_PATH, reports are staged per reasoner."""
+    monkeypatch.setattr(harness, "_build_default_dimensions", _dims(_PassingStub()))
+    monkeypatch.delenv("EVAL_OUTPUT_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    rc = harness.main(_ARGS)
+
+    assert rc == 0
+    staged = tmp_path / "outputs/stage/eval/reasoner" / _REASONER / "eval-report.json"
+    assert staged.is_file()
+    assert harness.default_output_path(_REASONER) == staged.relative_to(tmp_path)
 
 
 def test_main_writes_report_to_output_flag_path(

@@ -14,7 +14,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from core.llm import CompletionResult, LLMClient, TokenUsage
-from eval.judge import (
+from policy_rag_gate.eval.judge import (
     JudgeOutput,
     JudgePromptRegistry,
     JudgePromptTemplate,
@@ -147,7 +147,7 @@ class TestRenderUser:
 class _StubLLMClient:
     """Records inputs; returns a canned ``CompletionResult[JudgeOutput]``.
 
-    If anything inside ``llm_judge`` (or future eval/dimensions) requires the
+    If anything inside ``llm_judge`` (or future dimensions) requires the
     client to be a specific SDK class, this stub will fail to drive it — that
     is the SDK-agnostic boundary check.
     """

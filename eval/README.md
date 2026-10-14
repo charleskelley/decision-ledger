@@ -42,12 +42,15 @@ driver (`ato_reasoner/eval/driver.py`), golden datasets
 
 | Path | Purpose | Tracked? |
 |---|---|---|
-| `outputs/stage/eval/eval-report.json` | Default — overwritten by every `make eval` | gitignored |
-| `outputs/eval/eval-report-v<N>.json` | Tracked baselines, explicitly promoted from staging | tracked |
+| `outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json` | Default for this harness — overwritten by each run for that reasoner | gitignored |
+| `outputs/stage/eval/gate/<gate_id>/<reasoner_id>/eval-report.json` | Default for a gate's own harness (e.g. `make eval-gate-policy_rag`: retrieval, faithfulness, citation) | gitignored |
+| `outputs/eval/<kind>/<id>/eval-report-v<N>.json` | Tracked baselines (`<kind>` is `reasoner` or `gate`), explicitly promoted from staging | tracked |
+| `outputs/eval/eval-report-v<N>.json` | Tracked baselines from before the per-kind layout (history) | tracked |
 
-Every run writes the same default path, so when `make eval` covers more
-than one reasoner, the last run's report wins; pass `--output` per
-reasoner to keep each.
+Since Phase 1b of DR-28 the retrieval, faithfulness, and citation
+dimensions belong to the RAG policy gate (`gates/policy_rag`) and run in its
+own harness; this harness runs consistency and robustness. `make eval` runs
+every reasoner's harness, then every gate's.
 
 The tracked `eval-report-v2.json` (2026-10-11) is the current baseline: it
 was produced with the `ato-v3` prompt and the `reasoner_id`-filtered
@@ -57,12 +60,15 @@ retrieval dimension after DR-26. `eval-report-v1.json` (2026-05-06,
 Override the default with `--output PATH` or `EVAL_OUTPUT_PATH=…`; the
 flag wins when both are set.
 
-To capture a baseline as a tracked receipt:
+To capture a baseline as a tracked receipt (per reasoner, and per gate):
 
 ```bash
 make eval
-cp outputs/stage/eval/eval-report.json outputs/eval/eval-report-v<N>.json
-git add outputs/eval/eval-report-v<N>.json
+cp outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json \
+   outputs/eval/reasoner/<reasoner_id>/eval-report-v<N>.json
+cp outputs/stage/eval/gate/<gate_id>/<reasoner_id>/eval-report.json \
+   outputs/eval/gate/<gate_id>/<reasoner_id>/eval-report-v<N>.json
+git add outputs/eval/
 ```
 
 ## Exit codes
@@ -71,13 +77,16 @@ git add outputs/eval/eval-report-v<N>.json
 |---|---|
 | 0 | All dimensions passed thresholds (`overall_passed=true`) |
 | 1 | One or more dimensions failed thresholds |
-| 2 | Config error: no reasoner named, no eval adapter for it, missing API keys, or no dimensions registered (no report file written) |
+| 2 | Config error: no reasoner named, no eval adapter for it, a driver configuration error (e.g. a missing API key the reasoner's gate needs), or no dimensions registered (no report file written) |
 
 ## Required env vars
 
-`OPENAI_API_KEY` (the policy gate inside the reasoner's pipeline) and
-`ANTHROPIC_API_KEY` (the faithfulness and citation judges). The harness
-exits 2 when either is missing.
+This harness checks no key itself: the reasoner's driver fails fast on
+what its own gates need (ATO's driver requires `OPENAI_API_KEY` for the
+policy gate in its pipeline), and the CLI turns that into exit 2. The RAG
+policy gate's own harness (`make eval-gate-policy_rag`) requires
+`OPENAI_API_KEY` (RAGAS) and `ANTHROPIC_API_KEY` (the faithfulness and
+citation judges) and exits 2 when either is missing.
 
 ## EvalReport JSON schema
 

@@ -251,8 +251,9 @@ class ConsistencyDimension:
         stability = action_stability_rate(scenario_actions)
         conf_var = confidence_variance_across_orderings(scenario_confidences)
         # rationale_semantic_similarity is currently a placeholder; computing
-        # embedding similarity would re-introduce sentence-transformers in
-        # eval. Telemetry-only, so 1.0 (no signal yet) is acceptable for MVP.
+        # embedding similarity would bring an embedding model into the
+        # framework's eval. Telemetry-only, so 1.0 (no signal yet) is
+        # acceptable for MVP.
         rationale_sim = 1.0
 
         violations: list[str] = []

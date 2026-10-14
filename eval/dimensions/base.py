@@ -1,14 +1,15 @@
 """Dimension contract — the Protocol every concrete dimension implements.
 
-Each of the 5 dimensions (retrieval, faithfulness, consistency, citation,
-robustness) implements ``Dimension`` and returns a ``DimensionRun`` carrying
-both a generic ``DimensionResult`` (dimension/passed/metrics-dict/violations)
-and the typed metric container (``RetrievalMetrics``, ``FaithfulnessMetrics``,
+Every dimension — the framework's (consistency, robustness) and a gate's
+own (a retrieving gate's retrieval, faithfulness, and citation dimensions) —
+implements ``Dimension`` and returns a ``DimensionRun`` carrying both a
+generic ``DimensionResult`` (dimension/passed/metrics-dict/violations) and
+the typed metric container (``ConsistencyMetrics``, ``RobustnessMetrics``,
 etc.) the eval report stores in its typed fields.
 
-Dimensions take their dependencies (golden datasets, retriever, gate, judge
-clients) at construction time. ``evaluate()`` runs without further inputs —
-the harness just calls it.
+Dimensions take their dependencies (golden datasets, a pipeline driver, a
+gate's own clients) at construction time. ``evaluate()`` runs without
+further inputs — the harness just calls it.
 """
 
 from __future__ import annotations

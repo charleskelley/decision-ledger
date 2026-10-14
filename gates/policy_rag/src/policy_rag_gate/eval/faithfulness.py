@@ -5,8 +5,9 @@ to. The dimension scores:
 
 - ``ragas_faithfulness`` — RAGAS' faithfulness metric, which decomposes the
   rationale into atomic claims and checks each against the contexts. The
-  ``RagasFaithfulnessScorer`` protocol abstracts the call so eval/ stays
-  SDK-agnostic; the concrete adapter lives in ``eval.clients.ragas``.
+  ``RagasFaithfulnessScorer`` protocol abstracts the call so the dimension
+  stays SDK-agnostic; the concrete adapter lives in
+  ``policy_rag_gate.eval.ragas``.
 - ``llm_judge_grounding`` — independent secondary judge via ``LLMClient``
   + ``faithfulness_grounding`` prompt. Cross-validates RAGAS with a
   different prompt formulation.
@@ -32,7 +33,7 @@ from core.eval.metrics import (
     FaithfulnessMetrics,
 )
 from eval.dimensions.base import DimensionRun
-from eval.judge import JudgePromptRegistry, llm_judge
+from policy_rag_gate.eval.judge import JudgePromptRegistry, llm_judge
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -170,9 +171,9 @@ def hallucination_rate(judge_scores: Sequence[float]) -> float:
 class RagasFaithfulnessScorer(Protocol):
     """SDK-agnostic adapter for RAGAS' faithfulness metric.
 
-    Concrete implementation in ``eval.clients.ragas``. The dimension only
-    knows the protocol; the LangChain wiring RAGAS needs is encapsulated
-    in the adapter.
+    Concrete implementation in ``policy_rag_gate.eval.ragas``. The dimension
+    only knows the protocol; the LangChain wiring RAGAS needs is
+    encapsulated in the adapter.
     """
 
     async def score(self, *, rationale: str, contexts: Sequence[str]) -> float:

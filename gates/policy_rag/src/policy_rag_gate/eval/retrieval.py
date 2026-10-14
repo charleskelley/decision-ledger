@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from core.snippet import RetrievedSnippet
+    from policy_rag_gate.models.snippet import RetrievedSnippet
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds.
@@ -228,20 +228,20 @@ def jurisdictions_respected(
 
 
 # ---------------------------------------------------------------------------
-# Retriever protocol — SDK-agnostic boundary into app/retrieval/
+# Retriever protocol — SDK-agnostic boundary into the gate's retriever
 # ---------------------------------------------------------------------------
 
 
 class RetrieverClient(Protocol):
     """SDK-agnostic interface to whatever retriever is under test.
 
-    The MVP implementation is ``app.retrieval.retriever.PolicyRetriever``; a
-    test stub satisfies this same protocol so the dimension's wire-up can be
+    The implementation is the gate's own ``PolicyRetriever``; a test stub
+    satisfies this same protocol so the dimension's wire-up can be
     unit-tested without Postgres or Elasticsearch running.
 
-    ``reasoner_id`` is the tenant filter the production pipeline always
-    passes; the dimension forwards it on every call so eval exercises the
-    same tenant-scoped path as ``execute_decision``.
+    ``reasoner_id`` is the tenant filter the gate always passes; the
+    dimension forwards it on every call so eval exercises the same
+    tenant-scoped path as a live decision.
     """
 
     def retrieve(

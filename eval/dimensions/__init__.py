@@ -1,4 +1,4 @@
-"""Per-dimension implementations for the 5-dimension eval harness."""
+"""The framework's eval dimensions and the ``Dimension`` contract gates reuse."""
 
 from eval.dimensions.base import Dimension, DimensionMetrics, DimensionRun
 

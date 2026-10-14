@@ -1,9 +1,9 @@
 """LLM-as-judge primitive for the eval harness.
 
-The judge consumes the universal ``core.llm.LLMClient`` (DR-23) — same
-adapter the policy gate uses. Swapping models means swapping the
-``LLMClient`` instance at the wiring edge; nothing inside ``eval/judge.py``,
-``eval/dimensions/``, or ``eval/runners/`` changes.
+The judge consumes the framework's ``core.llm.LLMClient`` protocol
+(DR-23) — the same protocol the policy gate's own client satisfies.
+Swapping models means swapping the ``LLMClient`` instance at the wiring
+edge; nothing in the judge or the dimensions that call it changes.
 
 Judge-domain types (``JudgeOutput``, ``JudgePromptRegistry``,
 ``JudgePromptTemplate``) live here. They wrap the universal LLM call
@@ -11,13 +11,12 @@ with the judge's score-and-reasoning rubric.
 
 Usage::
 
-    from openai import AsyncOpenAI
-    from app.llm.openai import OpenAILLMClient
-    from eval.judge import JudgePromptRegistry, llm_judge
+    from policy_rag_gate.eval.judge import JudgePromptRegistry, llm_judge
+    from policy_rag_gate.llm.anthropic import AnthropicLLMClient
 
     registry = JudgePromptRegistry()
     template = registry.get("faithfulness_grounding")
-    client = OpenAILLMClient(client=AsyncOpenAI(), model="gpt-4o-2024-08-06")
+    client = AnthropicLLMClient(model="claude-sonnet-4-6")
     output = await llm_judge(
         template=template,
         template_vars={"rationale": "...", "context": "..."},
@@ -40,7 +39,7 @@ if TYPE_CHECKING:
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts" / "judges"
 
-# Variable placeholder regex — same convention as app/gate/policy/prompt_registry.py.
+# Variable placeholder regex — same convention as policy_rag_gate/prompt_registry.py.
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
 
@@ -120,7 +119,8 @@ def _load_template(path: Path) -> JudgePromptTemplate:
 class JudgePromptRegistry:
     """File-based registry for judge prompt templates.
 
-    Loads all ``*.yaml`` files in ``eval/prompts/judges/`` at construction.
+    Loads all ``*.yaml`` files in ``policy_rag_gate/eval/prompts/judges/`` at
+    construction.
     Templates are immutable once loaded — same pattern as the policy gate's
     ``YamlPromptRegistry``.
 

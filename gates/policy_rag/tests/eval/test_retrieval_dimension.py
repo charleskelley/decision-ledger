@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from core.eval.metrics import EvalDimension, RetrievalMetrics
-from core.snippet import RetrievedSnippet
-from eval.dimensions.retrieval import (
+from policy_rag_gate.eval.retrieval import (
     GoldenQuery,
     RetrievalDimension,
     has_correct_top_version,
@@ -23,6 +22,7 @@ from eval.dimensions.retrieval import (
     recall_at_k,
     reciprocal_rank,
 )
+from policy_rag_gate.models.snippet import RetrievedSnippet
 
 if TYPE_CHECKING:
     from pathlib import Path

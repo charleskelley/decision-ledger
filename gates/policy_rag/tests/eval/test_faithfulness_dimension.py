@@ -19,14 +19,14 @@ from pydantic import BaseModel
 
 from core.eval.metrics import EvalDimension, FaithfulnessMetrics
 from core.llm import CompletionResult, TokenUsage
-from eval.dimensions.faithfulness import (
+from policy_rag_gate.eval.faithfulness import (
     HALLUCINATION_BOUNDARY,
     FaithfulnessCase,
     FaithfulnessDimension,
     citation_rationale_overlap,
     hallucination_rate,
 )
-from eval.judge import JudgePromptRegistry
+from policy_rag_gate.eval.judge import JudgePromptRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
