@@ -47,9 +47,9 @@ lives in the `ato_reasoner` package under `reasoners/account_takeover/src/`.
 - [`run_ato_decision`][ato_reasoner.pipeline.run_ato_decision]
   — Domain pipeline orchestrator: features → scorer → assembler →
   framework.
-- [`PolicyGateOutput`][core.gate.policy.PolicyGateOutput] — The
-  structured output the LLM gate must produce; verified against schema
-  before reaching enforcement.
+- [`GateOutput`][core.gate.GateOutput] — The open output contract every
+  gate returns (DR-28): the universal verdict enforcement reads, plus the
+  gate's opaque evidence snapshot and extra fields.
 - [`ResolutionAttempt`][core.resolution.ResolutionAttempt] —
   Append-only resolver record for non-terminal actions
   (`CHALLENGE`, `HOLD`).

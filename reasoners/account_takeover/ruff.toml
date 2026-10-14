@@ -4,7 +4,7 @@ extend = "../../pyproject.toml"
 src = ["src", "tests", "../.."]
 
 [lint.isort]
-known-first-party = ["core", "app", "eval", "ato_reasoner"]
+known-first-party = ["core", "app", "eval", "ato_reasoner", "policy_rag_gate"]
 
 [lint.extend-per-file-ignores]
 "src/ato_reasoner/**/*.py" = [

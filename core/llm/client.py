@@ -1,14 +1,12 @@
 """Universal LLM-call contract.
 
-``LLMClient`` is the SDK-agnostic structured-completion primitive both
-the policy gate (``app/gate/policy/gate.py``) and the eval harness's
-judge layer (``eval/judge.py``) consume. Concrete adapters live in
-``app/llm/`` — one per provider.
+``LLMClient`` is the SDK-agnostic structured-completion primitive an
+LLM-backed gate and its eval judges consume. Concrete adapters — one per
+provider — live in the workspace member of the gate that uses them, and
+they are the only modules permitted to import an LLM SDK class (DR-23).
 
 This module has zero infrastructure dependencies (preserves the
-``core/`` boundary): only Pydantic, typing, and stdlib imports. Concrete
-adapters in ``app/llm/`` are the only modules permitted to import an
-LLM SDK class.
+``core/`` boundary): only Pydantic, typing, and stdlib imports.
 """
 
 from __future__ import annotations
@@ -52,9 +50,9 @@ class CompletionResult(BaseModel, Generic[T]):
     """Wrap a parsed structured completion with its operational metadata.
 
     ``parsed`` is the validated Pydantic instance the caller asked for.
-    ``usage`` and ``latency_ms`` are universal observability fields the
-    audit layer (``PolicyGateOutput.token_cost``) and the eval layer
-    (cost tracking, latency telemetry) both record.
+    ``usage`` and ``latency_ms`` are universal observability fields that an
+    LLM-backed gate records in its ``GateOutput.extra`` and the eval layer
+    (cost tracking, latency telemetry) records for judges.
 
     Attributes:
         parsed: Pydantic-validated response; type narrowed by the
@@ -73,10 +71,10 @@ class CompletionResult(BaseModel, Generic[T]):
 class LLMClient(Protocol):
     """SDK-agnostic structured-completion contract.
 
-    Implementations live in ``app/llm/`` (one per provider). Consumers
-    (``PolicyGate``, ``llm_judge``) accept this protocol; they never
-    import an LLM SDK directly. Swapping providers is a constructor
-    swap at the wiring edge.
+    Implementations live with the gate that uses them, one per provider, in
+    that gate's workspace member. Consumers (an LLM-backed gate, its eval
+    judges) accept this protocol; they never import an LLM SDK directly.
+    Swapping providers is a constructor swap at the wiring edge.
 
     All implementations are async — LLM calls are I/O-bound and the
     primary callers (FastAPI route handler, eval dimensions) are
@@ -97,8 +95,8 @@ class LLMClient(Protocol):
             user: User message containing the task.
             response_format: Pydantic model class the response must
                 validate against. Adapters translate this into the
-                provider's structured-output mechanism (OpenAI strict
-                JSON schema, Anthropic tool input schema, etc.).
+                provider's structured-output mechanism (a strict JSON
+                schema, a forced tool-call input schema, etc.).
 
         Returns:
             ``CompletionResult[T]`` with parsed instance, token usage,

@@ -1,8 +1,11 @@
 # Secrets management
 
-DecisionLedger reads every secret from environment variables, with a
-single read site at `app/settings.py:Settings`. Where those env vars come
-from is a deployment concern, not an application concern. This page
+DecisionLedger reads every secret from environment variables, each in
+the settings class of the component that uses it: `FrameworkSettings`
+(`app/settings.py`) for the framework's Postgres, and a gate's or
+reasoner's own prefixed settings class for that plugin (the RAG policy
+gate's `PolicyRagGateSettings` reads the LLM keys). Where those env vars
+come from is a deployment concern, not an application concern. This page
 covers the three deployment modes the project targets: local development,
 CI/CD, and production cloud.
 
@@ -10,16 +13,17 @@ CI/CD, and production cloud.
 
 | Variable             | Purpose                                                                | Required for                        |
 | -------------------- | ---------------------------------------------------------------------- | ----------------------------------- |
-| `OPENAI_API_KEY`     | Policy gate calls (PolicyGate consumes OpenAILLMClient).               | Any pipeline run, `make test-smoke` |
-| `ANTHROPIC_API_KEY`  | Eval-harness faithfulness/citation judges (cross-family bias control). | `make eval`                         |
+| `OPENAI_API_KEY`     | RAG policy gate calls (`gates/policy_rag`: PolicyGate consumes OpenAILLMClient). | Any pipeline run, `make test-smoke` |
+| `ANTHROPIC_API_KEY`  | The RAG policy gate's eval judges, faithfulness and citation (cross-family bias control). | `make eval`, `make eval-gate-policy_rag` |
 
-Infrastructure values (Postgres credentials, Elasticsearch URL) also flow
-through `FrameworkSettings`, but their defaults match `docker-compose.yml` so
-they rarely need overriding. Reasoner-owned infrastructure is configured under
-the reasoner's own prefix and read by its own settings class (ATO:
-`ATO_REDIS_URL` in `AtoSettings`, defaulting to the Redis in
-`reasoners/account_takeover/compose.yaml`). See `.env.example` for the
-complete list.
+Framework infrastructure values (Postgres credentials) flow through
+`FrameworkSettings`; their defaults match `docker-compose.yml` so they rarely
+need overriding. Plugin-owned infrastructure is configured under the plugin's
+own prefix and read by its own settings class: ATO's `ATO_REDIS_URL` in
+`AtoSettings` (the Redis in `reasoners/account_takeover/compose.yaml`), and the
+RAG policy gate's `POLICY_RAG_GATE_ELASTICSEARCH_URL` in `PolicyRagGateSettings`
+(the Elasticsearch in `gates/policy_rag/compose.yaml`). See `.env.example` for
+the complete list.
 
 ## Architecture: one read site, many sources
 
@@ -166,7 +170,7 @@ long-lived API keys baked into images.
     ],
     "environment": [
       {"name": "POSTGRES_HOST", "value": "<rds-endpoint>"},
-      {"name": "ELASTICSEARCH_URL", "value": "<opensearch-endpoint>"}
+      {"name": "POLICY_RAG_GATE_ELASTICSEARCH_URL", "value": "<opensearch-endpoint>"}
     ]
   }],
   "taskRoleArn": "arn:aws:iam::ACCOUNT:role/decisionledger-task-role"
@@ -175,8 +179,8 @@ long-lived API keys baked into images.
 
 ECS reads each `secrets` entry at container start and injects the
 resolved value as an env var of the named key. The application boots and
-`Settings()` reads `OPENAI_API_KEY` from the environment exactly the
-same way it does locally.
+the RAG policy gate's settings (and the OpenAI SDK) read `OPENAI_API_KEY`
+from the environment exactly the same way they do locally.
 
 **IAM task role policy (least privilege):**
 
@@ -252,7 +256,7 @@ at request time. App returns "demo paused" until the budget resets.
 ### Per-call cost monitoring
 
 The pipeline already records `TokenCost` on every gate call (see
-`app/llm/_pricing.py`). For the live demo, scrape these metrics into
+`gates/policy_rag/src/policy_rag_gate/llm/pricing.py`). For the live demo, scrape these metrics into
 CloudWatch (via a structured-log ingestion path) so you have per-day,
 per-scenario, per-user spend visibility.
 
@@ -272,14 +276,19 @@ uv run pre-commit run gitleaks --all-files
 # 3. .env not tracked
 git check-ignore .env && echo ".env is gitignored"
 
-# 4. .env.example covers every FrameworkSettings field (reasoner-prefixed
-#    vars such as ATO_* belong to the reasoner's settings class; excluded here)
+# 4. .env.example covers every FrameworkSettings field (plugin-prefixed vars
+#    — ATO_*, RULES_GATE_*, POLICY_RAG_GATE_* — and the providers' own LLM key
+#    variables belong to plugin settings classes; excluded here)
 diff <(grep -oE '^\s*[a-z_]+: ' app/settings.py | sed 's/[: ]//g' | sort -u) \
-     <(grep -oE '^[A-Z_]+=' .env.example | grep -v '^ATO_' | sed 's/=//' | tr 'A-Z' 'a-z' | sort -u)
+     <(grep -oE '^[A-Z_]+=' .env.example \
+         | grep -vE '^(ATO_|RULES_GATE_|POLICY_RAG_GATE_|OPENAI_API_KEY|ANTHROPIC_API_KEY)' \
+         | sed 's/=//' | tr 'A-Z' 'a-z' | sort -u)
 
-# 5. CI boundary check (DR-23) catches accidental SDK leaks
-! grep -rE "^(from|import) (openai|anthropic)" --include="*.py" \
-    app/ core/ eval/ reasoners/ tests/ | grep -v "^app/llm/"
+# 5. CI boundary check (DR-23) catches accidental SDK leaks: only the RAG
+#    policy gate's llm/ adapters may import an LLM SDK, at any indentation
+! grep -rE "^[[:space:]]*(from|import)[[:space:]]+(openai|anthropic)([[:space:].]|$)" \
+    --include="*.py" app/ core/ eval/ reasoners/ gates/ tests/ \
+    | grep -v "^gates/policy_rag/src/policy_rag_gate/llm/"
 ```
 
 Failing any of these means a secrets-discipline regression has landed.

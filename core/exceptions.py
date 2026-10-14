@@ -61,3 +61,43 @@ class ReasonerPluginError(Exception):
         self.plugin_name = plugin_name
         self.reason = reason
         super().__init__(f"Reasoner plugin error [{plugin_name}]: {reason}")
+
+
+class GatePluginError(Exception):
+    """Raised when the framework cannot discover, build, or trust a gate.
+
+    A deployment-composition error, the gate-side twin of
+    ``ReasonerPluginError``: a ``decisionledger.gates`` entry point fails to
+    load, does not satisfy the ``GatePlugin`` protocol, declares a name that
+    differs from its ``gate_id`` or an unknown ``kind``, or collides with
+    another gate; an observation names a gate this deployment does not
+    compose; or a gate returns a ``GateOutput`` that misstates its own
+    ``gate_id`` or ``deterministic`` flag. Raised loudly so a broken
+    deployment or a misbehaving gate never yields a silently wrong decision.
+
+    Args:
+        gate_id: The entry-point name or ``gate_id`` of the offending gate.
+        reason: Human-readable description of what went wrong.
+    """
+
+    def __init__(self, gate_id: str, reason: str) -> None:  # noqa: D107
+        self.gate_id = gate_id
+        self.reason = reason
+        super().__init__(f"Gate plugin error [{gate_id}]: {reason}")
+
+
+class PredicateError(ValueError):
+    """Raised when a predicate cannot be evaluated against its subject.
+
+    The predicate language (``core.gate.predicate``) is closed and pure; it
+    refuses to guess. A field the subject does not carry, or an ordering
+    comparison whose operand is not a number, raises this error so the
+    caller (a rules gate, a bypass-rule check) can fail closed.
+
+    Args:
+        reason: Human-readable description of what could not be evaluated.
+    """
+
+    def __init__(self, reason: str) -> None:  # noqa: D107
+        self.reason = reason
+        super().__init__(f"Predicate evaluation error: {reason}")

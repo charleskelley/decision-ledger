@@ -1,39 +1,64 @@
-"""Gate layer — universal contracts for any gate kind in DecisionLedger.
+"""Gate layer — universal contracts for any gate in DecisionLedger.
 
-Top-level module defines the universal contracts every gate kind
-satisfies: ``GateInput``, ``GateOutput``, ``GateVerdict``. Plus framework
-corpus metadata (``DocumentType``, ``PolicyDocument``) used by retrieving
-gates of any kind.
+Defines what every gate satisfies and what the framework stores (DR-28):
 
-Per DR-20, gate-implementation-specific types live under
-``core.gate.<kind>/`` subpackages — concrete subclasses, kind-specific
-sub-records, and per-kind protocols. The reference LLM-backed policy gate
-lives at ``core.gate.policy``. Concrete-type imports go through the
-relevant subpackage explicitly: ``from core.gate.policy import
-PolicyGateInput`` (not via this module's surface).
+- ``GateOutput`` — the open output contract: a typed universal base
+  (``gate_id``, ``deterministic``, ``verdict``, ``evidence``) plus an opaque,
+  gate-owned extension (``evidence_snapshot``, ``extra``) the framework
+  stores verbatim and never interprets. The framework never defines or
+  imports a ``GateOutput`` subclass.
+- ``EvidenceRef`` — a reference to one source a gate relied on.
+- ``GateVerdict`` — the universal verdict enforcement consumes.
+- ``GateInput`` — the framework's record that it invoked a gate.
+- The predicate language (``Compare``, ``AllOf``, ``AnyOf``, ``Not``,
+  ``evaluate_predicate``) shared by the rules gate and registered bypass
+  rules.
 
-``GateRoute`` is at the framework root in ``core.routes`` — the routing
-concept is produced upstream of the gate by the domain reasoner and
-consumed downstream by the gate, so it lives where both can import it
-without crossing subpackage boundaries.
+``GateRequest`` — what the framework hands a gate — lives at the framework
+root in ``core.gate_request`` because it carries the intake ``Observation``,
+and ``core/gate/`` does not import ``core/observation/`` (DR-11).
 
-Public API at this level — universal contracts only:
-    GateInput:       Universal input contract — base for per-kind subclasses.
-    GateOutput:      Universal output contract — base for per-kind subclasses.
-    GateVerdict:     Universal verdict — what enforcement consumes.
-    DocumentType:    Document type enum (used by retrieval corpus metadata).
-    PolicyDocument:  Metadata schema for a versioned corpus document.
+A gate's own typed models (a structured-output verdict schema, citations,
+prompt templates, the schemas of its ``evidence_snapshot`` / ``extra``) live
+in that gate's workspace member, never here: they are the gate's private
+vocabulary, and the framework stores only the universal contracts above
+(``tests/test_framework_boundary.py`` enforces it).
+
+Public API at this level:
+    GateInput:        The framework's record of one gate invocation.
+    GateOutput:       Open output contract — universal base + opaque extension.
+    EvidenceRef:      Reference to a source a gate relied on.
+    GateVerdict:      Universal verdict — what enforcement consumes.
+    Predicate:        Discriminated union of the four predicate node kinds.
+    Compare, AllOf, AnyOf, Not:  Predicate nodes.
+    evaluate_predicate, parse_predicate, referenced_fields:  Predicate helpers.
 """
 
 from core.gate.input import GateInput
-from core.gate.output import GateOutput
-from core.gate.policy.corpus import DocumentType, PolicyDocument
+from core.gate.output import EvidenceRef, GateOutput
+from core.gate.predicate import (
+    AllOf,
+    AnyOf,
+    Compare,
+    Not,
+    Predicate,
+    evaluate_predicate,
+    parse_predicate,
+    referenced_fields,
+)
 from core.gate.verdict import GateVerdict
 
 __all__ = [
-    "DocumentType",
+    "AllOf",
+    "AnyOf",
+    "Compare",
+    "EvidenceRef",
     "GateInput",
     "GateOutput",
     "GateVerdict",
-    "PolicyDocument",
+    "Not",
+    "Predicate",
+    "evaluate_predicate",
+    "parse_predicate",
+    "referenced_fields",
 ]

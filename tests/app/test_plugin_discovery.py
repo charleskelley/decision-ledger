@@ -16,14 +16,13 @@ the shape an installed package declares, and composed through
 - ``create_app(plugins=[PLUGIN])`` mounts ``/api/v1/stub/*`` next to the
   framework routes without starting the lifespan; ``create_app()`` with no
   argument runs discovery with the ``DECISIONLEDGER_REASONERS`` allowlist.
-- The stub's ``prompts/stub-v1.yaml`` loads through ``YamlPromptRegistry``
-  and its ``corpus/*.md`` parse and chunk through the corpus loader, so a
-  malformed exemplar asset fails ``make test`` rather than a live boot.
 - Starting the lifespan (with ``build_framework_services`` replaced by a
   fake) builds each plugin's services against the framework, exposes them
   on ``app.state``, closes reasoners before the framework on shutdown,
   cleans up when a plugin fails to build, and warns when no plugin is
   composed. No infrastructure is touched.
+- ``create_app`` hands explicit gate plugins to the bootstrap unchanged and,
+  without them, composes every installed gate (``decisionledger.gates``).
 
 The multi-plugin lifecycle cases need a second, instrumented plugin; the
 small ``_FakePlugin`` below provides it (with a close-order journal). It is
@@ -44,7 +43,6 @@ from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
-from app.gate.policy.prompt_registry import DEFAULT_SYSTEM_TEXT, YamlPromptRegistry
 from app.main import create_app
 from app.plugin import FrameworkServices, ReasonerPlugin
 from app.plugins import (
@@ -53,10 +51,10 @@ from app.plugins import (
     build_registry,
     discover_plugins,
 )
-from app.retrieval.corpus_loader import chunk_document, parse_document
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
 from core.observation import ReasonerRegistration
+from tests._fake_gate.plugin import FakeGatePlugin
 from tests._stub_reasoner.plugin import PLUGIN, StubServices
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
@@ -105,8 +103,6 @@ def _registration(reasoner_id: str) -> ReasonerRegistration:
         reasoner_id=reasoner_id,
         reasoner_name=f"{reasoner_id} (fake)",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset({"fake-v1"}),
-        allowed_jurisdictions=frozenset({"REGION_A"}),
     )
 
 
@@ -163,7 +159,6 @@ def test_stub_plugin_points_at_real_prompt_and_corpus_directories():
         "stub-policy-a.md",
         "stub-policy-b.md",
     ]
-    assert PLUGIN.registration.allowed_prompt_template_ids == {"stub-v1"}
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +278,7 @@ def _route_paths(app) -> set[str]:
 
 def test_create_app_mounts_stub_router_next_to_framework_routes():
     """The 'second reasoner, zero framework diff' proof: no app/ edit needed."""
-    app = create_app(plugins=[PLUGIN])
+    app = create_app(plugins=[PLUGIN], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/api/v1/stub/ping" in paths
@@ -293,7 +288,7 @@ def test_create_app_mounts_stub_router_next_to_framework_routes():
 
 
 def test_create_app_mounts_every_plugin_router():
-    app = create_app(plugins=[ALPHA, PLUGIN])
+    app = create_app(plugins=[ALPHA, PLUGIN], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/api/v1/alpha/decisions" in paths
@@ -301,7 +296,7 @@ def test_create_app_mounts_every_plugin_router():
 
 
 def test_create_app_with_no_plugins_keeps_framework_routes():
-    app = create_app(plugins=[])
+    app = create_app(plugins=[], gate_plugins=[])
 
     paths = _route_paths(app)
     assert "/health" in paths
@@ -318,12 +313,18 @@ def test_create_app_with_no_plugins_keeps_framework_routes():
 def fake_framework(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Replace ``build_framework_services`` so no infrastructure is touched.
 
-    Returns the ``FrameworkServices`` double the lifespan will receive.
+    Returns the ``FrameworkServices`` double the lifespan will receive; the
+    gate plugins the lifespan handed to the bootstrap are recorded on its
+    ``received_gate_plugins`` attribute.
     """
     framework = MagicMock(spec=FrameworkServices)
-    monkeypatch.setattr(
-        "app.main.build_framework_services", lambda settings, plugins: framework
-    )
+    framework.gates = {}
+
+    def _build(settings: Any, plugins: Any, gate_plugins: Any) -> MagicMock:
+        framework.received_gate_plugins = gate_plugins
+        return framework
+
+    monkeypatch.setattr("app.main.build_framework_services", _build)
     return framework
 
 
@@ -343,7 +344,7 @@ def journal(fake_framework: MagicMock) -> list[str]:
 def test_lifespan_builds_each_plugin_against_the_framework_services(
     fake_framework: MagicMock, journal: list[str]
 ):
-    app = create_app(plugins=[PLUGIN, ALPHA])
+    app = create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])
 
     with TestClient(app) as client:
         assert app.state.framework is fake_framework
@@ -359,7 +360,7 @@ def test_lifespan_builds_each_plugin_against_the_framework_services(
 def test_lifespan_serves_stub_routes_once_started(
     fake_framework: MagicMock, journal: list[str]
 ):
-    with TestClient(create_app(plugins=[PLUGIN])) as client:
+    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[])) as client:
         response = client.get("/api/v1/stub/ping")
 
     assert response.status_code == 200
@@ -369,7 +370,7 @@ def test_lifespan_serves_stub_routes_once_started(
 def test_shutdown_closes_reasoners_before_the_framework(
     fake_framework: MagicMock, journal: list[str]
 ):
-    with TestClient(create_app(plugins=[PLUGIN, ALPHA])):
+    with TestClient(create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])):
         assert journal == []
         assert PLUGIN.services is not None
         assert not PLUGIN.services.closed
@@ -385,7 +386,7 @@ def test_plugin_build_failure_closes_built_services_and_propagates(
     fake_framework: MagicMock, journal: list[str]
 ):
     exploding = _ExplodingPlugin("gamma-reasoner", "/api/v1/gamma")
-    app = create_app(plugins=[ALPHA, exploding])
+    app = create_app(plugins=[ALPHA, exploding], gate_plugins=[])
 
     with (
         pytest.raises(RuntimeError, match="gamma-reasoner cannot start"),
@@ -402,7 +403,7 @@ def test_plugin_build_failure_closes_built_services_and_propagates(
 def test_lifespan_with_no_plugins_warns_and_serves_framework_routes(
     fake_framework: MagicMock, caplog: pytest.LogCaptureFixture
 ):
-    app = create_app(plugins=[])
+    app = create_app(plugins=[], gate_plugins=[])
 
     with caplog.at_level(logging.WARNING), TestClient(app) as client:
         assert app.state.reasoners == {}
@@ -412,55 +413,23 @@ def test_lifespan_with_no_plugins_warns_and_serves_framework_routes(
     fake_framework.close.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# The stub's shipped assets load through the same framework code paths that
-# consume a real reasoner's prompts and corpus. Filenames alone prove nothing;
-# a malformed stub-v1.yaml or bad front matter would otherwise surface only
-# at lifespan or corpus-load time, outside `make test`.
-# ---------------------------------------------------------------------------
-
-
-def test_stub_prompts_dir_loads_through_the_prompt_registry():
-    registry = YamlPromptRegistry([PLUGIN.prompts_dir])
-
-    assert registry.registered_ids() == ["stub-v1"]
-    template = registry.get("stub-v1")
-    assert template.required_vars == {"region", "thin_history", "widget_score"}
-    # stub-v1.yaml deliberately has no `system:` key, so it exercises the
-    # framework-default system text path.
-    assert template.system_text == DEFAULT_SYSTEM_TEXT
-
-
-def test_stub_registration_allows_only_templates_the_stub_ships():
-    registry = YamlPromptRegistry([PLUGIN.prompts_dir])
-
-    assert PLUGIN.registration.allowed_prompt_template_ids <= set(
-        registry.registered_ids()
-    )
-
-
-@pytest.mark.parametrize(
-    ("filename", "policy_id", "title", "jurisdiction"),
-    [
-        ("stub-policy-a.md", "STUB-POLICY-A", "Stub Widget Policy A", "REGION_A"),
-        ("stub-policy-b.md", "STUB-POLICY-B", "Stub Widget Guidance B", "REGION_B"),
-    ],
-)
-def test_stub_corpus_documents_parse_and_chunk(
-    filename: str, policy_id: str, title: str, jurisdiction: str
+def test_lifespan_hands_explicit_gate_plugins_to_the_bootstrap(
+    fake_framework: MagicMock, journal: list[str]
 ):
-    doc, body = parse_document(PLUGIN.corpus_dir / filename)
-    chunks = chunk_document(doc, body)
+    gate = FakeGatePlugin("fake")
 
-    assert doc.policy_id == policy_id
-    assert doc.title == title
-    assert doc.jurisdiction == jurisdiction
-    assert jurisdiction in STUB_REGISTRATION.allowed_jurisdictions
-    # Three chunks per document; the integration retriever tests rely on the
-    # stub corpus holding more than k=3 chunks in total.
-    assert len(chunks) == 3
-    assert all(chunk["title"] == title for chunk in chunks)
-    assert all(chunk["jurisdiction"] == jurisdiction for chunk in chunks)
+    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[gate])):
+        assert fake_framework.received_gate_plugins == [gate]
+
+
+def test_create_app_without_gate_plugins_composes_every_installed_gate(
+    fake_framework: MagicMock, journal: list[str], monkeypatch: pytest.MonkeyPatch
+):
+    discovered = [FakeGatePlugin("fake")]
+    monkeypatch.setattr("app.main.discover_gates", lambda: discovered)
+
+    with TestClient(create_app(plugins=[PLUGIN])):
+        assert fake_framework.received_gate_plugins == discovered
 
 
 # ---------------------------------------------------------------------------

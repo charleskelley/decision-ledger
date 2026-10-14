@@ -1,7 +1,7 @@
 """SkippedDimension wrapper — placeholder for unwired dimensions.
 
-Conforms to the ``Dimension`` protocol so the harness can list all five
-expected dimensions in the ``EvalReport`` even when one or more aren't
+Conforms to the ``Dimension`` protocol so a harness can list every
+dimension it expects in the ``EvalReport`` even when one or more aren't
 yet configured (typically because their golden dataset hasn't been
 curated). Returns ``passed=False`` with a clear ``"skipped: <reason>"``
 entry in ``threshold_violations``.
@@ -22,8 +22,8 @@ class SkippedDimension:
     """Placeholder ``Dimension`` that reports as skipped without running.
 
     Args:
-        kind: Which of the five canonical dimensions this slot
-            represents in the ``EvalReport``. Assigned as an instance
+        kind: Which canonical dimension this slot represents in the
+            ``EvalReport``. Assigned as an instance
             attribute (not a property) so the class structurally
             satisfies the ``Dimension`` protocol.
         reason: Human-readable reason for the skip (e.g.,

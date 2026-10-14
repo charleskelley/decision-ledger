@@ -21,7 +21,8 @@ class EvalDimension(StrEnum):
             context (context precision@k, recall@k, MRR).
         FAITHFULNESS: Degree to which the LLM policy gate's reasoning is
             grounded in the retrieved documents. Penalizes hallucination
-            and unsupported claims (RAGAS faithfulness, hallucination rate).
+            and unsupported claims (claim-level faithfulness,
+            hallucination rate).
         CONSISTENCY: Stability of pipeline outputs across equivalent event
             orderings. Tests that the same scenario produces the same action
             regardless of event sequence variation (action stability rate).
@@ -76,8 +77,9 @@ class FaithfulnessMetrics(BaseModel):
     """Dimension 02 — Generation Faithfulness metric container.
 
     Measures whether the LLM's rationale reflects only retrieved policy content.
-    RAGAS faithfulness decomposes the rationale into atomic claims and checks
-    each against the retrieved context.
+    The claim-level faithfulness score decomposes the rationale into atomic
+    claims and checks each against the retrieved context (the gate's eval
+    names its scorer).
 
     CI thresholds: ragas_faithfulness ≥ 0.85, hallucination_rate = 0.0 on the
     golden scenario set (any hallucination is a blocking failure).

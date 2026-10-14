@@ -22,8 +22,6 @@ def _reg(reasoner_id: str) -> ReasonerRegistration:
         reasoner_id=reasoner_id,
         reasoner_name=f"Reasoner {reasoner_id}",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset({"tmpl-v1"}),
-        allowed_jurisdictions=frozenset({"US_FEDERAL"}),
     )
 
 

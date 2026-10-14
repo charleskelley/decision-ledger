@@ -9,16 +9,16 @@ from __future__ import annotations
 
 from ato_reasoner.eval.adapter import ADAPTER
 from ato_reasoner.events import LoginEvent
-from eval.dimensions.citation import load_citation_cases
 from eval.dimensions.consistency import load_scenarios
-from eval.dimensions.faithfulness import load_faithfulness_cases
-from eval.dimensions.retrieval import load_golden_queries
 from eval.dimensions.robustness import (
     load_fallback_cases,
     load_injection_cases,
     load_novel_pattern_cases,
     load_schema_violation_cases,
 )
+from policy_rag_gate.eval.citation import load_citation_cases
+from policy_rag_gate.eval.faithfulness import load_faithfulness_cases
+from policy_rag_gate.eval.retrieval import load_golden_queries
 
 _ROOT = ADAPTER.datasets_dir
 

@@ -1,8 +1,9 @@
 """Behavioral tests for the universal GateInput contract.
 
-The framework's universal GateInput carries only ``gate_id``. Per-gate-type
-subclasses (e.g., ``PolicyGateInput``) extend with kind-specific fields —
-those tests live in ``tests/core/gate/policy/test_input.py``.
+The framework's universal GateInput carries only ``gate_id`` — the record
+that the framework invoked a gate. A gate records what it consulted in its
+own ``GateOutput.evidence_snapshot`` (DR-28); the framework defines no
+per-gate input subclass.
 """
 
 import pytest

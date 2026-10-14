@@ -4,8 +4,8 @@ Verifies the universal LLM-call primitive's shape: ``TokenUsage``
 validation, ``CompletionResult[T]`` generic wrapping, and ``LLMClient``
 Protocol structural conformance.
 
-Concrete adapters are tested in ``tests/app/llm/`` against their
-respective SDKs.
+Concrete adapters live with the gate that uses them and are tested in that
+gate member's own tests (``gates/policy_rag/tests/llm/``).
 """
 
 from __future__ import annotations

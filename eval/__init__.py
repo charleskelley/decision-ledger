@@ -1,22 +1,24 @@
-"""Evaluation harness for DecisionLedger — 5-dimension behavioral evaluation framework.
+"""Evaluation harness for DecisionLedger — the framework's behavioral dimensions.
 
-Implements the evaluation framework that gates every release candidate. All five
-dimensions must pass defined CI thresholds before a release can proceed.
+Evaluates one reasoner's decision pipeline, end to end, against its golden
+datasets. A failing dimension blocks the release candidate.
 
-Dimensions:
-    01 — Retrieval Quality:       Context Precision/Recall @k, MRR, version accuracy.
-    02 — Generation Faithfulness: RAGAS Faithfulness, hallucination rate.
-    03 — Decision Consistency:    Action stability across 8 scenarios x 3 orderings.
-    04 — Citation Accuracy:       Citation relevance, claim-citation entailment.
-    05 — Adversarial Robustness:  Injection resistance, schema violation handling.
+Framework dimensions (driven through the reasoner's own pipeline):
+    Decision Consistency:    Action stability across scenarios x orderings.
+    Adversarial Robustness:  Injection resistance, schema-violation handling,
+                             novel patterns, fallback paths.
+
+Gates own the dimensions that measure what a gate does (DR-28): a retrieving
+gate's retrieval quality, an LLM gate's faithfulness and citation accuracy.
+Each gate's own harness runs them and reports in the same ``EvalReport``
+schema, through ``eval.runners.harness.run_eval``.
 
 Imports from core/ for dimension contracts. Imports from app/ to drive the live
-pipeline.
-Tests are marked @pytest.mark.evaluation — they invoke the LLM and cost money.
-Do not run in a tight loop.
+pipeline. The live harness calls whatever models the reasoner's gates use and
+can cost money. Do not run in a tight loop.
 
 Usage::
 
-    make eval                    # Full harness (all 5 dimensions)
-    pytest eval/ -m evaluation   # Same via pytest directly
+    make eval-<reasoner>         # this harness for one reasoner
+    make eval                    # every reasoner, then every gate's eval
 """

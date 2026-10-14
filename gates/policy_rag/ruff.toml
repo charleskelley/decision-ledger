@@ -1,0 +1,15 @@
+# Member-local Ruff config: inherits everything from the root pyproject and
+# only adds the policy gate package's first-party name and per-file ignores.
+extend = "../../pyproject.toml"
+src = ["src", "tests", "../.."]
+
+[lint.isort]
+known-first-party = ["core", "app", "eval", "policy_rag_gate"]
+
+[lint.extend-per-file-ignores]
+"tests/**/*.py" = [
+    "D",      # no docstring requirements in tests
+    "S101",   # assert is expected in tests
+    "S105",   # hardcoded passwords in test fixtures are fine
+    "S106",   # hardcoded passwords in test fixtures are fine
+]

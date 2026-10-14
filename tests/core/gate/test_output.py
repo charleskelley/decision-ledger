@@ -1,15 +1,19 @@
-"""Behavioral tests for the universal GateVerdict and GateOutput contracts.
+"""Behavioral tests for the universal GateVerdict, GateOutput, and EvidenceRef.
 
 GateVerdict is the framework's enforcement-consumable verdict — universal
-across gate kinds. GateOutput wraps it. Concrete subclass tests for the
-LLM policy gate live under ``tests/core/gate/policy/``.
+across gates. GateOutput is the open output contract (DR-28): a typed
+universal base (gate_id, deterministic, verdict, evidence) plus an opaque,
+gate-owned extension (evidence_snapshot, extra) that must survive the JSON
+round trip the bundle store performs, unchanged.
 """
+
+import json
 
 import pytest
 from pydantic import ValidationError
 
 from core.actions import DecisionAction
-from core.gate import GateOutput, GateVerdict
+from core.gate import EvidenceRef, GateOutput, GateVerdict
 
 
 def _make_verdict(**overrides) -> GateVerdict:
@@ -68,24 +72,115 @@ def test_gate_verdict_is_immutable():
 
 
 # ---------------------------------------------------------------------------
-# GateOutput universal wrapper
+# GateOutput — open contract: universal base + opaque extension
 # ---------------------------------------------------------------------------
+
+
+def _output(**overrides) -> GateOutput:
+    base = {"gate_id": "policy", "deterministic": False, "verdict": _make_verdict()}
+    base.update(overrides)
+    return GateOutput(**base)
 
 
 def test_gate_output_with_verdict():
     verdict = _make_verdict()
-    output = GateOutput(gate_id="policy", verdict=verdict)
+    output = _output(verdict=verdict)
     assert output.verdict is verdict
     assert output.gate_id == "policy"
 
 
 def test_gate_output_verdict_may_be_none():
-    # Schema-failure shape from the universal layer's perspective.
-    output = GateOutput(gate_id="policy", verdict=None)
+    # The no-valid-verdict shape enforcement routes to HOLD via Tier 1.
+    output = _output(verdict=None)
     assert output.verdict is None
 
 
+def test_gate_output_defaults_to_no_evidence_and_an_empty_extension():
+    output = _output()
+    assert output.evidence == ()
+    assert output.evidence_snapshot is None
+    assert output.extra == {}
+
+
+def test_gate_output_requires_the_deterministic_flag():
+    with pytest.raises(ValidationError, match="deterministic"):
+        GateOutput(gate_id="policy", verdict=None)  # type: ignore[call-arg]
+
+
+def test_gate_output_rejects_a_verdict_attributed_to_another_gate():
+    with pytest.raises(ValidationError, match="does not match"):
+        _output(gate_id="rules", verdict=_make_verdict(gate_id="policy"))
+
+
+def test_gate_output_accepts_any_json_in_the_opaque_extension():
+    output = _output(
+        evidence_snapshot={"query": "q", "results": [{"score": 0.5}, None, True]},
+        extra={"token_cost": {"usd": 0.01}, "notes": ["a", 1, 2.5]},
+    )
+    assert output.evidence_snapshot == {
+        "query": "q",
+        "results": [{"score": 0.5}, None, True],
+    }
+    assert output.extra["notes"] == ["a", 1, 2.5]
+
+
+def test_gate_output_rejects_a_non_json_extension_value():
+    with pytest.raises(ValidationError):
+        _output(extra={"bad": object()})
+
+
+def test_gate_output_survives_the_json_round_trip_unchanged():
+    # The bundle store persists model_dump(mode="json") and reloads with
+    # strict=False; tuples, frozensets, enums, and the opaque JSON must all
+    # come back equal.
+    output = _output(
+        deterministic=True,
+        evidence=(
+            EvidenceRef(
+                source_id="DOC-A", locator="2.1", jurisdictions=frozenset({"A"})
+            ),
+            EvidenceRef(source_id="DOC-B"),
+        ),
+        evidence_snapshot={"retrieval": {"path": "reranked", "k": 5}},
+        extra={"rationale": "ok", "citations": []},
+    )
+    stored = json.loads(json.dumps(output.model_dump(mode="json")))
+    assert GateOutput.model_validate(stored, strict=False) == output
+
+
+def test_gate_output_evidence_jurisdictions_is_the_union_across_references():
+    output = _output(
+        evidence=(
+            EvidenceRef(source_id="a", jurisdictions=frozenset({"A", "B"})),
+            EvidenceRef(source_id="b", jurisdictions=frozenset({"B", "C"})),
+            EvidenceRef(source_id="c"),
+        )
+    )
+    assert output.evidence_jurisdictions() == frozenset({"A", "B", "C"})
+
+
+def test_gate_output_without_evidence_has_no_jurisdictions():
+    assert _output().evidence_jurisdictions() == frozenset()
+
+
 def test_gate_output_is_immutable():
-    output = GateOutput(gate_id="policy", verdict=None)
+    output = _output(verdict=None)
     with pytest.raises(ValidationError):
         output.verdict = _make_verdict()
+
+
+# ---------------------------------------------------------------------------
+# EvidenceRef
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_ref_defaults_to_no_locator_and_no_jurisdictions():
+    ref = EvidenceRef(source_id="ruleset@1.0")
+    assert ref.locator is None
+    assert ref.jurisdictions == frozenset()
+
+
+def test_evidence_ref_is_immutable():
+    ref = EvidenceRef(source_id="DOC-A")
+    with pytest.raises(ValidationError):
+        ref.source_id = "tampered"

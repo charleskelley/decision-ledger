@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# decisionledger-gate-policy-rag — the RAG policy gate (DR-28)
+# =============================================================================
+#
+# A uv workspace member. The framework (`decision-ledger`) never depends on
+# this package; deployment composition lives in the root `gates` dependency
+# group. Discovery happens through the entry point below, whose name must
+# equal the plugin's `gate_id`. The gate owns its infrastructure: the
+# `policy_rag` Postgres schema, Elasticsearch (compose.yaml), the embedding
+# and reranking models, and the LLM SDKs.
+
+[project]
+name = "decisionledger-gate-policy-rag"
+version = "0.1.0"
+description = "Retrieval-augmented policy gate for DecisionLedger: hybrid retrieval plus a structured LLM verdict."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    # --- Retrieval stores (own Postgres schema + Elasticsearch) ---
+    "psycopg[binary]>=3.1,<4",
+    "pgvector>=0.3,<1",
+    "elasticsearch>=8.13,<9",
+    # --- Embeddings & reranking ---
+    "sentence-transformers>=3.0,<4",
+    "torch>=2.3",
+    # --- LLM adapters ---
+    "openai>=1.30,<2",
+    "anthropic>=0.97.0",
+    # --- Contracts, config ---
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+]
+
+[project.optional-dependencies]
+# The gate's eval harness: RAGAS faithfulness scoring and the LangChain
+# OpenAI chat model it wraps, both imported lazily by
+# policy_rag_gate.eval.ragas (SingleTurnSample / single_turn_ascore need
+# ragas >= 0.2). The root `gates` dependency group installs the gate with
+# this extra; a runtime-only deployment can leave it out.
+eval = [
+    "ragas>=0.2,<1",
+    "langchain-openai>=0.2,<2",
+]
+
+[project.entry-points."decisionledger.gates"]
+policy = "policy_rag_gate.plugin:PLUGIN"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/policy_rag_gate"]

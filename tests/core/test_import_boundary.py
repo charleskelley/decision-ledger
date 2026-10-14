@@ -26,7 +26,8 @@ FRAMEWORK_TOP_LEVEL = [
     REPO_ROOT / "core" / "actions.py",
     REPO_ROOT / "core" / "bundle.py",
     REPO_ROOT / "core" / "exceptions.py",
-    # core/routing.py removed — GateRoute now lives in core/gate/routes.py
+    REPO_ROOT / "core" / "gate_request.py",
+    # core/routing.py removed — GateRoute now lives in core/routes.py
 ]
 
 DOMAIN_PREFIXES = [

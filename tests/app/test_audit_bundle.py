@@ -2,7 +2,10 @@
 
 Tests are pure (no I/O) and verify that build_bundle() correctly maps all
 pipeline layer outputs into the DecisionBundle fields. Tests cover the
-fast-path (no gate invocation) and gate-path cases, plus field defaults.
+fast-path (no gate invocation) and gate-path cases, the gate-layer pairing
+invariant, and field defaults. The gate layer is the universal open contract
+(DR-28): the bundle stores the ``GateOutput`` a gate returned, opaque
+extension included, and has no retrieval layer of its own.
 """
 
 from __future__ import annotations
@@ -14,43 +17,9 @@ import pytest
 from app.audit.bundle import build_bundle
 from app.enforcement.resolver import resolve
 from core.actions import DecisionAction
-from core.gate.policy import (
-    PolicyGateInput,
-    PolicyGateOutput,
-    PromptSnapshot,
-    TokenCost,
-)
+from core.gate import GateInput, GateOutput
 from core.routes import GateRoute
-from core.snippet import RetrievedSnippet
 from tests._stub_reasoner.registry import STUB_REGISTRATION
-
-# ---------------------------------------------------------------------------
-# Helpers / local fixtures
-# ---------------------------------------------------------------------------
-
-
-def _snippet(document_id: str = "DOC-001") -> RetrievedSnippet:
-    return RetrievedSnippet(
-        document_id=document_id,
-        title=f"Policy {document_id}",
-        version="1.0",
-        jurisdiction="REGION_A",
-        section_path="Section 1",
-        text="Widgets with a thin history SHALL be held for review.",
-        relevance_score=0.85,
-        retrieval_path="reranked",
-    )
-
-
-def _token_cost() -> TokenCost:
-    return TokenCost(
-        prompt_tokens=500,
-        completion_tokens=120,
-        total_tokens=620,
-        cost_usd=0.002450,
-        model="gpt-4o-2024-08-06",
-    )
-
 
 _DECISION_ID = "dec-audit-001"
 _IDEMPOTENCY_KEY = "sha256-abc123"
@@ -61,30 +30,25 @@ _INGESTION_TS = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
 _REG = STUB_REGISTRATION
 
 
-def _gate_input(
-    prompt_snapshot: PromptSnapshot,
-    *,
-    rendered: str,
-    corpus_version: str = "corpus-2024-Q1",
-) -> PolicyGateInput:
-    return PolicyGateInput(
-        model_version="gpt-4o-2024-08-06",
-        prompt_template_id=prompt_snapshot.template_id,
-        prompt_template_version=prompt_snapshot.version,
-        corpus_version=corpus_version,
-        rendered_prompt=rendered,
-        prompt_snapshot=prompt_snapshot,
-        template_vars={},
+def _enforce(obs, gate_output=None):
+    return resolve(obs, gate_output, decision_id=_DECISION_ID, registration=_REG)
+
+
+def _bundle(obs, **kwargs):
+    return build_bundle(
+        decision_id=_DECISION_ID,
+        obs=obs,
+        idempotency_key=_IDEMPOTENCY_KEY,
+        ingestion_timestamp=_INGESTION_TS,
+        **kwargs,
     )
 
 
-def _gate_output(
-    verdict, *, raw: str | None, with_tokens: bool = True
-) -> PolicyGateOutput:
-    return PolicyGateOutput(
-        verdict=verdict,
-        response_text=raw,
-        token_cost=_token_cost() if with_tokens else None,
+@pytest.fixture
+def gate_route_event(observation):
+    """Stub observation routed to the policy gate (ROUTE_TO_GATE)."""
+    return observation.model_copy(
+        update={"route": GateRoute.ROUTE_TO_GATE, "fast_path_rationale": None}
     )
 
 
@@ -94,49 +58,15 @@ def _gate_output(
 
 
 def test_build_bundle_fast_path_gate_artifacts_are_none(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-    )
+    bundle = _bundle(observation, enforcement_decision=_enforce(observation))
     # Fast path — gate never invoked: gate_input and gate_output are both None.
     assert bundle.gate_input is None
     assert bundle.gate_output is None
 
 
-def test_build_bundle_fast_path_retrieval_defaults(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-    )
-    assert bundle.retrieval_query == ""
-    assert bundle.retrieval_results == []
-    assert bundle.retrieval_path == "skipped"
-    assert bundle.index_version == "unknown"
-
-
 def test_build_bundle_fast_path_identity_fields(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        queue_position=42,
-        enforcement_decision=enf,
+    bundle = _bundle(
+        observation, queue_position=42, enforcement_decision=_enforce(observation)
     )
     assert bundle.decision_id == _DECISION_ID
     assert bundle.idempotency_key == _IDEMPOTENCY_KEY
@@ -147,32 +77,14 @@ def test_build_bundle_fast_path_identity_fields(observation):
 
 def test_build_bundle_fast_path_decision_action_is_allow(observation):
     # observation route=FAST_PATH_ALLOW → enforcement returns ALLOW
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-    )
+    bundle = _bundle(observation, enforcement_decision=_enforce(observation))
     assert bundle.decision_action == DecisionAction.ALLOW
     assert bundle.enforcement_rule_applied is None
 
 
 def test_build_bundle_created_at_is_utc_and_recent(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
     before = datetime.now(UTC)
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-    )
+    bundle = _bundle(observation, enforcement_decision=_enforce(observation))
     after = datetime.now(UTC)
     assert bundle.created_at.tzinfo is not None
     assert before <= bundle.created_at <= after
@@ -183,155 +95,69 @@ def test_build_bundle_created_at_is_utc_and_recent(observation):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def prompt_snapshot() -> PromptSnapshot:
-    return PromptSnapshot(
-        template_id="stub-v1",
-        version="1.0.0",
-        template_text="Risk: {risk_score}\n{policy_snippets}",
-    )
-
-
-@pytest.fixture
-def gate_route_event(observation):
-    """Stub observation routed to the policy gate (ROUTE_TO_GATE)."""
-    return observation.model_copy(
-        update={
-            "route": GateRoute.ROUTE_TO_GATE,
-            "fast_path_rationale": None,
-        }
-    )
-
-
-def _make_gate_result(gate_output, prompt_snapshot, *, raw_response: str = ""):
-    """Construct a GateResult carrying populated PolicyGateInput / PolicyGateOutput."""
-    from app.gate.policy.gate import GateResult
-
-    rendered = "Risk: 0.55\nSection 1: Widgets with a thin history SHALL be held."
-    return GateResult(
-        gate_input=_gate_input(prompt_snapshot, rendered=rendered),
-        gate_output=_gate_output(
-            gate_output,
-            raw=raw_response or '{"permitted_actions": ["ALLOW"]}',
-            with_tokens=True,
-        ),
-        latency_ms=1234.5,
-    )
-
-
-def test_build_bundle_gate_path_populates_gate_artifacts(
-    gate_route_event, gate_output, prompt_snapshot
+def test_build_bundle_gate_path_stores_the_gate_output_as_returned(
+    gate_route_event, gate_output
 ):
-    snippets = [_snippet("STUB-POLICY-A")]
-    enf = resolve(
+    gate_input = GateInput(gate_id="policy")
+    bundle = _bundle(
         gate_route_event,
-        gate_output,
-        snippets=snippets,
-        decision_id=_DECISION_ID,
-        registration=_REG,
+        gate_input=gate_input,
+        gate_output=gate_output,
+        enforcement_decision=_enforce(gate_route_event, gate_output),
     )
-    gr = _make_gate_result(gate_output, prompt_snapshot)
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=gate_route_event,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        retrieval_query="thin history calibration hold",
-        retrieval_results=snippets,
-        retrieval_path="reranked",
-        index_version="v2.1",
-        gate_result=gr,
-        enforcement_decision=enf,
-    )
-    assert bundle.gate_input is gr.gate_input
-    assert bundle.gate_output is gr.gate_output
-    assert isinstance(bundle.gate_input, PolicyGateInput)
-    assert bundle.gate_input.gate_id == "policy"
-    assert bundle.gate_input.model_version == "gpt-4o-2024-08-06"
-    assert bundle.gate_input.corpus_version == "corpus-2024-Q1"
-    assert isinstance(bundle.gate_output, PolicyGateOutput)
-    assert bundle.gate_output.verdict is gate_output
-    assert bundle.gate_output.token_cost is not None
-    assert bundle.gate_output.token_cost.total_tokens == 620
+    assert bundle.gate_input is gate_input
+    assert bundle.gate_output is gate_output
+    assert bundle.gate_output.evidence_snapshot == {
+        "retrieval_query": "calibration review"
+    }
+    assert bundle.gate_output.extra == {
+        "rationale": "Low widget score. History sufficient."
+    }
+    assert bundle.decision_action == DecisionAction.ALLOW
 
 
-def test_build_bundle_gate_path_retrieval_fields(
-    gate_route_event, gate_output, prompt_snapshot
-):
-    snippets = [_snippet("STUB-POLICY-A"), _snippet("STUB-POLICY-B")]
-    enf = resolve(
-        gate_route_event,
-        gate_output,
-        snippets=snippets,
-        decision_id=_DECISION_ID,
-        registration=_REG,
-    )
-    gr = _make_gate_result(gate_output, prompt_snapshot)
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=gate_route_event,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        retrieval_query="calibration review requirement",
-        retrieval_results=snippets,
-        retrieval_path="reranked",
-        index_version="v2.1",
-        gate_result=gr,
-        enforcement_decision=enf,
-    )
-    assert bundle.retrieval_query == "calibration review requirement"
-    assert len(bundle.retrieval_results) == 2
-    assert bundle.retrieval_path == "reranked"
-    assert bundle.index_version == "v2.1"
-
-
-def test_build_bundle_schema_failure_routes_to_hold(gate_route_event, prompt_snapshot):
+def test_build_bundle_schema_failure_routes_to_hold(gate_route_event):
     """Gate verdict None → enforcement tier1_schema_failure → HOLD."""
-    snippets: list[RetrievedSnippet] = []
-    enf = resolve(
+    failed = GateOutput(
+        gate_id="policy",
+        deterministic=False,
+        verdict=None,
+        extra={"failure": "llm_error"},
+    )
+    bundle = _bundle(
         gate_route_event,
-        None,
-        snippets=snippets,
-        decision_id=_DECISION_ID,
-        registration=_REG,
-    )
-    from app.gate.policy.gate import GateResult
-
-    gr = GateResult(
-        gate_input=_gate_input(prompt_snapshot, rendered="Risk: 0.55"),
-        gate_output=_gate_output(None, raw="not valid json", with_tokens=False),
-        latency_ms=500.0,
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=gate_route_event,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        gate_result=gr,
-        enforcement_decision=enf,
+        gate_input=GateInput(gate_id="policy"),
+        gate_output=failed,
+        enforcement_decision=_enforce(gate_route_event, failed),
     )
     assert bundle.decision_action == DecisionAction.HOLD
     assert bundle.enforcement_rule_applied == "tier1_schema_failure"
-    # Schema-failure invariant: gate_output is non-None but verdict is None;
-    # response_text carries the gate's emitted text for HOLD review.
-    assert isinstance(bundle.gate_output, PolicyGateOutput)
+    # The no-verdict invariant: gate_output is non-None but verdict is None;
+    # the gate's extra carries the forensic record for HOLD review.
+    assert bundle.gate_output is not None
     assert bundle.gate_output.verdict is None
-    assert bundle.gate_output.response_text == "not valid json"
-    assert isinstance(bundle.gate_input, PolicyGateInput)
-    assert bundle.gate_input.rendered_prompt == "Risk: 0.55"
+    assert bundle.gate_output.extra == {"failure": "llm_error"}
+
+
+@pytest.mark.parametrize("missing", ["gate_input", "gate_output"])
+def test_build_bundle_requires_gate_input_and_output_together(
+    gate_route_event, gate_output, missing
+):
+    layers = {"gate_input": GateInput(gate_id="policy"), "gate_output": gate_output}
+    del layers[missing]
+    with pytest.raises(ValueError, match="both"):
+        _bundle(
+            gate_route_event,
+            enforcement_decision=_enforce(gate_route_event, gate_output),
+            **layers,
+        )
 
 
 def test_build_bundle_latency_breakdown_stored(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
     latency = {"ingestion_ms": 5.2, "features_ms": 3.1, "scorer_ms": 1.8}
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
+    bundle = _bundle(
+        observation,
+        enforcement_decision=_enforce(observation),
         latency_breakdown=latency,
     )
     assert bundle.latency_breakdown["ingestion_ms"] == pytest.approx(5.2)
@@ -339,16 +165,7 @@ def test_build_bundle_latency_breakdown_stored(observation):
 
 
 def test_build_bundle_override_log_from_enforcement(observation):
-    enf = resolve(
-        observation, None, snippets=[], decision_id=_DECISION_ID, registration=_REG
-    )
-    bundle = build_bundle(
-        decision_id=_DECISION_ID,
-        obs=observation,
-        idempotency_key=_IDEMPOTENCY_KEY,
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=enf,
-    )
+    bundle = _bundle(observation, enforcement_decision=_enforce(observation))
     # Fast path — single log entry
     assert len(bundle.override_log) == 1
     assert "fast_path_allow" in bundle.override_log[0]

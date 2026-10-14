@@ -1,14 +1,15 @@
-"""ATO domain query builder for the framework retriever.
+"""ATO domain query builder for the policy gate's retrieval.
 
 ``build_ato_query()`` translates a ``LoginEvent`` plus the top SHAP signals
 from the scorer into a natural-language retrieval query string. Crossing
-the framework boundary as a *string* keeps the framework retriever
-domain-agnostic: the framework knows nothing about login outcomes,
-authentication methods, or velocity feature names.
+the boundary as a *string* keeps the policy gate domain-agnostic: the gate
+knows nothing about login outcomes, authentication methods, or velocity
+feature names.
 
-Owned by the ATO reasoner. The reasoner pipeline calls
-``build_ato_query(event, scorer_output)`` and forwards the result to
-``PolicyRetriever.retrieve(query, ...)``.
+Owned by the ATO reasoner. The assembler calls
+``build_ato_query(event, scorer_output)`` and places the result in the
+policy gate's ``gate_config["retrieval_query"]``; the gate forwards it to
+its hybrid retriever (DR-28).
 """
 
 from __future__ import annotations

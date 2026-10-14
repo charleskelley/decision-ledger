@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.gates import ComposedGate, GateKind
 from app.plugin import FrameworkServices
 from app.reasoner_registry import StaticReasonerRegistry
 from ato_reasoner.events import (
@@ -103,12 +104,24 @@ def _make_fast_path_scorer_output() -> ScorerOutput:
     )
 
 
+class _PolicyGatePlugin:
+    """Plugin metadata for the composed policy gate double."""
+
+    gate_id = "policy"
+    kind = GateKind.LLM
+    deterministic = False
+    config_model = None
+
+    def build(self, framework: FrameworkServices) -> MagicMock:
+        raise AssertionError("the stack composes its gate directly")
+
+
 class _Stack:
     """The two service objects ``run_ato_decision`` takes, built on stubs.
 
     feature_svc and scorer return real domain objects so build_observation
-    can run against them. retriever, gate, and store are MagicMocks
-    (no calls expected on the fast path).
+    can run against them. The composed policy gate and the store are
+    MagicMocks (no gate call expected on the fast path).
     """
 
     def __init__(self) -> None:
@@ -116,7 +129,6 @@ class _Stack:
         self.feature_svc.compute.return_value = _make_features()
         self.scorer = MagicMock()
         self.scorer.score.return_value = _make_fast_path_scorer_output()
-        self.retriever = MagicMock()
         # gate.evaluate is async (DR-23) — use AsyncMock so awaits work
         self.gate = MagicMock()
         self.gate.evaluate = AsyncMock()
@@ -131,12 +143,9 @@ class _Stack:
         self.framework = FrameworkServices(
             settings=MagicMock(),
             pg_conn=MagicMock(),
-            es=MagicMock(),
-            retriever=self.retriever,
-            prompt_registry=MagicMock(),
-            gate=self.gate,
             store=self.store,
             registry=StaticReasonerRegistry([ATO_REGISTRATION]),
+            gates={"policy": ComposedGate(plugin=_PolicyGatePlugin(), gate=self.gate)},
         )
 
 
@@ -168,11 +177,10 @@ async def _run(
 
 
 @pytest.mark.asyncio
-async def test_fast_path_does_not_invoke_retriever_or_gate(stack):
-    """ROUTE != ROUTE_TO_GATE → retriever.retrieve and gate.evaluate untouched."""
+async def test_fast_path_does_not_invoke_the_gate(stack):
+    """ROUTE != ROUTE_TO_GATE → the composed gate's evaluate is untouched."""
     await _run(stack)
 
-    assert stack.retriever.retrieve.call_count == 0
     assert stack.gate.evaluate.call_count == 0
 
 
@@ -183,7 +191,6 @@ async def test_fast_path_returns_bundle_with_no_gate_artifacts(stack):
 
     assert bundle.gate_input is None
     assert bundle.gate_output is None
-    assert bundle.retrieval_path == "skipped"
 
 
 @pytest.mark.asyncio
@@ -241,13 +248,12 @@ async def test_populates_latency_breakdown_for_each_phase(stack):
     expected_phases = {
         "features_ms",
         "scorer_ms",
-        "retrieval_ms",
         "gate_ms",
         "enforcement_ms",
     }
     assert expected_phases.issubset(bundle.latency_breakdown.keys())
-    # Fast path: retrieval and gate phases recorded as 0.0
-    assert bundle.latency_breakdown["retrieval_ms"] == 0.0
+    # Fast path: the gate phase is recorded as 0.0 (retrieval now runs
+    # inside the policy gate, so it is part of gate_ms when the gate runs).
     assert bundle.latency_breakdown["gate_ms"] == 0.0
 
 
@@ -269,3 +275,16 @@ async def test_calls_scorer_with_features(stack):
 
     assert stack.scorer.score.call_count == 1
     assert stack.scorer.score.call_args[0][0] is features
+
+
+@pytest.mark.asyncio
+async def test_the_gate_context_carries_the_policy_gates_retrieval_inputs(stack):
+    """The assembler renders the retrieval query and corpus version into the
+    policy gate's gate_config — the gate runs retrieval itself (DR-28)."""
+    bundle = await _run(stack)
+
+    gate_config = bundle.raw_event.gate_context.gate_config
+    assert gate_config is not None
+    assert gate_config["corpus_version"] == "corpus-test"
+    assert isinstance(gate_config["retrieval_query"], str)
+    assert gate_config["retrieval_query"]

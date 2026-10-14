@@ -2,10 +2,12 @@
 registry-extended validate_observation() contracts.
 
 Key contracts:
-- ReasonerRegistration is immutable and carries the allowed resource sets.
+- ReasonerRegistration is immutable and carries the allowed gates and the
+  enforcement profile — nothing gate-specific (DR-28).
 - validate_observation() without registry: shape checks only (existing behavior).
-- validate_observation() with registry: also checks reasoner_id is registered,
-  template_id is allowed, and jurisdictions are allowed.
+- validate_observation() with registry: also checks reasoner_id is registered
+  and the named gate is allowed. It reads no gate_config key: what a reasoner
+  may put in a gate's configuration is that gate's business.
 - UnregisteredReasonerError is raised (not ObservationContractError) when the
   reasoner_id is unknown — these are distinct failure modes.
 """
@@ -49,15 +51,11 @@ def _make_registration(
     *,
     reasoner_id: str = "stub-reasoner",
     gate_ids: frozenset[str] = frozenset({"policy"}),
-    template_ids: frozenset[str] = frozenset({"stub-v1"}),
-    jurisdictions: frozenset[str] = frozenset({"REGION_A", "REGION_B"}),
 ) -> ReasonerRegistration:
     return ReasonerRegistration(
         reasoner_id=reasoner_id,
         reasoner_name="Test Reasoner",
         allowed_gate_ids=gate_ids,
-        allowed_prompt_template_ids=template_ids,
-        allowed_jurisdictions=jurisdictions,
     )
 
 
@@ -70,8 +68,18 @@ def test_reasoner_registration_construction():
     reg = _make_registration()
     assert reg.reasoner_id == "stub-reasoner"
     assert "policy" in reg.allowed_gate_ids
-    assert "stub-v1" in reg.allowed_prompt_template_ids
-    assert "REGION_A" in reg.allowed_jurisdictions
+
+
+def test_reasoner_registration_carries_no_gate_specific_resource_sets():
+    # Template and jurisdiction allow-lists moved into the gate that reads
+    # them (DR-28); the registration keeps only framework concepts.
+    assert set(ReasonerRegistration.model_fields) == {
+        "reasoner_id",
+        "reasoner_name",
+        "allowed_gate_ids",
+        "novel_entity_feature",
+        "jurisdiction_conflict_groups",
+    }
 
 
 def test_reasoner_registration_is_immutable():
@@ -80,11 +88,9 @@ def test_reasoner_registration_is_immutable():
         reg.reasoner_id = "tampered"
 
 
-def test_reasoner_registration_allowed_sets_are_frozensets():
+def test_reasoner_registration_allowed_gate_ids_is_a_frozenset():
     reg = _make_registration()
     assert isinstance(reg.allowed_gate_ids, frozenset)
-    assert isinstance(reg.allowed_prompt_template_ids, frozenset)
-    assert isinstance(reg.allowed_jurisdictions, frozenset)
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +111,6 @@ def test_registration_accepts_novel_entity_feature_name():
         reasoner_id="r",
         reasoner_name="R",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset(),
-        allowed_jurisdictions=frozenset(),
         novel_entity_feature="thin_history",
     )
     assert reg.novel_entity_feature == "thin_history"
@@ -118,8 +122,6 @@ def test_registration_accepts_jurisdiction_conflict_groups():
         reasoner_id="r",
         reasoner_name="R",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset(),
-        allowed_jurisdictions=frozenset(),
         jurisdiction_conflict_groups=groups,
     )
     assert reg.jurisdiction_conflict_groups == groups
@@ -133,8 +135,6 @@ def test_registration_rejects_non_frozenset_conflict_groups_in_strict_mode():
             reasoner_id="r",
             reasoner_name="R",
             allowed_gate_ids=frozenset({"policy"}),
-            allowed_prompt_template_ids=frozenset(),
-            allowed_jurisdictions=frozenset(),
             jurisdiction_conflict_groups=({"REGION_A"},),  # type: ignore[arg-type]
         )
 
@@ -200,35 +200,20 @@ def test_validate_observation_passes_with_registered_reasoner(observation):
     validate_observation(observation, registry=registry)
 
 
-def test_validate_observation_passes_when_jurisdictions_empty(
-    observation, gate_context
-):
-    # Empty jurisdictions list means no filter — always permitted.
-    ctx = gate_context.model_copy(
-        update={"gate_config": {"jurisdictions": [], "risk_tier": "STANDARD"}}
-    )
-    obs = observation.model_copy(update={"gate_context": ctx})
-    registry = _RegistryStub(
-        [_make_registration(jurisdictions=frozenset({"REGION_A"}))]
-    )
-    validate_observation(obs, registry=registry)
-
-
-def test_validate_observation_passes_when_allowed_jurisdictions_empty(
-    observation, gate_context
-):
-    # Empty allowed_jurisdictions on the registration means no restriction.
+def test_validate_observation_reads_no_gate_config_key(observation, gate_context):
+    # Template ids and jurisdictions are the policy gate's to authorize; the
+    # framework's intake contract no longer interprets gate_config at all.
     ctx = gate_context.model_copy(
         update={
             "gate_config": {
+                "template_id": "a-template-nobody-ships",
                 "jurisdictions": ["REGION_A", "REGION_C"],
-                "risk_tier": "STANDARD",
+                "anything": {"else": True},
             }
         }
     )
     obs = observation.model_copy(update={"gate_context": ctx})
-    registry = _RegistryStub([_make_registration(jurisdictions=frozenset())])
-    validate_observation(obs, registry=registry)
+    validate_observation(obs, registry=_RegistryStub([_make_registration()]))
 
 
 # ---------------------------------------------------------------------------
@@ -250,30 +235,10 @@ def test_unregistered_error_is_not_observation_contract_error(observation):
         validate_observation(observation, registry=registry)
 
 
-def test_validate_observation_raises_for_disallowed_template(observation):
+def test_validate_observation_raises_for_disallowed_gate(observation):
     registry = _RegistryStub(
-        [_make_registration(template_ids=frozenset({"other-template-v1"}))]
+        [_make_registration(gate_ids=frozenset({"some-other-gate"}))]
     )
     with pytest.raises(ObservationContractError) as exc_info:
         validate_observation(observation, registry=registry)
-    assert "stub-v1" in str(exc_info.value)
-
-
-def test_validate_observation_raises_for_disallowed_jurisdiction(
-    observation, gate_context
-):
-    ctx = gate_context.model_copy(
-        update={
-            "gate_config": {
-                "jurisdictions": ["REGION_A", "REGION_C"],
-                "risk_tier": "STANDARD",
-            }
-        }
-    )
-    obs = observation.model_copy(update={"gate_context": ctx})
-    registry = _RegistryStub(
-        [_make_registration(jurisdictions=frozenset({"REGION_A"}))]
-    )
-    with pytest.raises(ObservationContractError) as exc_info:
-        validate_observation(obs, registry=registry)
-    assert "REGION_C" in str(exc_info.value)
+    assert "gate_id 'policy'" in str(exc_info.value)

@@ -1,11 +1,13 @@
 """Behavioral tests for the ATO reasoner's shipped prompt templates.
 
 The ATO plugin owns ``ato_reasoner/prompts/``. These tests load
-that real directory through the framework's ``YamlPromptRegistry`` and pin:
+that real directory through the RAG policy gate's ``YamlPromptRegistry`` and
+pin:
 
-- every template the registration allows is actually shipped;
+- ``ato-v1``, ``ato-v2``, and ``ato-v3`` are shipped (the gate authorizes
+  exactly the templates ATO ships; see ``test_registry.py``);
 - ``ato-v3`` carries, verbatim, the system prompt that used to be a constant
-  inside ``app/gate/policy/gate.py`` (the move is what v3 exists for);
+  inside the policy gate's code (the move is what v3 exists for);
 - ``ato-v3`` renders byte-identical user text to ``ato-v2`` for the same
   variables (the plan's "rendered text is byte-identical" contract);
 - ``ato-v1``/``ato-v2`` fall back to the framework default system text, so
@@ -14,13 +16,12 @@ that real directory through the framework's ``YamlPromptRegistry`` and pin:
 
 from __future__ import annotations
 
-from app.gate.policy.gate import _render_prompt
-from app.gate.policy.prompt_registry import DEFAULT_SYSTEM_TEXT, YamlPromptRegistry
 from ato_reasoner.plugin import PLUGIN
-from ato_reasoner.registry import ATO_REGISTRATION
-from core.snippet import RetrievedSnippet
+from policy_rag_gate.gate import _render_prompt
+from policy_rag_gate.models.snippet import RetrievedSnippet
+from policy_rag_gate.prompt_registry import DEFAULT_SYSTEM_TEXT, YamlPromptRegistry
 
-# The gate-level constant that lived in app/gate/policy/gate.py before the
+# The gate-level constant that lived in the policy gate's code before the
 # system prompt moved into the template. ato-v3 must reproduce it exactly so
 # the text the LLM sees is unchanged by the refactor.
 _OLD_GATE_SYSTEM_PROMPT = (
@@ -65,11 +66,6 @@ def _registry() -> YamlPromptRegistry:
 
 def test_ato_prompts_dir_ships_v1_v2_and_v3():
     assert {"ato-v1", "ato-v2", "ato-v3"} <= set(_registry().registered_ids())
-
-
-def test_ato_registration_allowed_templates_are_all_shipped():
-    registered = set(_registry().registered_ids())
-    assert ATO_REGISTRATION.allowed_prompt_template_ids <= registered
 
 
 def test_ato_v3_system_text_equals_former_gate_constant():

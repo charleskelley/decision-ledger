@@ -118,7 +118,6 @@ def validate_observation(
         return
     registration = _validate_reasoner_registered(observation, registry)
     _validate_gate_authorization(observation, registration)
-    _validate_gate_config_conventions(observation, registration)
 
 
 # ---------------------------------------------------------------------------
@@ -191,44 +190,3 @@ def _validate_gate_authorization(
                 f"for this reasoner: {sorted(registration.allowed_gate_ids)}"
             ),
         )
-
-
-def _validate_gate_config_conventions(
-    observation: Observation,
-    registration: ReasonerRegistration,
-) -> None:
-    """Check well-known gate_config keys against registration constraints.
-
-    Convention-based: skipped when the key is absent from gate_config.
-    Checks template_id against allowed_prompt_template_ids and
-    jurisdictions against allowed_jurisdictions.
-    """
-    gate_config = observation.gate_context.gate_config or {}
-
-    template_id = gate_config.get("template_id")
-    if (
-        template_id is not None
-        and registration.allowed_prompt_template_ids
-        and template_id not in registration.allowed_prompt_template_ids
-    ):
-        raise ObservationContractError(
-            reasoner_id=registration.reasoner_id,
-            violation=(
-                f"gate_config template_id '{template_id}' is not in the allowed "
-                f"set for this reasoner: "
-                f"{sorted(registration.allowed_prompt_template_ids)}"
-            ),
-        )
-
-    claimed_jurisdictions = gate_config.get("jurisdictions", [])
-    if registration.allowed_jurisdictions and claimed_jurisdictions:
-        disallowed = set(claimed_jurisdictions) - registration.allowed_jurisdictions
-
-        if disallowed:
-            raise ObservationContractError(
-                reasoner_id=registration.reasoner_id,
-                violation=(
-                    "gate_config jurisdictions contains jurisdiction(s) not "
-                    f"registered for this reasoner: {sorted(disallowed)}"
-                ),
-            )

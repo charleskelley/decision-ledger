@@ -14,6 +14,10 @@ is involved:
 - ``write`` is idempotent on ``decision_id``.
 - (smoke) replay of a fast-path bundle matches and logs ``is_matched = true``
   with a null ``diff``. No LLM is involved on this path.
+- (smoke) a gate-path bundle — a deterministic fake gate's universal
+  ``GateOutput`` with evidence and an opaque ``evidence_snapshot`` / ``extra``
+  — survives the JSONB round trip unchanged and replays to a match from the
+  stored output alone (DR-28).
 """
 
 from __future__ import annotations
@@ -31,7 +35,10 @@ from app.audit.store import BundleStore
 from app.enforcement.resolver import resolve
 from app.reasoner_registry import StaticReasonerRegistry
 from app.settings import FrameworkSettings
+from core.actions import DecisionAction
 from core.exceptions import UnregisteredReasonerError
+from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
+from core.routes import GateRoute
 from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.plugin import PLUGIN
 from tests._stub_reasoner.registry import STUB_REGISTRATION
@@ -128,7 +135,6 @@ def _fast_path_bundle(event: Any) -> DecisionBundle:
     decision = resolve(
         event,
         None,
-        snippets=[],
         decision_id=decision_id,
         registration=STUB_REGISTRATION,
     )
@@ -252,3 +258,61 @@ def test_replay_of_a_fast_path_bundle_matches_and_logs_it(
         )
         rows = cur.fetchall()
     assert rows == [(True, None)]
+
+
+@pytest.mark.smoke
+def test_a_gate_path_bundle_round_trips_through_jsonb_and_replays(
+    pg_conn, written_ids, observation
+):
+    store = _stub_store(pg_conn)
+    event = _fast_path_event(observation, reasoner_id=_STUB).model_copy(
+        update={"route": GateRoute.ROUTE_TO_GATE, "fast_path_rationale": None}
+    )
+    output = GateOutput(
+        gate_id="fake-rules",
+        deterministic=True,
+        verdict=GateVerdict(
+            gate_id="fake-rules",
+            permitted_actions=[DecisionAction.BLOCK],
+            required_controls=["notify_owner"],
+            confidence=0.1,
+            escalate_to_human=False,
+            escalation_reason=None,
+        ),
+        evidence=(
+            EvidenceRef(source_id="ruleset@1.0.0", locator="extreme-score-block"),
+        ),
+        evidence_snapshot={
+            "matched_rule_ids": ["extreme-score-block"],
+            "observed": {"label_value": 0.97, "feature_set.flag": True},
+            "nested": [{"empty": []}, None, 1.5],
+        },
+        extra={"note": "opaque to the framework"},
+    )
+    decision_id = str(uuid.uuid4())
+    decision = resolve(
+        event, output, decision_id=decision_id, registration=STUB_REGISTRATION
+    )
+    bundle = build_bundle(
+        decision_id=decision_id,
+        obs=event,
+        idempotency_key=f"idem-{decision_id}",
+        ingestion_timestamp=_INGESTION_TS,
+        gate_input=GateInput(gate_id="fake-rules"),
+        gate_output=output,
+        enforcement_decision=decision,
+    )
+    written_ids.append(decision_id)
+    # A deterministic gate skips Tiers 2 and 4, so its low-confidence BLOCK
+    # stands; the stored flag must reproduce that on replay.
+    assert bundle.decision_action == DecisionAction.BLOCK
+
+    store.write(bundle)
+    loaded = store.load(decision_id)
+    result = store.replay(decision_id)
+
+    assert loaded.gate_output == output
+    assert loaded.model_dump(mode="json") == bundle.model_dump(mode="json")
+    assert result.actions_match is True
+    assert result.replayed_action == "BLOCK"
+    assert result.enforcement_decision.override_log == bundle.override_log

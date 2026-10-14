@@ -24,7 +24,7 @@ log = structlog.get_logger(__name__)
 #: relative to this module so it works from an installed wheel).
 DEFAULT_SQL_DIR = Path(__file__).resolve().parent / "sql"
 
-#: Files applied, in order. ``01_init.sql`` creates the extension and schema;
+#: Files applied, in order. ``01_init.sql`` creates the schema;
 #: ``02_tables.sql`` creates every table and index.
 SQL_FILES: tuple[str, ...] = ("01_init.sql", "02_tables.sql")
 
@@ -37,7 +37,7 @@ def apply_canonical_schema(
 
     Args:
         conn: Open psycopg connection with privileges to create the
-            ``vector`` extension and the ``decisionledger`` schema.
+            ``decisionledger`` schema.
         sql_dir: Directory holding ``01_init.sql`` and ``02_tables.sql``.
 
     Raises:

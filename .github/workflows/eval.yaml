@@ -1,8 +1,10 @@
 name: Eval
 
-# Full 5-dimension eval harness against the live stack. Manual trigger
-# only — cost-bounded by definition; re-enable a cron once the harness is
-# stable and budget is approved.
+# Every eval against the live stack: the framework harness for each matrix
+# reasoner (consistency, robustness) and each matrix gate's own harness (the
+# policy_rag gate: retrieval, faithfulness, citation). Manual trigger only —
+# cost-bounded by definition; re-enable a cron once the harness is stable and
+# budget is approved.
 #
 # Uses an `eval` GitHub Actions environment so secrets and budget can be
 # scoped separately from CI/integration. Configure required reviewers on
@@ -18,17 +20,24 @@ concurrency:
 
 jobs:
   eval:
-    name: 5-dimension eval harness (${{ matrix.reasoner }})
+    name: Eval harnesses (${{ matrix.reasoner }}, ${{ matrix.gate }})
     runs-on: ubuntu-latest
     environment: eval
     timeout-minutes: 30
 
-    # One job per reasoner workspace member (reasoners/<name>); each runs the
-    # harness with that reasoner's eval adapter.
+    # One job per (reasoner, gate) pair of workspace members. The framework
+    # harness runs with the reasoner's eval adapter; the gate's harness runs
+    # against that same reasoner's datasets (REASONER=<reasoner_id>), the only
+    # corpus the job indexes. `include` maps each reasoner directory to its
+    # reasoner_id.
     strategy:
       fail-fast: false
       matrix:
         reasoner: [account_takeover]
+        gate: [policy_rag]
+        include:
+          - reasoner: account_takeover
+            reasoner_id: ato-reasoner
 
     services:
       # Reasoner infrastructure (mirrors reasoners/account_takeover/compose.yaml).
@@ -42,6 +51,8 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
+      # The pgvector image ships the extension the policy_rag gate's DDL
+      # creates in its own schema.
       postgres:
         image: pgvector/pgvector:pg16
         env:
@@ -56,6 +67,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      # Gate infrastructure (mirrors gates/policy_rag/compose.yaml).
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
         env:
@@ -82,7 +94,7 @@ jobs:
       POSTGRES_PASSWORD: decisionledger
       POSTGRES_DB: decisionledger
       ATO_REDIS_URL: redis://localhost:6379
-      ELASTICSEARCH_URL: http://localhost:9200
+      POLICY_RAG_GATE_ELASTICSEARCH_URL: http://localhost:9200
 
     steps:
       - uses: actions/checkout@v4
@@ -110,19 +122,32 @@ jobs:
           psql -h localhost -U decisionledger -d decisionledger \
             -f app/audit/sql/02_tables.sql
 
+      - name: Prepare gate (own schema)
+        id: prepare_gate
+        run: make prepare-gate-${{ matrix.gate }}
+
       # Index the reasoner's policy corpus and train its model if missing
       # (reasoners/<name>/reasoner.mk).
       - name: Prepare reasoner (policy index + model)
+        id: prepare_reasoner
         run: make prepare-${{ matrix.reasoner }}
 
-      - name: Run eval harness
+      # Framework harness: outputs/stage/eval/reasoner/<reasoner_id>/.
+      - name: Run reasoner eval harness
         run: make eval-${{ matrix.reasoner }}
 
-      - name: Upload eval report
+      # Gate harness: outputs/stage/eval/gate/<gate_id>/<reasoner_id>/.
+      # Runs even when the reasoner harness failed, so both reports land, but
+      # never after setup or preparation failed: it makes paid LLM calls.
+      - name: Run gate eval harness
+        if: ${{ !cancelled() && steps.prepare_gate.outcome == 'success' && steps.prepare_reasoner.outcome == 'success' }}
+        run: make eval-gate-${{ matrix.gate }} REASONER=${{ matrix.reasoner_id }}
+
+      - name: Upload eval reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-report-${{ matrix.reasoner }}-${{ github.run_id }}
-          path: outputs/stage/eval/eval-report.json
+          name: eval-reports-${{ matrix.reasoner }}-${{ matrix.gate }}-${{ github.run_id }}
+          path: outputs/stage/eval/
           if-no-files-found: warn
           retention-days: 30

@@ -9,10 +9,11 @@ against that shared set.
 
 Three types make up the seam:
 
-- ``FrameworkServices`` — the shared infrastructure clients and framework
-  components (Postgres, Elasticsearch, retriever, prompt registry, policy
-  gate, bundle store, reasoner registry) built once per process by
-  ``app/bootstrap.py:build_framework_services``.
+- ``FrameworkServices`` — the shared infrastructure and framework components
+  built once per process by ``app/bootstrap.py:build_framework_services``:
+  Postgres, the bundle store, the reasoner registry, the composed reasoner
+  plugins, and the composed gates (``app/gates.py``). Gates own their own
+  infrastructure (DR-28), so nothing gate-specific lives here.
 - ``ReasonerServices`` — whatever a reasoner needs at request time (feature
   stores, ML scorers, its own queues). The framework only knows how to
   ``close()`` it.
@@ -23,22 +24,21 @@ Three types make up the seam:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from app.gates import close_gates
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import psycopg
-    from elasticsearch import Elasticsearch
     from fastapi import APIRouter
 
     from app.audit.store import BundleStore
-    from app.gate.policy.gate import PolicyGate
-    from app.retrieval.retriever import PolicyRetriever
+    from app.gates import ComposedGate
     from app.settings import FrameworkSettings
-    from core.gate.policy import PromptRegistry
     from core.observation import ReasonerRegistration, ReasonerRegistry
 
 #: Deserializer signature for a reasoner's raw event payload. The bundle store
@@ -54,34 +54,40 @@ RawEventFactory = Callable[[dict[str, Any]], Any]
 class FrameworkServices:
     """Shared infrastructure and framework components, built once per process.
 
-    Reasoner plugins receive this object in ``build_services`` and may hold a
-    reference to it; the framework owns the lifecycle and calls ``close()``
-    on shutdown after every reasoner's services have been closed.
+    Reasoner plugins receive this object in ``build_services`` and gate
+    plugins in ``build``; either may hold a reference to it. The framework
+    owns the lifecycle and calls ``close()`` on shutdown after every
+    reasoner's services have been closed.
 
     Args:
         settings: The framework settings the services were built from.
-        pg_conn: Open psycopg connection (pgvector adapters registered).
-        es: Elasticsearch client for the BM25 leg of retrieval.
-        retriever: Hybrid policy retriever (pgvector + BM25 + reranker).
-        prompt_registry: Prompt-template registry the policy gate renders from.
-        gate: LLM policy gate.
+        pg_conn: Open psycopg connection the bundle store writes through.
         store: Decision-bundle persistence and replay.
         registry: Registry of every reasoner this deployment composes.
+        reasoners: The composed reasoner plugins, in composition order.
+            Gates read reasoner-shipped assets from them (a retrieving gate
+            loads each reasoner's ``prompts_dir`` and ``corpus_dir``).
+        gates: Composed gates keyed by ``gate_id``. Empty while the gates
+            themselves are being built: a gate never reaches another gate.
     """
 
     settings: FrameworkSettings
     pg_conn: psycopg.Connection[Any]
-    es: Elasticsearch
-    retriever: PolicyRetriever
-    prompt_registry: PromptRegistry
-    gate: PolicyGate
     store: BundleStore
     registry: ReasonerRegistry
+    reasoners: tuple[ReasonerPlugin, ...] = ()
+    gates: Mapping[str, ComposedGate] = field(default_factory=dict)
 
     def close(self) -> None:
-        """Release the infrastructure connections this object owns."""
-        self.pg_conn.close()
-        self.es.close()
+        """Close every composed gate, then the framework's own connection.
+
+        The connection is closed even when a gate's ``close()`` raises; the
+        gate error then propagates.
+        """
+        try:
+            close_gates(self.gates)
+        finally:
+            self.pg_conn.close()
 
 
 class ReasonerServices(Protocol):
@@ -103,11 +109,12 @@ class ReasonerPlugin(Protocol):
 
     Attributes:
         registration: The reasoner's ``ReasonerRegistration`` — identity,
-            allowed gates/templates/jurisdictions, and enforcement profile.
-            Its ``reasoner_id`` must equal the entry-point name.
+            allowed gates, and enforcement profile. Its ``reasoner_id`` must
+            equal the entry-point name.
         router: FastAPI router mounted by ``create_app``.
-        prompts_dir: Directory of ``*.yaml`` prompt templates the gate loads.
-        corpus_dir: Directory of Markdown policy documents the corpus loader
+        prompts_dir: Directory of ``*.yaml`` prompt templates an LLM-backed
+            gate loads for this reasoner.
+        corpus_dir: Directory of Markdown policy documents a retrieving gate
             indexes for this reasoner.
         raw_event_factory: Deserializer from the stored ``raw_event`` JSON
             dict back to the reasoner's typed Observation, used by replay.

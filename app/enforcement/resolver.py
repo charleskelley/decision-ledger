@@ -1,19 +1,45 @@
 """Deterministic enforcement resolver — translates gate output into a decision action.
 
-resolve() is the only public entry point. It evaluates six priority tiers in
-order and returns on the first trigger that fires. Every tier check is logged
-in override_log regardless of whether it fired, so the full decision trail is
+Enforcement has two levels (DR-28):
+
+**Gate-level tiers** apply to one gate's ``GateOutput``
+(``resolve_gate_output``). They run in order and the first that fires wins:
+
+    1. Schema failure (no verdict)                       → HOLD
+    2. Adversarial probe (skipped for a deterministic gate) → BLOCK
+    4. Low confidence + high-risk action
+       (skipped for a deterministic gate)                → HOLD
+    5. Jurisdiction conflict (runs only when the gate's
+       evidence carries jurisdictions)                   → HOLD
+    6. Default — the most conservative permitted action
+
+**Decision-level tiers** apply once per decision, independent of any gate
+(``resolve``):
+
+    3. Novel entity (insufficient history)               → HOLD (route to
+       human review, DR-6)
+
+``resolve()`` combines the two in the historical tier priority, so a
+single-gate decision resolves exactly as the single-pass resolver did: gate
+Tiers 1 and 2 outrank the decision-level Tier 3, and Tier 3 outranks gate
+Tiers 4 and 5 and the gate's accepted default — a novel entity is held for
+review whatever the gate would otherwise have let through or blocked. How
+the decision-level tier composes with several gates (and whether it may
+hold a mandatory gate's BLOCK for review) is the gate-set combinator's
+decision (DR-29). Every tier check is logged in ``override_log`` (gate-level
+entries first, then the decision-level entry), so the full decision trail is
 available for audit without re-running enforcement.
 
 Fast-path observations (FAST_PATH_ALLOW / FAST_PATH_BLOCK) return immediately
-with no tier evaluation — the reasoner was confident enough to bypass the gate.
+with no tier evaluation — the reasoner was confident enough to bypass the
+gate.
 
-The resolver is reasoner-agnostic. The two tiers that depend on what a
-reasoner measures (Tier 3, novel entity) or which policy jurisdictions it
-spans (Tier 5, jurisdiction conflict) read their profile from the
-``ReasonerRegistration`` passed by the caller — ``novel_entity_feature`` and
-``jurisdiction_conflict_groups`` respectively. A registration that leaves
-either unset disables the corresponding structural check.
+The resolver is reasoner- and gate-agnostic. Tier 3 reads the reasoner's
+``novel_entity_feature`` and Tier 5 its ``jurisdiction_conflict_groups`` from
+the ``ReasonerRegistration`` passed by the caller; Tiers 2, 4, and 5 read
+only the universal ``GateOutput`` fields (``deterministic``, ``verdict``,
+``evidence``). A registration that leaves a profile field unset disables the
+corresponding structural check.
 
 The enforcement layer produces the bundle's ``decision_action``. For
 non-terminal actions (CHALLENGE, HOLD) the realized outcome is determined
@@ -39,9 +65,8 @@ from core.enforcement import EnforcementDecision
 from core.routes import GateRoute
 
 if TYPE_CHECKING:
-    from core.gate import GateVerdict
+    from core.gate import GateOutput, GateVerdict
     from core.observation import Observation, ReasonerRegistration
-    from core.snippet import RetrievedSnippet
 
 log = structlog.get_logger(__name__)
 
@@ -60,33 +85,45 @@ _SEVERITY_ORDER = [
     DecisionAction.BLOCK,
 ]
 
+TIER1_SCHEMA_FAILURE = "tier1_schema_failure"
+TIER2_ADVERSARIAL_PROBE = "tier2_adversarial_probe"
+TIER3_NOVEL_ENTITY = "tier3_novel_entity"
+TIER4_LOW_CONFIDENCE = "tier4_low_confidence"
+TIER5_JURISDICTION_CONFLICT = "tier5_jurisdiction_conflict"
+
+#: Gate-level rules that outrank the decision-level Tier 3 (they sit before
+#: it in the historical tier order).
+_OUTRANKS_TIER3 = frozenset({TIER1_SCHEMA_FAILURE, TIER2_ADVERSARIAL_PROBE})
+
+_NOVEL_ENTITY_REASON = (
+    "Insufficient entity history for confident decision — HOLD for review"
+)
+
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry points
 # ---------------------------------------------------------------------------
 
 
 def resolve(
     obs: Observation,
-    gate_output: GateVerdict | None,
+    gate_output: GateOutput | None,
     *,
-    snippets: list[RetrievedSnippet],
     decision_id: str,
     registration: ReasonerRegistration,
 ) -> EnforcementDecision:
-    """Resolve a decision action from the gate's typed verdict and observation context.
+    """Resolve a decision action from the gate's output and the observation.
 
-    Evaluates six priority tiers in order and returns on the first trigger.
-    All tier checks are recorded in the returned ``override_log`` for full
-    audit traceability.
+    On the gate route, applies the gate-level tiers to ``gate_output`` and
+    the decision-level tier once, and combines them in the historical tier
+    priority (gate Tiers 1-2, then Tier 3, then gate Tiers 4-6). All tier
+    checks are recorded in the returned ``override_log``.
 
     Args:
         obs: The assembled Observation from the reasoner.
-        gate_output: Validated gate verdict (a ``GateVerdict``), or ``None``
-            if the gate response failed schema validation or the gate was
-            not invoked.
-        snippets: Policy snippets returned by the retriever for this
-            observation. Used for jurisdiction-conflict detection (Tier 5).
+        gate_output: The gate's universal ``GateOutput``, or ``None`` when no
+            gate ran. On the gate route ``None`` is treated like a missing
+            verdict (Tier 1 holds); on the fast path it is ignored.
         decision_id: The ``decision_id`` of the bundle being assembled.
             Carried in the structured log context.
         registration: The submitting reasoner's registration. Supplies the
@@ -97,7 +134,7 @@ def resolve(
 
     Returns:
         An immutable ``EnforcementDecision`` with the decision action, the
-        override rule that fired (if any), and the full override log.
+        override rule credited (if any), and the full override log.
     """
     log_ctx = {
         "component": "enforcement",
@@ -123,96 +160,146 @@ def resolve(
             override_log=["fast_path_block: FAST_PATH_BLOCK — policy gate skipped"],
         )
 
-    # Gate-path: evaluate tiers in priority order.
+    # Gate route: gate-level tiers, then the decision-level tier, combined
+    # in the historical priority.
+    gate_level = resolve_gate_output(
+        gate_output, registration=registration, decision_id=decision_id
+    )
+    outranked_by = (
+        gate_level.enforcement_rule_applied
+        if gate_level.enforcement_rule_applied in _OUTRANKS_TIER3
+        else None
+    )
+    novel_entity, tier3_line = _novel_entity_tier(
+        obs, registration, outranked_by=outranked_by
+    )
+    if novel_entity and outranked_by is None:
+        final_action, rule = DecisionAction.HOLD, TIER3_NOVEL_ENTITY
+    else:
+        final_action = gate_level.decision_action
+        rule = gate_level.enforcement_rule_applied
+
+    log.info(
+        "enforcement.resolved",
+        decision_action=final_action.value,
+        enforcement_rule_applied=rule,
+        gate_action=gate_level.decision_action.value,
+        novel_entity=novel_entity,
+        **log_ctx,
+    )
+    return EnforcementDecision(
+        decision_action=final_action,
+        enforcement_rule_applied=rule,
+        override_log=[*gate_level.override_log, tier3_line],
+    )
+
+
+def resolve_gate_output(
+    gate_output: GateOutput | None,
+    *,
+    registration: ReasonerRegistration,
+    decision_id: str,
+) -> EnforcementDecision:
+    """Apply the gate-level tiers (1, 2, 4, 5, 6) to one gate's output.
+
+    Tiers run in order and the first that fires decides the gate's enforced
+    action. Tiers 2 and 4 are skipped for a deterministic gate; Tier 5 runs
+    only when the gate's ``evidence`` carries jurisdictions.
+
+    Args:
+        gate_output: The gate's ``GateOutput``. ``None`` (no output) and
+            ``verdict is None`` both fire Tier 1.
+        registration: The submitting reasoner's registration (Tier 5 reads
+            its ``jurisdiction_conflict_groups``).
+        decision_id: The decision being enforced, for log correlation.
+
+    Returns:
+        The gate's enforced action, the rule that fired (``None`` when the
+        default accepted the gate's verdict), and the gate-level log.
+    """
+    log_ctx = {
+        "component": "enforcement",
+        "decision_id": decision_id,
+        "gate_id": gate_output.gate_id if gate_output is not None else None,
+    }
     override_log: list[str] = []
 
-    def _make_hold(rule: str, reason: str) -> EnforcementDecision:
+    def _fire(rule: str, action: DecisionAction, reason: str) -> EnforcementDecision:
         override_log.append(f"{rule}: fired — {reason}")
-        log.info("enforcement.hold", rule=rule, **log_ctx)
+        log.info("enforcement.gate_tier_fired", rule=rule, action=action, **log_ctx)
         return EnforcementDecision(
-            decision_action=DecisionAction.HOLD,
-            enforcement_rule_applied=rule,
-            override_log=override_log,
-        )
-
-    def _make_block(rule: str, reason: str) -> EnforcementDecision:
-        override_log.append(f"{rule}: fired — {reason}")
-        log.info("enforcement.block_override", rule=rule, **log_ctx)
-        return EnforcementDecision(
-            decision_action=DecisionAction.BLOCK,
+            decision_action=action,
             enforcement_rule_applied=rule,
             override_log=override_log,
         )
 
     # --- Tier 1: Schema failure ---
-    if gate_output is None:
-        return _make_hold(
-            "tier1_schema_failure",
-            "Policy gate output failed schema validation — routed to HOLD for review",
+    if gate_output is None or gate_output.verdict is None:
+        return _fire(
+            TIER1_SCHEMA_FAILURE,
+            DecisionAction.HOLD,
+            "Gate output failed schema validation — routed to HOLD for review",
         )
-    override_log.append("tier1_schema_failure: not fired — gate output present")
+    override_log.append(f"{TIER1_SCHEMA_FAILURE}: not fired — gate output present")
+    verdict = gate_output.verdict
 
-    # --- Tier 2: Adversarial probe ---
-    if ADVERSARIAL_CONTROL in gate_output.required_controls:
-        return _make_block(
-            "tier2_adversarial_probe",
+    # --- Tier 2: Adversarial probe (meaningless for a deterministic gate) ---
+    if gate_output.deterministic:
+        override_log.append(f"{TIER2_ADVERSARIAL_PROBE}: skipped — deterministic gate")
+    elif ADVERSARIAL_CONTROL in verdict.required_controls:
+        return _fire(
+            TIER2_ADVERSARIAL_PROBE,
+            DecisionAction.BLOCK,
             f"Gate flagged adversarial probe via {ADVERSARIAL_CONTROL!r}",
         )
-    override_log.append("tier2_adversarial_probe: not fired")
-
-    # --- Tier 3: Novel entity (insufficient history) ---
-    novel_feature = registration.novel_entity_feature
-    if novel_feature is None:
-        override_log.append(
-            "tier3_novel_entity: not fired — no novel-entity feature configured"
-        )
     else:
-        feature_set = obs.reasoner_context.feature_set if obs.reasoner_context else {}
-        if bool(feature_set.get(novel_feature, False)):
-            return _make_hold(
-                "tier3_novel_entity",
-                "Insufficient account history for confident decision — HOLD for review",
-            )
-        override_log.append("tier3_novel_entity: not fired — history sufficient")
+        override_log.append(f"{TIER2_ADVERSARIAL_PROBE}: not fired")
 
     # --- Tier 4: Low confidence + high-risk action ---
-    conservative = _most_conservative(gate_output.permitted_actions)
-    if gate_output.confidence < LOW_CONFIDENCE_THRESHOLD and conservative in (
+    conservative = _most_conservative(verdict.permitted_actions)
+    if gate_output.deterministic:
+        override_log.append(f"{TIER4_LOW_CONFIDENCE}: skipped — deterministic gate")
+    elif verdict.confidence < LOW_CONFIDENCE_THRESHOLD and conservative in (
         DecisionAction.HOLD,
         DecisionAction.BLOCK,
     ):
-        return _make_hold(
-            "tier4_low_confidence",
+        return _fire(
+            TIER4_LOW_CONFIDENCE,
+            DecisionAction.HOLD,
             (
-                f"Gate confidence {gate_output.confidence:.2f} below threshold "
+                f"Gate confidence {verdict.confidence:.2f} below threshold "
                 f"{LOW_CONFIDENCE_THRESHOLD} with high-risk action {conservative.value}"
             ),
         )
-    override_log.append(
-        f"tier4_low_confidence: not fired — confidence={gate_output.confidence:.2f}"
-    )
+    else:
+        override_log.append(
+            f"{TIER4_LOW_CONFIDENCE}: not fired — confidence={verdict.confidence:.2f}"
+        )
 
-    # --- Tier 5: Jurisdiction conflict ---
-    if _has_jurisdiction_conflict(
-        gate_output, snippets, registration.jurisdiction_conflict_groups
+    # --- Tier 5: Jurisdiction conflict (only when evidence carries any) ---
+    jurisdictions = gate_output.evidence_jurisdictions()
+    if not jurisdictions:
+        override_log.append(
+            f"{TIER5_JURISDICTION_CONFLICT}: skipped — gate evidence carries "
+            "no jurisdictions"
+        )
+    elif _has_jurisdiction_conflict(
+        verdict, jurisdictions, registration.jurisdiction_conflict_groups
     ):
-        return _make_hold(
-            "tier5_jurisdiction_conflict",
+        return _fire(
+            TIER5_JURISDICTION_CONFLICT,
+            DecisionAction.HOLD,
             "Conflicting policy requirements across jurisdictions — HOLD for review",
         )
-    override_log.append("tier5_jurisdiction_conflict: not fired")
+    else:
+        override_log.append(f"{TIER5_JURISDICTION_CONFLICT}: not fired")
 
     # --- Tier 6: Default — accept gate output ---
-    action = _most_conservative(gate_output.permitted_actions)
-    override_log.append(f"tier6_default: accepted gate output — action={action.value}")
-    log.info(
-        "enforcement.resolved",
-        decision_action=action.value,
-        gate_confidence=gate_output.confidence,
-        **log_ctx,
+    override_log.append(
+        f"tier6_default: accepted gate output — action={conservative.value}"
     )
     return EnforcementDecision(
-        decision_action=action,
+        decision_action=conservative,
         enforcement_rule_applied=None,
         override_log=override_log,
     )
@@ -221,6 +308,32 @@ def resolve(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _novel_entity_tier(
+    obs: Observation,
+    registration: ReasonerRegistration,
+    *,
+    outranked_by: str | None,
+) -> tuple[bool, str]:
+    """Evaluate decision-level Tier 3 once; return (fired, override-log line).
+
+    ``outranked_by`` names the gate-level rule (Tier 1 or 2) that decides the
+    action even when Tier 3 fires; the log line records it.
+    """
+    novel_feature = registration.novel_entity_feature
+    if novel_feature is None:
+        return (
+            False,
+            f"{TIER3_NOVEL_ENTITY}: not fired — no novel-entity feature configured",
+        )
+    feature_set = obs.reasoner_context.feature_set if obs.reasoner_context else {}
+    if not bool(feature_set.get(novel_feature, False)):
+        return False, f"{TIER3_NOVEL_ENTITY}: not fired — history sufficient"
+    line = f"{TIER3_NOVEL_ENTITY}: fired — {_NOVEL_ENTITY_REASON}"
+    if outranked_by is not None:
+        line += f"; {outranked_by} outranks it"
+    return True, line
 
 
 def _most_conservative(actions: list[DecisionAction]) -> DecisionAction:
@@ -232,32 +345,31 @@ def _most_conservative(actions: list[DecisionAction]) -> DecisionAction:
 
 
 def _has_jurisdiction_conflict(
-    gate_output: GateVerdict,
-    snippets: list[RetrievedSnippet],
+    verdict: GateVerdict,
+    jurisdictions: frozenset[str],
     conflict_groups: tuple[frozenset[str], ...],
 ) -> bool:
     """Return True if a jurisdiction conflict is signaled.
 
     Two detection paths: the gate flags it explicitly (via the
     ``JURISDICTION_CONFLICT_CTL`` control or a conflict-worded escalation),
-    or the retrieved snippets structurally span at least two distinct
-    ``conflict_groups``. An empty ``conflict_groups`` disables the
+    or the jurisdictions its evidence carries structurally span at least two
+    distinct ``conflict_groups``. An empty ``conflict_groups`` disables the
     structural path.
     """
     # Gate explicitly flagged it.
-    if JURISDICTION_CONFLICT_CTL in gate_output.required_controls:
+    if JURISDICTION_CONFLICT_CTL in verdict.required_controls:
         return True
     if (
-        gate_output.escalate_to_human
-        and gate_output.escalation_reason
+        verdict.escalate_to_human
+        and verdict.escalation_reason
         and (
-            "jurisdiction" in gate_output.escalation_reason.lower()
-            or "conflict" in gate_output.escalation_reason.lower()
+            "jurisdiction" in verdict.escalation_reason.lower()
+            or "conflict" in verdict.escalation_reason.lower()
         )
     ):
         return True
-    # Structural detection: top results span two or more distinct conflict
+    # Structural detection: the evidence spans two or more distinct conflict
     # groups declared on the reasoner's registration.
-    jurisdictions = {s.jurisdiction for s in snippets}
     groups_touched = {g for g in conflict_groups if jurisdictions & g}
     return len(groups_touched) >= 2

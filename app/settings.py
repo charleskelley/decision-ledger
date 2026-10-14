@@ -1,15 +1,17 @@
 """Framework-runtime configuration (shared infrastructure).
 
 ``FrameworkSettings`` holds configuration for resources that are shared
-across the framework runtime and every reasoner plugin it composes —
-Postgres, Elasticsearch, LLM credentials, process-wide logging, and the
-reasoner allowlist. Tenant separation is logical (the ``reasoner_id``
-column, per-reasoner ES documents), not connection-level — multiple
-reasoners share one deployment of each resource.
+across the framework runtime and every plugin it composes — Postgres (the
+audit ledger, the framework's only infrastructure), process-wide logging,
+and the reasoner allowlist. Tenant separation is logical (the
+``reasoner_id`` column), not connection-level — multiple reasoners share
+one deployment.
 
-Per-reasoner configuration (model artifact paths, corpus versions, a
-reasoner's own queue or cache) lives in that reasoner's own ``Settings``
-class with a domain-specific env-var prefix, inside the reasoner's package.
+Per-plugin configuration lives in that plugin's own ``Settings`` class with
+its own env-var prefix, inside its package: a reasoner's model artifact
+paths, corpus version, or queue; a gate's search index or model endpoint
+(DR-28). A gate that keeps tables in the framework's database (in its own
+schema) reads the Postgres DSN from here.
 
 Values are resolved in this precedence order (Pydantic Settings default):
 
@@ -30,13 +32,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class FrameworkSettings(BaseSettings):
     """Shared-infrastructure configuration with docker-compose defaults.
 
-    Owns Postgres / Elasticsearch connection params, LLM credentials,
-    logging knobs, and the reasoner allowlist. These are deployment-level
-    concerns — ``app/bootstrap.py`` constructs the corresponding clients
-    from this object and hands them to each reasoner plugin.
+    Owns the Postgres connection params, logging knobs, and the reasoner
+    allowlist — ``app/bootstrap.py`` opens the framework's Postgres
+    connection from them.
 
-    Reasoner-specific configuration must NOT be added here; create a
-    per-reasoner Settings class with a domain-specific env-var prefix.
+    Reasoner- or gate-specific configuration must NOT be added here; create
+    a Settings class with that plugin's own env-var prefix in its package.
     """
 
     # ``extra="ignore"`` tolerates additional vars in ``.env`` that don't
@@ -54,11 +55,6 @@ class FrameworkSettings(BaseSettings):
     postgres_user: str = "decisionledger"
     postgres_password: str = "decisionledger"  # noqa: S105
     postgres_db: str = "decisionledger"
-
-    elasticsearch_url: str = "http://localhost:9200"
-
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
 
     log_json: bool = True
     log_level: str = "INFO"

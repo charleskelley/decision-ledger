@@ -2,7 +2,10 @@
 
 Published as the ``ato-reasoner`` entry point in the
 ``decisionledger.eval_adapters`` group. ``uv run python -m
-eval.runners.harness --reasoner-id ato-reasoner`` resolves it.
+eval.runners.harness --reasoner-id ato-reasoner`` resolves it for the
+framework's dimensions, and the RAG policy gate's harness (``python -m
+policy_rag_gate.eval``) resolves it to read the golden datasets ATO ships for
+that gate (``retrieval/``, ``faithfulness/``, ``citations/``).
 """
 
 from __future__ import annotations
@@ -30,7 +33,10 @@ class AtoEvalAdapter:
             registration's ``reasoner_id``.
         event_type: ``LoginEvent``; the consistency and robustness datasets
             are written in it.
-        datasets_dir: ``reasoners/account_takeover/src/ato_reasoner/eval/datasets``.
+        datasets_dir: ``reasoners/account_takeover/src/ato_reasoner/eval/datasets``:
+            ``scenarios/`` and ``robustness/`` for the framework harness,
+            ``retrieval/``, ``faithfulness/``, and ``citations/`` for the RAG
+            policy gate's.
     """
 
     reasoner_id: str = ATO_REGISTRATION.reasoner_id
@@ -45,7 +51,9 @@ class AtoEvalAdapter:
         stacks.
 
         Args:
-            settings: Framework settings (Postgres, Elasticsearch, LLM keys).
+            settings: Framework settings (Postgres). The driver reads the
+                policy gate's own settings (Elasticsearch, the OpenAI key)
+                itself.
 
         Returns:
             A connected ``PipelineDriver``; the caller closes it.

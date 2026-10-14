@@ -1,0 +1,40 @@
+# RAG policy gate infrastructure, pulled into the root stack by `include:` in
+# docker-compose.yml (Compose >= 2.20). Elasticsearch belongs to this gate:
+# only its retriever (BM25 leg) and corpus loader use it. Point the gate at
+# it with POLICY_RAG_GATE_ELASTICSEARCH_URL.
+#
+# The gate's dense leg lives in Postgres, in the gate's own `policy_rag`
+# schema inside the framework's database; the root compose file's Postgres
+# image ships the vector extension the gate's DDL creates.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Elasticsearch 8 — BM25 sparse retrieval for every reasoner's policy corpus
+  # Security disabled for local dev only. Never expose to public network.
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - cluster.routing.allocation.disk.threshold_enabled=false
+    ports:
+      - "${POLICY_RAG_GATE_ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf http://localhost:9200/_cluster/health | grep -qE ''"status":"(green|yellow)"''',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  es_data:

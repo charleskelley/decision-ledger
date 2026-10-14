@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Default groups (dev + reasoners) install every workspace reasoner.
+      # Default groups (dev + reasoners + gates) install every workspace member.
       - name: Install dependencies
         run: uv sync --frozen
 
@@ -43,8 +43,9 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
+      # The framework's DDL plus every gate's own (gates/<name>/src/<pkg>/sql).
       - name: SQLFluff lint (postgres dialect)
-        run: uv run sqlfluff lint --dialect postgres app/audit/sql/
+        run: uv run sqlfluff lint --dialect postgres app/audit/sql/ gates/*/src/*/sql/
 
       - name: Pyright typecheck
         run: uv run pyright
@@ -62,19 +63,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # DR-23: only app/llm/openai.py and app/llm/anthropic.py may import
-      # an LLM SDK. Any other file with `from openai` / `import anthropic`
-      # is an architectural regression — fail the build immediately.
-      - name: Check no SDK imports outside app/llm/
+      # DR-23: only the RAG policy gate's LLM adapters
+      # (gates/policy_rag/src/policy_rag_gate/llm/) may import an LLM SDK.
+      # Any other file with `from openai` / `import anthropic`, at any
+      # indentation, is an architectural regression — fail the build
+      # immediately. tests/test_framework_boundary.py checks the same rule
+      # with an AST scan inside `make check`.
+      - name: Check no SDK imports outside the policy gate's LLM adapters
         run: |
           set -euo pipefail
-          leaks=$(grep -rE "^(from|import) (openai|anthropic)" \
+          allowed="gates/policy_rag/src/policy_rag_gate/llm/"
+          leaks=$(grep -rE "^[[:space:]]*(from|import)[[:space:]]+(openai|anthropic)([[:space:].]|$)" \
             --include="*.py" \
-            app/ core/ eval/ reasoners/ tests/ \
-            | grep -v "^app/llm/" || true)
+            app/ core/ eval/ reasoners/ gates/ tests/ \
+            | grep -v "^${allowed}" || true)
           if [ -n "$leaks" ]; then
-            echo "ERROR: DR-23 boundary violation — LLM SDK imported outside app/llm/:"
+            echo "ERROR: DR-23 boundary violation — LLM SDK imported outside ${allowed}:"
             echo "$leaks"
             exit 1
           fi
-          echo "OK: no SDK imports outside app/llm/"
+          echo "OK: no SDK imports outside ${allowed}"

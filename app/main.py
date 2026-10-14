@@ -1,10 +1,12 @@
-"""FastAPI application factory — composes the framework with discovered reasoners.
+"""FastAPI application factory — composes the framework with discovered plugins.
 
 ``create_app`` discovers reasoner plugins (``decisionledger.reasoners``
-entry points, filtered by ``DECISIONLEDGER_REASONERS``), mounts each
-plugin's router, and installs a lifespan that builds the shared framework
-services once and then asks every plugin to build its own services against
-them. Nothing in this module names a concrete reasoner.
+entry points, filtered by ``DECISIONLEDGER_REASONERS``) and gate plugins
+(``decisionledger.gates`` entry points), mounts each reasoner plugin's
+router, and installs a lifespan that builds the shared framework services
+once — composed gates included — and then asks every reasoner plugin to
+build its own services against them. Nothing in this module names a
+concrete reasoner or gate.
 
 Generic framework routes (health, decision lookup, replay) live here since
 they key on ``decision_id`` only. Reasoner-specific decision endpoints live
@@ -25,6 +27,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from app.bootstrap import build_framework_services
+from app.gates import discover_gates
 from app.monitoring import configure_logging
 from app.plugins import allowlist_from_settings, discover_plugins
 from app.settings import FrameworkSettings
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from app.audit.store import BundleStore
+    from app.gates import GatePlugin
     from app.plugin import FrameworkServices, ReasonerPlugin, ReasonerServices
 
 log = structlog.get_logger(__name__)
@@ -184,7 +188,10 @@ def replay_decision(decision_id: str, request: Request) -> ReplayResponse:
 # ---------------------------------------------------------------------------
 
 
-def create_app(plugins: Sequence[ReasonerPlugin] | None = None) -> FastAPI:
+def create_app(
+    plugins: Sequence[ReasonerPlugin] | None = None,
+    gate_plugins: Sequence[GatePlugin] | None = None,
+) -> FastAPI:
     """Build the DecisionLedger FastAPI application.
 
     Args:
@@ -192,15 +199,25 @@ def create_app(plugins: Sequence[ReasonerPlugin] | None = None) -> FastAPI:
             installed under the ``decisionledger.reasoners`` entry point
             group, filtered by ``DECISIONLEDGER_REASONERS``. Tests pass an
             explicit list.
+        gate_plugins: Gate plugins to compose. Defaults to every plugin
+            installed under the ``decisionledger.gates`` entry point group.
+            Tests pass an explicit list (a fake gate, or none).
 
     Returns:
-        A FastAPI app whose lifespan builds the framework services and each
-        plugin's services, exposing them on ``app.state.framework`` and
-        ``app.state.reasoners[reasoner_id]``.
+        A FastAPI app whose lifespan builds the framework services (composed
+        gates included) and each reasoner plugin's services, exposing them on
+        ``app.state.framework`` and ``app.state.reasoners[reasoner_id]``.
+
+    Raises:
+        ReasonerPluginError: A discovered reasoner plugin is malformed.
+        GatePluginError: A discovered gate plugin is malformed.
     """
     if plugins is None:
         plugins = discover_plugins(allow=allowlist_from_settings(FrameworkSettings()))
     composed = list(plugins)
+    composed_gates = (
+        list(gate_plugins) if gate_plugins is not None else discover_gates()
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -219,7 +236,7 @@ def create_app(plugins: Sequence[ReasonerPlugin] | None = None) -> FastAPI:
                 ),
             )
 
-        framework = build_framework_services(settings, composed)
+        framework = build_framework_services(settings, composed, composed_gates)
         reasoners: dict[str, ReasonerServices] = {}
         try:
             for plugin in composed:
@@ -235,6 +252,7 @@ def create_app(plugins: Sequence[ReasonerPlugin] | None = None) -> FastAPI:
             "api.startup",
             component="api",
             reasoner_ids=sorted(reasoners),
+            gate_ids=sorted(framework.gates),
             msg="All services initialized",
         )
 

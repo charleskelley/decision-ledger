@@ -16,9 +16,21 @@ REASONER_EVAL_TARGETS    :=
 REASONER_HELP            :=
 -include $(wildcard reasoners/*/reasoner.mk)
 
+# Per-gate targets. Each gates/<name>/gate.mk defines targets suffixed with
+# the gate directory name (prepare-gate-<name>, eval-gate-<name>, ...) and
+# appends them to the GATE_*_TARGETS aggregates below. This file never names
+# a gate.
+GATE_PREPARE_TARGETS :=
+GATE_EVAL_TARGETS    :=
+GATE_HELP            :=
+-include $(wildcard gates/*/gate.mk)
+
+# DDL linted by lint-sql: the framework's, plus every gate's own.
+SQL_DIRS := app/audit/sql $(wildcard gates/*/src/*/sql)
+
 .PHONY: help sync lint lint-sql typecheck test test-smoke test-integration \
         eval test-all check verify verify-ready verify-push \
-        build-policy-index install-hooks train prepare-reasoners
+        build-policy-index install-hooks train prepare-reasoners prepare-gates
 
 # -----------------------------------------------------------------------------
 # Help
@@ -44,15 +56,21 @@ help:
 	@echo ""
 	@echo "  Reasoners (aggregates over every reasoners/*/reasoner.mk)"
 	@echo "    train               Train every reasoner's model"
-	@echo "    build-policy-index  Embed and index every reasoner's policy corpus"
+	@echo "    build-policy-index  Index every reasoner's policy corpus (into the gate that serves it)"
 	@echo "    prepare-reasoners   Index corpora + train missing models (pre-integration)"
-	@echo "    eval                Evaluation harness for every reasoner (slow, costs money)"
+	@echo "    eval                Every reasoner's eval, then every gate's (slow, costs money)"
 	@echo ""
 	@echo "  Per-reasoner targets"
 	@for line in $(REASONER_HELP); do echo "$$line"; done
 	@echo ""
+	@echo "  Gates (aggregates over every gates/*/gate.mk)"
+	@echo "    prepare-gates       Apply every gate's own Postgres DDL (its schema)"
+	@echo ""
+	@echo "  Per-gate targets"
+	@for line in $(GATE_HELP); do echo "$$line"; done
+	@echo ""
 	@echo "  Development"
-	@echo "    sync              Install the framework + every workspace reasoner (uv sync)"
+	@echo "    sync              Install the framework + every workspace reasoner and gate (uv sync)"
 	@echo "    install-hooks     Install pre-commit git hooks"
 	@echo ""
 
@@ -65,7 +83,7 @@ lint:
 	uv run ruff format .
 
 lint-sql:
-	uv run sqlfluff lint --dialect postgres app/audit/sql/
+	uv run sqlfluff lint --dialect postgres $(SQL_DIRS)
 
 typecheck:
 	uv run pyright
@@ -88,7 +106,7 @@ verify-ready:
 
 # verify: full local gate. Strict — fails loudly if Docker isn't ready.
 # Use this manually before pushing changes that touch app/audit/,
-# app/retrieval/, docker-compose.yml, or a reasoner's package.
+# docker-compose.yml, or a reasoner's or gate's package.
 verify: verify-ready check test-integration test-smoke
 	@echo "✓ verify: all local gates green"
 
@@ -110,7 +128,7 @@ verify-push:
 # Testing
 # -----------------------------------------------------------------------------
 
-# pytest testpaths covers tests/ and reasoners/*/tests.
+# pytest testpaths covers tests/, reasoners/*/tests, and gates/*/tests.
 test:
 	uv run pytest -m "not integration and not evaluation and not slow and not smoke" -v
 
@@ -136,7 +154,9 @@ build-policy-index: $(REASONER_INDEX_TARGETS)
 
 prepare-reasoners: $(REASONER_PREPARE_TARGETS)
 
-eval: $(REASONER_EVAL_TARGETS)
+prepare-gates: $(GATE_PREPARE_TARGETS)
+
+eval: $(REASONER_EVAL_TARGETS) $(GATE_EVAL_TARGETS)
 
 install-hooks:
 	uv run pre-commit install

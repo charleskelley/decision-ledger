@@ -14,6 +14,18 @@ The CLI evaluates one reasoner at a time. ``--reasoner-id`` (or
 (see ``eval.adapter``) supplies the event type, golden datasets, and the
 pipeline driver. The harness itself carries no reasoner vocabulary.
 
+The framework's dimensions are the reasoner-facing ones: decision
+consistency and adversarial robustness, driven through the reasoner's own
+pipeline. Dimensions that measure what one gate does (a retrieving gate's
+retrieval quality, an LLM gate's faithfulness and citations) belong to that
+gate and run in its own harness, which reuses ``run_eval`` and the
+``EvalReport`` schema (DR-28).
+
+Reports are staged per reasoner at
+``outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json``; promote a
+baseline by copying it to
+``outputs/eval/reasoner/<reasoner_id>/eval-report-v<N>.json``.
+
 Usage::
 
     uv run python -m eval.runners.harness --reasoner-id <reasoner-id>
@@ -37,7 +49,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from app.llm.anthropic import AnthropicLLMClient
 from app.settings import FrameworkSettings
 from core.eval.metrics import (
     CitationMetrics,
@@ -50,14 +61,7 @@ from core.eval.metrics import (
 )
 from core.exceptions import ReasonerPluginError
 from eval.adapter import load_eval_adapter
-from eval.clients.ragas import RagasFaithfulnessAdapter
-from eval.dimensions.citation import CitationDimension, load_citation_cases
 from eval.dimensions.consistency import ConsistencyDimension, load_scenarios
-from eval.dimensions.faithfulness import (
-    FaithfulnessDimension,
-    load_faithfulness_cases,
-)
-from eval.dimensions.retrieval import RetrievalDimension, load_golden_queries
 from eval.dimensions.robustness import (
     RobustnessDimension,
     load_fallback_cases,
@@ -178,101 +182,44 @@ def _build_default_dimensions(
     settings: FrameworkSettings | None = None,
     dataset_root: Path | None = None,
 ) -> list[Dimension]:
-    """Construct the MVP dimension set for one reasoner against live infrastructure.
+    """Construct the framework's dimensions for one reasoner on live infrastructure.
 
     Each dimension's golden dataset is loaded from
-    ``dataset_root/<dimension>/...``. When a dataset file is missing
-    (typically because curation happens in MVP plan Step 4), the slot
-    is filled with a ``SkippedDimension`` so the ``EvalReport`` still
-    lists all five dimensions and the missing one surfaces as a
-    threshold violation instead of disappearing silently.
+    ``dataset_root/<dimension>/...``. When a dataset is missing the slot is
+    filled with a ``SkippedDimension`` so the ``EvalReport`` still lists both
+    dimensions and the missing one surfaces as a threshold violation instead
+    of disappearing silently.
+
+    Gate-owned dimensions are not built here: each gate's own harness runs
+    them against the datasets a reasoner ships for that gate.
 
     Args:
-        adapter: The reasoner's ``EvalAdapter``. Supplies the tenant id the
-            retrieval dimension filters on, the event type the consistency
-            and robustness datasets are validated against, the default
-            dataset root, and the pipeline driver.
-        settings: Optional ``FrameworkSettings`` override. Defaults to a
-            fresh ``FrameworkSettings()`` reading from the environment.
-            Tests pass a stub Settings to drive the API-key fail-fast path.
+        adapter: The reasoner's ``EvalAdapter``. Supplies the event type the
+            consistency and robustness datasets are validated against, the
+            default dataset root, and the pipeline driver.
+        settings: Optional ``FrameworkSettings`` override handed to the
+            adapter's driver. Defaults to a fresh ``FrameworkSettings()``
+            reading from the environment.
         dataset_root: Optional override for the dataset directory.
             Defaults to ``adapter.datasets_dir``.
 
     Returns:
-        Five dimensions in canonical order: retrieval, faithfulness,
-        consistency, citation, robustness. Each is either a real
-        dimension (dataset present) or a ``SkippedDimension`` (dataset
-        missing).
+        Two dimensions in canonical order: consistency, robustness. Each is
+        either a real dimension (dataset present) or a ``SkippedDimension``
+        (dataset missing).
 
     Raises:
-        ValueError: ``OPENAI_API_KEY`` or ``ANTHROPIC_API_KEY`` is not set
-            in ``settings``. The gate runs on OpenAI and the
-            faithfulness/citation judges run on Anthropic — both keys are
-            required to assemble the dimension set.
+        ValueError: The adapter's driver rejects its configuration (for
+            example a missing credential the reasoner's pipeline needs).
     """
     settings = settings if settings is not None else FrameworkSettings()
-    if not settings.openai_api_key:
-        msg = (
-            "OPENAI_API_KEY is required to construct the eval harness. "
-            "Set OPENAI_API_KEY in the environment or in .env."
-        )
-        raise ValueError(msg)
-    if not settings.anthropic_api_key:
-        msg = (
-            "ANTHROPIC_API_KEY is required to construct the eval harness. "
-            "Faithfulness and citation judges run on Anthropic to reduce "
-            "in-family bias against the OpenAI-backed gate. Set "
-            "ANTHROPIC_API_KEY in the environment or in .env."
-        )
-        raise ValueError(msg)
-
     dataset_root = dataset_root if dataset_root is not None else adapter.datasets_dir
     event_type = adapter.event_type
 
-    # Heavy clients — opened once, shared across dimensions. The gate (inside
-    # the driver) uses OpenAI; faithfulness/citation judges use Anthropic.
-    # Cross-family pairing reduces in-family judging bias.
+    # Opened once, shared by both dimensions.
     driver = adapter.build_driver(settings)
-    judge_client = AnthropicLLMClient()
-    ragas_scorer = RagasFaithfulnessAdapter()
 
     dimensions: list[Dimension] = []
-
-    # --- Retrieval ---
-    queries_path = dataset_root / "retrieval" / "golden_queries.yaml"
-    if queries_path.exists():
-        dimensions.append(
-            RetrievalDimension(
-                retriever=driver.retriever,
-                golden_queries=load_golden_queries(queries_path),
-                reasoner_id=adapter.reasoner_id,
-            )
-        )
-    else:
-        dimensions.append(
-            SkippedDimension(
-                kind=EvalDimension.RETRIEVAL,
-                reason=f"dataset missing: {queries_path}",
-            )
-        )
-
-    # --- Faithfulness ---
-    faithfulness_path = dataset_root / "faithfulness" / "golden_outputs.yaml"
-    if faithfulness_path.exists():
-        dimensions.append(
-            FaithfulnessDimension(
-                ragas_scorer=ragas_scorer,
-                judge_client=judge_client,
-                cases=load_faithfulness_cases(faithfulness_path),
-            )
-        )
-    else:
-        dimensions.append(
-            SkippedDimension(
-                kind=EvalDimension.FAITHFULNESS,
-                reason=f"dataset missing: {faithfulness_path}",
-            )
-        )
 
     # --- Consistency ---
     scenarios_dir = dataset_root / "scenarios"
@@ -289,23 +236,6 @@ def _build_default_dimensions(
             SkippedDimension(
                 kind=EvalDimension.CONSISTENCY,
                 reason=f"no scenario files in {scenarios_dir}/",
-            )
-        )
-
-    # --- Citation ---
-    citation_path = dataset_root / "citations" / "golden_outputs.yaml"
-    if citation_path.exists():
-        dimensions.append(
-            CitationDimension(
-                client=judge_client,
-                cases=load_citation_cases(citation_path),
-            )
-        )
-    else:
-        dimensions.append(
-            SkippedDimension(
-                kind=EvalDimension.CITATION,
-                reason=f"dataset missing: {citation_path}",
             )
         )
 
@@ -363,7 +293,13 @@ def _build_default_dimensions(
     return dimensions
 
 
-_DEFAULT_OUTPUT_PATH = Path("outputs/stage/eval/eval-report.json")
+#: Staging directory for reasoner reports: ``<this>/<reasoner_id>/eval-report.json``.
+_DEFAULT_OUTPUT_DIR = Path("outputs/stage/eval/reasoner")
+
+
+def default_output_path(reasoner_id: str) -> Path:
+    """Staging path of one reasoner's report (``outputs/eval/<kind>/<id>`` layout)."""
+    return _DEFAULT_OUTPUT_DIR / reasoner_id / "eval-report.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -372,14 +308,16 @@ def main(argv: list[str] | None = None) -> int:
     Resolves the reasoner to evaluate (``--reasoner-id`` flag, else the
     ``DECISIONLEDGER_EVAL_REASONER`` env var) and loads its ``EvalAdapter``;
     resolves the output path (in precedence order: ``--output`` flag,
-    ``EVAL_OUTPUT_PATH`` env var, then the default staging path);
+    ``EVAL_OUTPUT_PATH`` env var, then the per-reasoner staging path
+    ``outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json``);
     constructs the default dimension set; and runs the harness.
 
     Exit codes:
         0: all dimensions passed thresholds (``overall_passed=True``).
         1: one or more dimensions failed thresholds.
-        2: config error — no reasoner named, no eval adapter for it, missing
-            API keys, or no dimensions registered. No report written.
+        2: config error — no reasoner named, no eval adapter for it, a
+            driver configuration error, or no dimensions registered. No
+            report written.
 
     Args:
         argv: Optional argv override (defaults to ``sys.argv[1:]``).
@@ -390,7 +328,10 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="eval.runners.harness",
-        description="Run the 5-dimension evaluation harness for one reasoner.",
+        description=(
+            "Run the framework's evaluation harness (consistency, robustness) "
+            "for one reasoner."
+        ),
     )
     parser.add_argument(
         "--reasoner-id",
@@ -405,15 +346,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "Path to write the EvalReport JSON. Defaults to "
-            "$EVAL_OUTPUT_PATH or outputs/stage/eval/eval-report.json."
+            "Path to write the EvalReport JSON. Defaults to $EVAL_OUTPUT_PATH "
+            "or outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json."
         ),
     )
     args = parser.parse_args(argv)
-
-    output_path: Path = args.output or Path(
-        os.environ.get("EVAL_OUTPUT_PATH", str(_DEFAULT_OUTPUT_PATH))
-    )
 
     reasoner_id = args.reasoner_id or os.environ.get(_REASONER_ENV, "").strip()
     if not reasoner_id:
@@ -423,6 +360,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    output_path: Path = args.output or Path(
+        os.environ.get("EVAL_OUTPUT_PATH", str(default_output_path(reasoner_id)))
+    )
 
     try:
         adapter = load_eval_adapter(reasoner_id)

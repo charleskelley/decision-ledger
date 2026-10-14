@@ -20,12 +20,16 @@ Translation mapping:
         attribution           = AttributionSummary(feature_contributions=top_signals)
         model_version         = scorer_output.scorer_version
 
-    LoginEvent + ScorerOutput → GateContext
-        prompt_template_id    = "ato-v3"
+    LoginEvent + ScorerOutput → GateContext (policy gate, gate_id "policy")
+        template_id           = "ato-v3"
         jurisdictions         = resolved from event geo (US_FEDERAL + INTERNAL default)
         risk_tier             = resolved from scorer risk score band
         template_vars         = rendered strings for each {placeholder} in
                                 ato_reasoner/prompts/ato-v3.yaml
+        retrieval_query       = build_ato_query(event, scorer) — the policy
+                                gate runs retrieval itself (DR-28), so the
+                                domain-owned query travels in its gate_config
+        corpus_version        = the corpus version stamp from AtoSettings
 
     ScorerOutput → fast_path_rationale  (fast path only)
         Human-readable description of the confidence-band rule that fired,
@@ -38,6 +42,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ato_reasoner.policy import Jurisdiction, RiskTier
+from ato_reasoner.retrieval_query import build_ato_query
 from core.observation import AttributionSummary, GateContext, LabelType, ReasonerContext
 from core.routes import GateRoute
 
@@ -177,17 +182,22 @@ def _build_gate_context(
     event: LoginEvent,
     features: AtoFeatureVector,
     scorer: ScorerOutput,
+    *,
+    corpus_version: str,
 ) -> GateContext:
     """Translate LoginEvent + AtoFeatureVector + ScorerOutput into a GateContext.
 
     Renders each template variable as a human-readable string suitable for
     LLM prompt injection. Variable names must match the ``{placeholders}``
-    in ``ato_reasoner/prompts/ato-v3.yaml``.
+    in ``ato_reasoner/prompts/ato-v3.yaml``. Also carries the retrieval query
+    and corpus version the policy gate needs, since the gate runs retrieval
+    itself.
 
     Args:
         event: The login event.
         features: Computed ATO feature snapshot.
         scorer: XGBoost scorer output.
+        corpus_version: Version stamp of ATO's policy corpus.
 
     Returns:
         Populated ``GateContext`` ready for the framework.
@@ -220,6 +230,8 @@ def _build_gate_context(
             },
             "jurisdictions": _resolve_jurisdictions(event),
             "risk_tier": _resolve_risk_tier(scorer.risk_score),
+            "retrieval_query": build_ato_query(event, scorer),
+            "corpus_version": corpus_version,
         },
     )
 
@@ -228,6 +240,8 @@ def build_observation(
     event: LoginEvent,
     features: AtoFeatureVector,
     scorer: ScorerOutput,
+    *,
+    corpus_version: str,
 ) -> LoginEvent:
     """Assemble a fully-populated ATO Observation for DecisionLedger submission.
 
@@ -244,6 +258,8 @@ def build_observation(
             ``scenario_tag`` stripped already.
         features: Computed ATO feature snapshot from the features layer.
         scorer: XGBoost scorer output from the scorer layer.
+        corpus_version: Version stamp of ATO's policy corpus
+            (``AtoSettings.corpus_version``), recorded by the policy gate.
 
     Returns:
         A new ``LoginEvent`` with ``routing``, ``reasoner_context``,
@@ -251,7 +267,9 @@ def build_observation(
         ``fast_path_rationale`` is ``None`` when routing to the gate.
     """
     reasoner_context = _build_reasoner_context(features, scorer)
-    gate_context = _build_gate_context(event, features, scorer)
+    gate_context = _build_gate_context(
+        event, features, scorer, corpus_version=corpus_version
+    )
 
     rationale = (
         _fast_path_rationale(scorer.route, scorer.risk_score)

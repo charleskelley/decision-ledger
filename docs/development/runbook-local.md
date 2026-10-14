@@ -17,11 +17,13 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 ## 0. End-to-End Walk-Through
 
 ```bash
-# 1. Install the framework and every workspace reasoner (the default
-#    `reasoners` dependency group installs ato-reasoner and its entry points)
+# 1. Install the framework and every workspace reasoner and gate (the default
+#    `reasoners` and `gates` dependency groups install ato-reasoner, the rules
+#    gate, and the RAG policy gate, with their entry points)
 uv sync
 
-# 2. Start Postgres + Elasticsearch (framework) and Redis (included from
+# 2. Start Postgres (framework), Elasticsearch (included from
+#    gates/policy_rag/compose.yaml), and Redis (included from
 #    reasoners/account_takeover/compose.yaml)
 docker compose up -d
 
@@ -61,8 +63,11 @@ curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
 # Publish 10 baseline_normal events to the ATO Redis stream
 make scenario-account_takeover
 
-# Full 5-dimension eval for this reasoner (slow; calls OpenAI and Anthropic)
+# Eval for this reasoner (slow; calls OpenAI): the framework's consistency and
+# robustness dimensions, then the RAG policy gate's retrieval, faithfulness,
+# and citation dimensions on ATO's datasets (also calls Anthropic)
 make eval-account_takeover
+make eval-gate-policy_rag REASONER=ato-reasoner
 ```
 
 To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). With none composed, the API still starts, logs `api.no_reasoners`, and serves only the framework routes.
@@ -81,7 +86,7 @@ docker compose config --services
 
 ### Verify health
 
-All three services must be healthy before running any pipeline component. PostgreSQL and Elasticsearch are the framework's; Redis is used only by the ATO reasoner.
+All three services must be healthy before running any pipeline component. PostgreSQL is the framework's (the RAG policy gate keeps its own `policy_rag` schema in the same database); Elasticsearch belongs to the RAG policy gate; Redis is used only by the ATO reasoner.
 
 ```bash
 # Redis (ATO reasoner)
@@ -92,7 +97,7 @@ docker compose exec redis redis-cli ping
 docker compose exec postgres pg_isready -U decisionledger -d decisionledger
 # Expected: /var/run/postgresql:5432 - accepting connections
 
-# Elasticsearch
+# Elasticsearch (RAG policy gate)
 curl -s localhost:9200/_cluster/health | python3 -m json.tool | grep '"status"'
 # Expected: "status": "green" or "yellow"
 ```
@@ -100,22 +105,27 @@ curl -s localhost:9200/_cluster/health | python3 -m json.tool | grep '"status"'
 ### Verify PostgreSQL schema
 
 ```bash
-# pgvector extension installed
-docker compose exec postgres psql -U decisionledger -d decisionledger -c '\dx'
-# Expected: vector listed in extensions
-
-# decisionledger schema exists
+# Schemas: decisionledger (framework); policy_rag once the gate's DDL has run
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dn'
-# Expected: decisionledger schema listed
 
-# Tables exist
+# Framework tables
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dt decisionledger.*'
-# Expected: decision_bundles, decision_resolution_attempts, policy_chunks, replay_logs
+# Expected: decision_bundles, decision_resolution_attempts, replay_logs
+
+# RAG policy gate: the vector extension and its chunk table
+make prepare-gate-policy_rag   # idempotent; the API and the corpus loader run it too
+docker compose exec postgres psql -U decisionledger -d decisionledger -c '\dx'
+# Expected: vector listed in extensions
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c '\dt policy_rag.*'
+# Expected: policy_chunks
 ```
 
-The schema comes from `app/audit/sql/01_init.sql` and `02_tables.sql`, mounted into the Postgres init directory on first start. The API and the corpus loader also apply the same idempotent DDL on every run, so an older volume picks up new columns (for example `policy_chunks.title`) without a reset.
+The framework's schema comes from `app/audit/sql/01_init.sql` and `02_tables.sql`, mounted into the Postgres init directory on first start; it creates no extension. The RAG policy gate's schema (`policy_rag`, the vector extension, the chunk table) comes from its own DDL in `gates/policy_rag/src/policy_rag_gate/sql/`, applied idempotently when the API builds the gate, before every corpus load, and by `make prepare-gate-policy_rag`. The API also re-applies the framework's DDL on every start, so an older volume picks up new columns without a reset.
+
+**Upgrading a stack created before the RAG gate moved into `gates/policy_rag` (Phase 1b).** Chunks now live in `policy_rag.policy_chunks`, which starts empty: re-index every corpus (`make prepare-reasoners`), or the gate's dense leg finds nothing and decisions run on BM25 evidence alone. The old `decisionledger.policy_chunks` table is no longer read (`docker compose down -v` removes it). `ELASTICSEARCH_URL` and `ELASTICSEARCH_PORT` are now `POLICY_RAG_GATE_ELASTICSEARCH_URL` and `POLICY_RAG_GATE_ELASTICSEARCH_PORT`; the old names are ignored.
 
 ### Stop services
 
@@ -133,9 +143,9 @@ The corpus must be loaded before the retrieval layer can serve queries. This is 
 ### Load
 
 ```bash
-make build-policy-index-account_takeover
+make build-policy-index-ato-reasoner
 # equivalent to:
-uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
+uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 ```
 
 The loader resolves the corpus directory from the installed plugin whose `reasoner_id` matches (`ato_reasoner/corpus/`); pass `--corpus-dir` to override. Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
@@ -147,11 +157,11 @@ If the Elasticsearch index was created before `reasoner_id` was mapped as `keywo
 ```bash
 # PostgreSQL — chunk count per policy document
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "SELECT policy_id, COUNT(*) AS chunks FROM decisionledger.policy_chunks GROUP BY policy_id ORDER BY chunks DESC LIMIT 10;"
+  -c "SELECT policy_id, COUNT(*) AS chunks FROM policy_rag.policy_chunks GROUP BY policy_id ORDER BY chunks DESC LIMIT 10;"
 
 # PostgreSQL — total chunk count
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "SELECT COUNT(*) FROM decisionledger.policy_chunks;"
+  -c "SELECT COUNT(*) FROM policy_rag.policy_chunks;"
 # Expected: ~215
 
 # Elasticsearch — total chunk count
@@ -166,10 +176,10 @@ curl -s 'localhost:9200/policy-chunks/_search?size=1' | python3 -m json.tool | h
 
 ```bash
 # Safe re-run — deletes per policy_id before inserting, no duplicates
-uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
+uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 
 # Full wipe and reload
-uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner --wipe
+uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --wipe
 ```
 
 ---
@@ -372,7 +382,7 @@ import psycopg
 from elasticsearch import Elasticsearch
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
-from app.retrieval.retriever import PolicyRetriever
+from policy_rag_gate.retriever import PolicyRetriever
 
 pg = psycopg.connect(
     "host=localhost dbname=decisionledger user=decisionledger password=decisionledger"
@@ -470,8 +480,9 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c "TRUNCATE decisionledger.decision_bundles, decisionledger.replay_logs CASCADE;"
 
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "TRUNCATE decisionledger.policy_chunks CASCADE;"
-# Note: after truncating policy_chunks, reload the corpus
+  -c "TRUNCATE policy_rag.policy_chunks;"
+# Note: this empties the RAG policy gate's dense store only; reload each corpus
+# with the loader's --wipe, which clears both stores (Postgres and the ES index)
 ```
 
 ### Full environment reset
@@ -490,7 +501,7 @@ make prepare-reasoners     # reload every reasoner's corpus (+ train missing mod
 make train-account_takeover        # retrain the XGBoost scorer (artifact + model card + CSVs)
 make eval-model-account_takeover   # re-evaluate the scorer on a fresh-seed test set
 make capture-baselines-account_takeover   # re-capture faithfulness fixtures from live gate runs
-make eval                          # 5-dimension harness for every installed reasoner
+make eval                          # every reasoner's eval, then every gate's (slow, paid)
 ```
 
 The committed eval report (`outputs/eval/eval-report-v1.json`) predates the switch to the `ato-v3` prompt; see [Evaluation](../design/evaluation.md).

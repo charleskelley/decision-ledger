@@ -46,9 +46,9 @@ root stack by `include:` in `docker-compose.yml`. Make targets come from
 | `make train-account_takeover` | Train the XGBoost scorer (artifact + model card + CSVs) |
 | `make eval-model-account_takeover` | Evaluate the trained scorer on a fresh-seed test set |
 | `make scenario-account_takeover` | Publish 10 `baseline_normal` synthetic login events |
-| `make build-policy-index-account_takeover` | Embed and index `corpus/` under `reasoner_id=ato-reasoner` |
+| `make build-policy-index-ato-reasoner` | Embed and index `corpus/` into the RAG policy gate's stores under `reasoner_id=ato-reasoner` (the gate's target, `gates/policy_rag/gate.mk`) |
 | `make prepare-account_takeover` | Build the policy index and train the scorer if the artifact is missing |
-| `make eval-account_takeover` | Run the eval harness with this reasoner's adapter (slow, paid) |
+| `make eval-account_takeover` | Run the framework eval harness (consistency, robustness) with this reasoner's adapter (slow, paid); the policy gate's own eval (`make eval-gate-policy_rag`) reads this reasoner's retrieval, faithfulness, and citation datasets |
 | `make capture-baselines-account_takeover` | Re-capture faithfulness fixtures from live gate runs |
 
 The aggregate root targets (`make train`, `make build-policy-index`,

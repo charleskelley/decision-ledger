@@ -1,11 +1,13 @@
 """Reasoner-supplied eval adapters, discovered via Python entry points.
 
-The eval harness is reasoner-agnostic: it owns the five dimensions and the
+The eval harness is reasoner-agnostic: it owns its dimensions and the
 report format, but every reasoner-specific piece (its event type, its golden
 datasets, and an in-process driver into its decision pipeline) comes from an
 ``EvalAdapter`` the reasoner publishes under the ``decisionledger.eval_adapters``
 entry point group. The entry-point name must equal the adapter's
-``reasoner_id``; ``load_eval_adapter`` resolves one adapter by that id.
+``reasoner_id``; ``load_eval_adapter`` resolves one adapter by that id. A
+gate's own eval harness resolves adapters the same way to read the datasets
+a reasoner ships for that gate.
 
 This group is separate from the runtime ``decisionledger.reasoners`` group so
 ``app/`` never has to import anything from ``eval/``.
@@ -30,7 +32,6 @@ if TYPE_CHECKING:
     from app.settings import FrameworkSettings
     from core.actions import DecisionAction
     from eval.dimensions.consistency import PipelineRunResult
-    from eval.dimensions.retrieval import RetrieverClient
 
 log = structlog.get_logger(__name__)
 
@@ -41,18 +42,11 @@ EVAL_ADAPTER_GROUP = "decisionledger.eval_adapters"
 class EvalDriver(Protocol):
     """In-process driver into one reasoner's live decision pipeline.
 
-    One driver backs the retrieval, consistency, and robustness dimensions,
-    so it satisfies the consistency ``PipelineDriver`` and robustness
-    ``RobustnessDriver`` protocols structurally and also exposes the
-    retriever it runs on. Events are instances of the adapter's
-    ``event_type``; the harness never inspects them.
-
-    Attributes:
-        retriever: The policy retriever the pipeline uses, reused by the
-            retrieval dimension so eval opens one set of connections.
+    One driver backs the consistency and robustness dimensions, so it
+    satisfies the consistency ``PipelineDriver`` and robustness
+    ``RobustnessDriver`` protocols structurally. Events are instances of the
+    adapter's ``event_type``; the harness never inspects them.
     """
-
-    retriever: RetrieverClient
 
     async def run(self, events: Sequence[Any]) -> PipelineRunResult:
         """Run an ordered event sequence; return the trigger's result."""
@@ -90,9 +84,9 @@ class EvalAdapter(Protocol):
             point name and the reasoner's ``registration.reasoner_id``.
         event_type: Pydantic model the reasoner's datasets are written in.
             The consistency and robustness loaders validate events against it.
-        datasets_dir: Root of the reasoner's golden datasets, laid out as
-            ``retrieval/``, ``faithfulness/``, ``scenarios/``, ``citations/``,
-            and ``robustness/``.
+        datasets_dir: Root of the reasoner's golden datasets: ``scenarios/``
+            and ``robustness/`` for the framework's dimensions, plus whatever
+            directories a gate's own eval reads for that gate.
     """
 
     reasoner_id: str
@@ -103,7 +97,9 @@ class EvalAdapter(Protocol):
         """Open the reasoner's pipeline against live infrastructure.
 
         Args:
-            settings: Framework settings (database, search, LLM keys).
+            settings: Framework settings (the database). A driver reads any
+                gate or reasoner configuration from that plugin's own
+                settings.
 
         Returns:
             A connected ``EvalDriver``. The caller closes it.

@@ -32,9 +32,9 @@ Reasoners import from `core/` and `app/`; `core/`, `app/`, and `eval/` never imp
 
 ### The Framework Boundary
 
-The framework is `core/`, `app/`, and `eval/` — the root `decision-ledger` package. Its `[project] dependencies` and wheel never include a reasoner (or xgboost, pandas, redis). `app/` is framework runtime: `app/main.py:create_app()` discovers plugins (`app/plugins.py`, filtered by `DECISIONLEDGER_REASONERS`), `app/bootstrap.py` builds the shared infrastructure once, and each plugin's `build_services(framework)` result lives on `app.state.reasoners[reasoner_id]`. There is **no** exception for `app/main.py`: no module under `app/`, `core/`, or `eval/` imports a reasoner package or names an ATO symbol, id, template, feature, or jurisdiction (in `.py`, `.yaml`, `.sql`, or the ES mapping). `tests/test_framework_boundary.py` enforces this and also asserts the root pyproject declares no reasoner dependency or entry point and that each member declares its own entry points.
+The framework is `core/`, `app/`, and `eval/` — the root `decision-ledger` package. Its `[project] dependencies` and wheel never include a reasoner (or xgboost, pandas, redis). `app/` is framework runtime: `app/main.py:create_app()` discovers plugins (`app/plugins.py`, filtered by `DECISIONLEDGER_REASONERS`), `app/bootstrap.py` builds the shared infrastructure once, and each plugin's `build_services(framework)` result lives on `app.state.reasoners[reasoner_id]`. There is **no** exception for `app/main.py`: no module under `app/`, `core/`, or `eval/` imports a reasoner package or names an ATO symbol, id, template, feature, or jurisdiction (in `.py`, `.yaml`, `.sql`, or `.json`). `tests/test_framework_boundary.py` enforces this and also asserts the root pyproject declares no reasoner dependency or entry point and that each member declares its own entry points.
 
-DecisionLedger is the framework-owned audit/governance hub. All decision bundles, policy chunks, replay logs, and resolution attempts live in the `decisionledger.*` Postgres schema with `reasoner_id` as the tenant column. The canonical DDL ships as package data in `app/audit/sql/` and the ES mapping in `app/retrieval/es/policy-chunks.json`. Each reasoner's policy corpus is loaded via `uv run python -m app.retrieval.corpus_loader --reasoner-id <id>` (the loader resolves the plugin's `corpus_dir`) and filtered at retrieval time.
+DecisionLedger is the framework-owned audit/governance hub. All decision bundles, replay logs, and resolution attempts live in the `decisionledger.*` Postgres schema with `reasoner_id` as the tenant column. The canonical DDL ships as package data in `app/audit/sql/`; Postgres is the framework's only infrastructure. Gates are workspace members under `gates/` that own their infrastructure (DR-28): the RAG policy gate (`gates/policy_rag`, package `policy_rag_gate`) keeps its policy chunks in its own `policy_rag` schema (DDL in its `sql/`), its ES mapping in its `es/`, and Elasticsearch in its `compose.yaml`. Each reasoner's policy corpus is loaded via `uv run python -m policy_rag_gate.corpus_loader --reasoner-id <id>` (the loader resolves the plugin's `corpus_dir`) and filtered at retrieval time.
 
 ## Tech Stack
 
@@ -82,10 +82,10 @@ make test                      # Unit tests (fast)
 make test-integration          # Integration tests (requires Docker)
 make test-smoke                # Smoke tests
 make scenario-account_takeover # Publish 10 baseline_normal events
-make eval-account_takeover     # Full evaluation harness for ATO (slow); `make eval` = every reasoner
+make eval-account_takeover     # Framework eval harness for ATO (slow); `make eval` = every reasoner, then every gate
 just diagrams                  # Render D2 diagrams (requires: brew install d2)
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 50
-uv run python -m app.retrieval.corpus_loader --reasoner-id ato-reasoner
+uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 ```
 
 `make help` lists the per-reasoner targets from each `reasoners/*/reasoner.mk`.

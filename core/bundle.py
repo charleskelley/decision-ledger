@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict
 from core.actions import DecisionAction
 from core.gate import GateInput, GateOutput
 from core.observation import Observation
-from core.snippet import RetrievedSnippet
 
 
 class DecisionBundle(BaseModel):
@@ -21,17 +20,19 @@ class DecisionBundle(BaseModel):
 
     Domain-specific artifacts (feature snapshot, reasoner output, model
     versions for the domain reasoner) are carried in ``raw_event``: the
-    Observation stores a ``FastPathRecord`` on the fast path and a fully
-    rendered ``GateContext`` on all paths. Gate-invocation artifacts (input
-    text, raw response, validated verdict, model/corpus versions, token
-    cost) are carried in ``gate_input`` and ``gate_output`` — typed
-    contracts that any gate implementation populates.
+    Observation stores a ``fast_path_rationale`` on the fast path and a
+    fully rendered ``GateContext`` on all paths. Gate artifacts are carried
+    in ``gate_output``: the universal base enforcement reads (verdict,
+    ``deterministic``, ``evidence``) plus the gate's opaque extension
+    (``evidence_snapshot``, ``extra``) stored verbatim (DR-28). A retrieving
+    gate records its retrieval inside its own ``evidence_snapshot``; the
+    bundle has no retrieval layer of its own.
 
-    Replay guarantee: given a ``DecisionBundle``, re-executing
-    ``enforcement.resolve()`` against ``gate_output.verdict`` produces the
-    same ``decision_action``. Replay does **not** re-invoke the gate. This
-    holds regardless of whether the gate was an LLM, a rule engine, or any
-    other implementation.
+    Replay guarantee: given a ``DecisionBundle``, re-executing enforcement
+    against ``raw_event`` and ``gate_output`` produces the same
+    ``decision_action``. Replay does **not** re-invoke the gate and reads no
+    corpus. This holds regardless of whether the gate was an LLM, a rule
+    engine, or any other implementation.
 
     Action vocabulary:
         * ``decision_action`` — the action this bundle produced at decision
@@ -48,12 +49,11 @@ class DecisionBundle(BaseModel):
     Gate-layer field semantics by case:
         * Fast path (gate not invoked): ``gate_input is None and
           gate_output is None``.
-        * Gate ran, validation succeeded: both populated; ``gate_output.verdict``
+        * Gate ran, verdict valid: both populated; ``gate_output.verdict``
           is the typed verdict enforcement consumes.
-        * Gate ran, validation failed: both populated; ``gate_output.verdict
-          is None`` and (for LLM-backed gates) ``gate_output.response_text``
-          carries the gate's emitted text. Enforcement routes to HOLD via
-          the schema-failure tier.
+        * Gate ran, no valid verdict: both populated; ``gate_output.verdict
+          is None`` and the gate's ``extra`` may carry forensic evidence.
+          Enforcement routes to HOLD via the schema-failure tier.
 
     Attributes:
         decision_id: UUID of this decision record.
@@ -65,18 +65,12 @@ class DecisionBundle(BaseModel):
         idempotency_key: SHA-256 deduplication key computed at ingestion.
         ingestion_timestamp: When the event was acknowledged from the queue.
         queue_position: Stream sequence number, if available.
-        retrieval_query: Query string sent to the retriever. Empty string on
-            the fast path (retrieval not invoked).
-        retrieval_results: Corpus chunks returned by the retriever. Empty
-            list on the fast path.
-        retrieval_path: Free-form label indicating which retrieval path was
-            taken (e.g., ``"reranked"``, ``"rrf_only"``, ``"skipped"``).
-        index_version: Version of the retrieval index used.
-        gate_input: Typed contract capturing the gate's input artifacts at
-            invocation time. ``None`` on the fast path.
-        gate_output: Typed contract capturing the gate's output artifacts.
-            ``None`` on the fast path. Populated even when validation
-            failed — in that case ``gate_output.verdict is None``.
+        gate_input: The framework's record that it invoked a gate (the
+            gate's identity). ``None`` on the fast path.
+        gate_output: The universal ``GateOutput`` the gate returned, with
+            its opaque extension. ``None`` on the fast path. Populated even
+            when the gate produced no valid verdict — in that case
+            ``gate_output.verdict is None``.
         decision_action: The action this decision produced. Immutable. For
             terminal actions (ALLOW, BLOCK) this is the realized action; for
             non-terminal actions (CHALLENGE, HOLD) the realized action is
@@ -84,7 +78,8 @@ class DecisionBundle(BaseModel):
         enforcement_rule_applied: Override rule that fired, if any.
         override_log: Ordered rule evaluation log from enforcement.
         latency_breakdown: Per-component duration in milliseconds, keyed by
-            component name (e.g., ``"ingestion_ms"``, ``"gate_ms"``).
+            component name (e.g., ``"features_ms"``, ``"gate_ms"``,
+            ``"enforcement_ms"``).
     """
 
     model_config = ConfigDict(strict=True, frozen=True, arbitrary_types_allowed=True)
@@ -100,13 +95,7 @@ class DecisionBundle(BaseModel):
     ingestion_timestamp: datetime
     queue_position: int | None
 
-    # Retrieval layer
-    retrieval_query: str
-    retrieval_results: list[RetrievedSnippet]
-    retrieval_path: str
-    index_version: str
-
-    # Gate layer — typed contracts, both None on fast path
+    # Gate layer — universal contracts, both None on the fast path
     gate_input: GateInput | None
     gate_output: GateOutput | None
 
