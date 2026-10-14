@@ -1,9 +1,10 @@
 """Shared fixtures for the framework test suite — built on the stub reasoner.
 
-Every fixture here is either framework-generic (gate verdicts and outputs,
-citations, snippets, prompt snapshots, token costs) or typed on the stub
-reasoner under ``tests/_stub_reasoner``. Nothing in this file imports a real
-reasoner, so a ``core/`` or ``app/`` test can never depend on ATO by accident.
+Every fixture here is either framework-generic (gate verdicts and outputs)
+or typed on the stub reasoner under ``tests/_stub_reasoner``. Nothing in this
+file imports a real reasoner or a gate member, so a ``core/`` or ``app/`` test
+can never depend on ATO or on a gate's private models by accident (gate
+members keep their own fixtures under ``gates/<name>/tests``).
 
 All fixtures produce valid, fully-constructed objects. Tests that need an
 edge-case variant build one via ``model_copy(update=...)`` or construct the
@@ -23,7 +24,6 @@ import pytest
 from app.reasoner_registry import StaticReasonerRegistry
 from core.actions import DecisionAction
 from core.gate import EvidenceRef, GateOutput, GateVerdict
-from core.gate.policy import Citation, PromptSnapshot, TokenCost
 from core.observation import (
     AttributionSummary,
     Contribution,
@@ -33,7 +33,6 @@ from core.observation import (
     ReasonerRegistration,
 )
 from core.routes import GateRoute
-from core.snippet import RetrievedSnippet
 from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
@@ -126,34 +125,8 @@ def observation(
 
 
 # ---------------------------------------------------------------------------
-# Gate and retrieval artifacts (framework-generic types)
+# Gate artifacts (framework-generic types)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def citation() -> Citation:
-    """A citation into the stub corpus."""
-    return Citation(
-        policy_id="STUB-POLICY-A",
-        snippet=(
-            "Widgets with a thin history SHALL be held for calibration review "
-            "before any release."
-        ),
-        relevance="Directly supports the calibration review requirement.",
-    )
-
-
-@pytest.fixture
-def prompt_snapshot() -> PromptSnapshot:
-    """Prompt snapshot for the stub template."""
-    return PromptSnapshot(
-        template_id="stub-v1",
-        version="1.0.0",
-        template_text=(
-            "You are a policy gate. Widget score: {widget_score}. "
-            "Policy context:\n{policy_snippets}"
-        ),
-    )
 
 
 @pytest.fixture
@@ -187,34 +160,4 @@ def gate_output(gate_verdict: GateVerdict) -> GateOutput:
         ),
         evidence_snapshot={"retrieval_query": "calibration review"},
         extra={"rationale": "Low widget score. History sufficient."},
-    )
-
-
-@pytest.fixture
-def retrieved_snippet() -> RetrievedSnippet:
-    """One retrieved chunk from the stub corpus (``REGION_A``)."""
-    return RetrievedSnippet(
-        document_id="STUB-POLICY-A",
-        title="Stub Widget Policy A",
-        version="1.0",
-        jurisdiction="REGION_A",
-        section_path="2. Calibration Review",
-        text=(
-            "Widgets with a thin history SHALL be held for calibration review "
-            "before any release."
-        ),
-        relevance_score=0.91,
-        retrieval_path="reranked",
-    )
-
-
-@pytest.fixture
-def token_cost() -> TokenCost:
-    """A representative LLM token-cost record."""
-    return TokenCost(
-        prompt_tokens=1240,
-        completion_tokens=312,
-        total_tokens=1552,
-        cost_usd=0.0078,
-        model="gpt-4o-2024-08-06",
     )

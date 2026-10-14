@@ -16,9 +16,6 @@ the shape an installed package declares, and composed through
 - ``create_app(plugins=[PLUGIN])`` mounts ``/api/v1/stub/*`` next to the
   framework routes without starting the lifespan; ``create_app()`` with no
   argument runs discovery with the ``DECISIONLEDGER_REASONERS`` allowlist.
-- The stub's ``prompts/stub-v1.yaml`` loads through ``YamlPromptRegistry``
-  and its ``corpus/*.md`` parse and chunk through the corpus loader, so a
-  malformed exemplar asset fails ``make test`` rather than a live boot.
 - Starting the lifespan (with ``build_framework_services`` replaced by a
   fake) builds each plugin's services against the framework, exposes them
   on ``app.state``, closes reasoners before the framework on shutdown,
@@ -46,7 +43,6 @@ from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
-from app.gate.policy.prompt_registry import DEFAULT_SYSTEM_TEXT, YamlPromptRegistry
 from app.main import create_app
 from app.plugin import FrameworkServices, ReasonerPlugin
 from app.plugins import (
@@ -55,7 +51,6 @@ from app.plugins import (
     build_registry,
     discover_plugins,
 )
-from app.retrieval.corpus_loader import chunk_document, parse_document
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
 from core.observation import ReasonerRegistration
@@ -108,8 +103,6 @@ def _registration(reasoner_id: str) -> ReasonerRegistration:
         reasoner_id=reasoner_id,
         reasoner_name=f"{reasoner_id} (fake)",
         allowed_gate_ids=frozenset({"policy"}),
-        allowed_prompt_template_ids=frozenset({"fake-v1"}),
-        allowed_jurisdictions=frozenset({"REGION_A"}),
     )
 
 
@@ -166,7 +159,6 @@ def test_stub_plugin_points_at_real_prompt_and_corpus_directories():
         "stub-policy-a.md",
         "stub-policy-b.md",
     ]
-    assert PLUGIN.registration.allowed_prompt_template_ids == {"stub-v1"}
 
 
 # ---------------------------------------------------------------------------
@@ -438,57 +430,6 @@ def test_create_app_without_gate_plugins_composes_every_installed_gate(
 
     with TestClient(create_app(plugins=[PLUGIN])):
         assert fake_framework.received_gate_plugins == discovered
-
-
-# ---------------------------------------------------------------------------
-# The stub's shipped assets load through the same framework code paths that
-# consume a real reasoner's prompts and corpus. Filenames alone prove nothing;
-# a malformed stub-v1.yaml or bad front matter would otherwise surface only
-# at lifespan or corpus-load time, outside `make test`.
-# ---------------------------------------------------------------------------
-
-
-def test_stub_prompts_dir_loads_through_the_prompt_registry():
-    registry = YamlPromptRegistry([PLUGIN.prompts_dir])
-
-    assert registry.registered_ids() == ["stub-v1"]
-    template = registry.get("stub-v1")
-    assert template.required_vars == {"region", "thin_history", "widget_score"}
-    # stub-v1.yaml deliberately has no `system:` key, so it exercises the
-    # framework-default system text path.
-    assert template.system_text == DEFAULT_SYSTEM_TEXT
-
-
-def test_stub_registration_allows_only_templates_the_stub_ships():
-    registry = YamlPromptRegistry([PLUGIN.prompts_dir])
-
-    assert PLUGIN.registration.allowed_prompt_template_ids <= set(
-        registry.registered_ids()
-    )
-
-
-@pytest.mark.parametrize(
-    ("filename", "policy_id", "title", "jurisdiction"),
-    [
-        ("stub-policy-a.md", "STUB-POLICY-A", "Stub Widget Policy A", "REGION_A"),
-        ("stub-policy-b.md", "STUB-POLICY-B", "Stub Widget Guidance B", "REGION_B"),
-    ],
-)
-def test_stub_corpus_documents_parse_and_chunk(
-    filename: str, policy_id: str, title: str, jurisdiction: str
-):
-    doc, body = parse_document(PLUGIN.corpus_dir / filename)
-    chunks = chunk_document(doc, body)
-
-    assert doc.policy_id == policy_id
-    assert doc.title == title
-    assert doc.jurisdiction == jurisdiction
-    assert jurisdiction in STUB_REGISTRATION.allowed_jurisdictions
-    # Three chunks per document; the integration retriever tests rely on the
-    # stub corpus holding more than k=3 chunks in total.
-    assert len(chunks) == 3
-    assert all(chunk["title"] == title for chunk in chunks)
-    assert all(chunk["jurisdiction"] == jurisdiction for chunk in chunks)
 
 
 # ---------------------------------------------------------------------------
