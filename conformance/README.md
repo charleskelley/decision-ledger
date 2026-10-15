@@ -1,10 +1,11 @@
 # DecisionLedger conformance suite
 
 A pytest suite that checks a running DecisionLedger instance against the
-ledger's HTTP contract (DR-31) — status codes, receipts, problem documents
-and their stable codes, authentication and tenant isolation, batch
-semantics, the subject timeline, replay, registrations, gates, and human
-resolutions. It talks HTTP only (`httpx`) and imports no DecisionLedger
+ledger's HTTP contract (DR-31, DR-32) — status codes, receipts, problem
+documents and their stable codes, authentication and tenant isolation, batch
+semantics, the subject timeline, replay, registrations, gates, human
+resolutions, identity resolution, and the identity layer every decision
+records. It talks HTTP only (`httpx`) and imports no DecisionLedger
 code, so a reasoner team can run it against any instance instead of reading
 the implementation.
 
