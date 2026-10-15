@@ -3,11 +3,13 @@
 ``build_framework_services`` turns a ``FrameworkSettings``, the discovered
 reasoner plugins, and the discovered gate plugins into one
 ``FrameworkServices`` object: the Postgres connection (with the canonical
-DDL applied), the bundle store, the reasoner registry, the composed reasoner
-plugins, and the composed gates (the ones ``DECISIONLEDGER_MANDATORY_GATES``
-names flagged mandatory). The FastAPI lifespan (``app/main.py``) and
-the eval harness drivers both call it, so there is exactly one description
-of how the framework is wired.
+DDL applied), the bundle store, the resolution journal, the reasoner registry
+(the plugins' registrations plus the registration file's, each version
+snapshotted before the first decision), the composed reasoner plugins, and
+the composed gates (the ones ``DECISIONLEDGER_MANDATORY_GATES`` names flagged
+mandatory). The FastAPI lifespan (``app/main.py``), ``LocalClient``, and the
+eval harness drivers all call it, so there is exactly one description of how
+the framework is wired.
 
 The framework's own infrastructure is Postgres. Each gate builds whatever it
 needs itself (``GatePlugin.build``, DR-28): a retrieving gate opens its own
@@ -23,6 +25,7 @@ from typing import TYPE_CHECKING
 import psycopg
 import structlog
 
+from app.audit.resolution_journal import ResolutionJournal
 from app.audit.schema import apply_canonical_schema
 from app.audit.store import BundleStore
 from app.gates import build_gates, discover_gates
@@ -47,17 +50,20 @@ def build_framework_services(
     """Construct every shared service the framework runs on.
 
     Applies the canonical DDL to Postgres before building anything else so
-    the store and the journal can rely on a fresh schema. A gate that keeps
-    tables in the same database applies its own DDL, in its own schema, when
-    it is built. Gates are built last, against the services built so far; a
-    gate that fails to build closes the gates built before it and the
-    Postgres connection, then the error propagates.
+    the store and the journal can rely on a fresh schema, then records a
+    snapshot of every registration the deployment serves (a version already
+    recorded is left as it is), so every bundle's ``registration_version``
+    has one. A gate that keeps tables in the same database applies its own
+    DDL, in its own schema, when it is built. Gates are built last, against
+    the services built so far; a gate that fails to build closes the gates
+    built before it and the Postgres connection, then the error propagates.
 
     Args:
-        settings: Connection parameters and credentials.
+        settings: Connection parameters and credentials, and the
+            registration file (``DECISIONLEDGER_REGISTRATIONS``).
         plugins: The reasoner plugins this deployment composes. Their
-            registrations form the reasoner registry the store replays
-            against.
+            registrations, with the registration file's, form the reasoner
+            registry intake and replay read.
         gate_plugins: The gate plugins this deployment composes. ``None``
             (the default) discovers every plugin installed under the
             ``decisionledger.gates`` entry-point group; tests pass an
@@ -71,6 +77,8 @@ def build_framework_services(
         GatePluginError: A gate plugin is malformed or cannot be built, or
             ``DECISIONLEDGER_MANDATORY_GATES`` names a gate that is not
             composed.
+        RegistrationError: The registration file cannot be loaded or
+            registers a reasoner twice.
     """
     composed_gate_plugins = (
         list(gate_plugins) if gate_plugins is not None else discover_gates()
@@ -82,14 +90,19 @@ def build_framework_services(
     pg_conn = psycopg.connect(settings.postgres_dsn, autocommit=True)
     try:
         apply_canonical_schema(pg_conn)
-        registry = build_registry(plugins)
+        registry = build_registry(
+            plugins, registration_file=settings.registrations_path
+        )
         store = BundleStore(conn=pg_conn, registry=registry)
+        for entry in registry.entries():
+            store.snapshots.record(entry.registration)
         services = FrameworkServices(
             settings=settings,
             pg_conn=pg_conn,
             store=store,
             registry=registry,
             reasoners=tuple(plugins),
+            journal=ResolutionJournal(pg_conn),
         )
         gates = build_gates(
             composed_gate_plugins, services, mandatory=settings.mandatory_gate_ids
@@ -101,7 +114,8 @@ def build_framework_services(
     log.info(
         "framework.bootstrap_complete",
         component="bootstrap",
-        reasoner_ids=[p.registration.reasoner_id for p in plugins],
+        reasoner_ids=[entry.reasoner_id for entry in registry.entries()],
+        registration_sources={e.reasoner_id: e.source for e in registry.entries()},
         gate_ids=list(gates),
         mandatory_gate_ids=sorted(g for g, c in gates.items() if c.mandatory),
     )

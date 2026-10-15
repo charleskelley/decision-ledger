@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# example-reasoner — the documented reference reasoner for DecisionLedger
+# =============================================================================
+#
+# A uv workspace member, promoted from the framework's test-only stub reasoner
+# (tests/_stub_reasoner, which stays minimal for framework tests). It shows the
+# whole reasoner contract on an imaginary domain (widgets): a registration
+# with bypass rules, an assembler that records or asks for the gate, a client
+# that submits in process or over HTTP, a prompt template and a three-document
+# corpus for the RAG policy gate, and an eval adapter with datasets. The
+# framework never depends on it; deployment composition lives in the root
+# `reasoners` dependency group. Discovery happens through the two entry
+# points below, whose name must equal the registration's `reasoner_id`.
+
+[project]
+name = "example-reasoner"
+version = "0.1.0"
+description = "The documented example reasoner for DecisionLedger (widgets)."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "pydantic>=2.7,<3",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+]
+
+[project.entry-points."decisionledger.reasoners"]
+example-reasoner = "example_reasoner.plugin:PLUGIN"
+
+[project.entry-points."decisionledger.eval_adapters"]
+example-reasoner = "example_reasoner.eval.adapter:ADAPTER"
+
+[project.scripts]
+example-reasoner = "example_reasoner.__main__:main"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/example_reasoner"]

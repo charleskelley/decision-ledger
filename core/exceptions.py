@@ -1,5 +1,9 @@
 """Framework exception types for DecisionLedger intake and contract violations."""
 
+from __future__ import annotations
+
+from typing import Any
+
 
 class UnregisteredReasonerError(Exception):
     """Raised when a submission names a reasoner the ledger does not know.
@@ -159,3 +163,115 @@ class PredicateError(ValueError):
     def __init__(self, reason: str) -> None:  # noqa: D107
         self.reason = reason
         super().__init__(f"Predicate evaluation error: {reason}")
+
+
+class RegistrationError(Exception):
+    """Raised when the deployment's reasoner registrations cannot be composed.
+
+    A deployment registers reasoners from two sources (DR-31): the installed
+    reasoner plugins and an optional registration file
+    (``DECISIONLEDGER_REGISTRATIONS``). A file that cannot be read, parsed,
+    or validated, or two sources declaring the same ``reasoner_id``, raise
+    this error at startup, so a deployment never serves decisions under a
+    registration it did not mean to have.
+
+    Args:
+        source: Where the offending registration came from (a file path or
+            a plugin entry point).
+        reason: Human-readable description of what went wrong.
+    """
+
+    def __init__(self, source: str, reason: str) -> None:  # noqa: D107
+        self.source = source
+        self.reason = reason
+        super().__init__(f"Registration error [{source}]: {reason}")
+
+
+class LedgerError(Exception):
+    """A ledger operation refused, as a problem with a stable code (DR-31).
+
+    The ledger's API operations raise it; the HTTP surface renders it as an
+    RFC 9457 problem document (``application/problem+json``) carrying
+    ``code``; ``HttpClient`` raises it again from that document, and
+    ``LocalClient`` lets the operation's own error through. A caller sees the
+    same ``status`` and ``code`` whether it talks to the ledger over HTTP or
+    in process.
+
+    Args:
+        status: The HTTP status the problem is served with.
+        code: Stable machine-readable error code (``DECISION_NOT_FOUND``,
+            ``REASONER_MISMATCH``, a ``SubmissionContractError`` code, ...).
+        detail: Human-readable explanation of this occurrence.
+        title: Short summary of the problem type; derived from ``code`` when
+            omitted.
+        extra: Extension members of the problem document (JSON values), such
+            as a validation error list.
+    """
+
+    def __init__(  # noqa: D107
+        self,
+        status: int,
+        code: str,
+        detail: str,
+        *,
+        title: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self.status = status
+        self.code = code
+        self.detail = detail
+        self.title = title or code.replace("_", " ").capitalize()
+        self.extra = dict(extra or {})
+        super().__init__(f"{status} {code}: {detail}")
+
+    @property
+    def type_uri(self) -> str:
+        """The problem type URI (a URN derived from ``code``)."""
+        return f"urn:decisionledger:problem:{self.code.lower().replace('_', '-')}"
+
+    def problem(self, *, instance: str | None = None) -> dict[str, Any]:
+        """Return the RFC 9457 problem document for this error.
+
+        Args:
+            instance: The request path the problem occurred on, if any.
+
+        Returns:
+            ``type``, ``title``, ``status``, ``detail``, ``code``, the
+            optional ``instance``, and every extension member.
+        """
+        document: dict[str, Any] = {
+            **self.extra,
+            "type": self.type_uri,
+            "title": self.title,
+            "status": self.status,
+            "detail": self.detail,
+            "code": self.code,
+        }
+        if instance is not None:
+            document["instance"] = instance
+        return document
+
+
+class RegistrationSnapshotMissingError(Exception):
+    """Raised when replay cannot find the registration a bundle was decided under.
+
+    Every bundle records its reasoner's ``registration_version``, and the
+    ledger keeps a snapshot of every version it serves (DR-31). A bundle
+    whose version has no snapshot, and whose reasoner is now registered under
+    a different version, cannot be replayed faithfully: enforcing it against
+    today's profile could change its outcome. Replay refuses it (HTTP 409
+    ``REGISTRATION_SNAPSHOT_MISSING``) rather than guess.
+
+    Args:
+        reasoner_id: The bundle's reasoner.
+        version: The registration version the bundle cites.
+    """
+
+    def __init__(self, reasoner_id: str, version: str) -> None:  # noqa: D107
+        self.reasoner_id = reasoner_id
+        self.version = version
+        super().__init__(
+            f"No snapshot of registration version {version!r} of reasoner "
+            f"{reasoner_id!r}, and the reasoner is now registered under another "
+            "version"
+        )

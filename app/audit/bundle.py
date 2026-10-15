@@ -34,6 +34,7 @@ def build_bundle(
     bypass_check: BypassCheck | None = None,
     other_bypass_checks: Sequence[BypassCheck] = (),
     latency_breakdown: dict[str, float] | None = None,
+    registration_version: str | None = None,
 ) -> DecisionBundle:
     """Assemble a complete DecisionBundle from every layer of a decision.
 
@@ -57,6 +58,9 @@ def build_bundle(
             registered bypass rule.
         latency_breakdown: Per-component duration in milliseconds. Defaults
             to an empty dict.
+        registration_version: The version of the reasoner's registration
+            the decision was made under (``registration_version`` of the
+            registration intake used); replay reads that version's snapshot.
 
     Returns:
         Fully assembled version-2 ``DecisionBundle``.
@@ -79,5 +83,6 @@ def build_bundle(
         bypass_rule_holds=bypass_check.holds if bypass_check is not None else None,
         bypass_check=bypass_check,
         other_bypass_checks=tuple(other_bypass_checks),
+        registration_version=registration_version,
         latency_breakdown=dict(latency_breakdown or {}),
     )

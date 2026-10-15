@@ -16,6 +16,8 @@ members = [
     "decision-ledger",
     "decisionledger-gate-policy-rag",
     "decisionledger-gate-rules",
+    "decisionledger-mcp",
+    "example-reasoner",
 ]
 
 [[package]]
@@ -603,21 +605,22 @@ wheels = [
 name = "decision-ledger"
 version = "0.1.0"
 source = { editable = "." }
-default-groups = ["dev", "gates", "reasoners"]
+default-groups = ["dev", "gates", "integrations", "reasoners"]
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "orjson" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "starlette" },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "ipython" },
     { name = "pandas-stubs" },
     { name = "pyright" },
@@ -641,25 +644,30 @@ gates = [
     { name = "decisionledger-gate-policy-rag", extra = ["eval"] },
     { name = "decisionledger-gate-rules" },
 ]
+integrations = [
+    { name = "decisionledger-mcp" },
+]
 reasoners = [
     { name = "ato-reasoner" },
+    { name = "example-reasoner" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111,<1" },
+    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "orjson", specifier = ">=3.10,<4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "starlette", specifier = ">=0.40,<1" },
     { name = "structlog", specifier = ">=24.1,<25" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "ipython", specifier = ">=8.25,<9" },
     { name = "pandas-stubs", specifier = ">=3.0.0.260204" },
     { name = "pyright", specifier = ">=1.1.370,<2" },
@@ -683,7 +691,11 @@ gates = [
     { name = "decisionledger-gate-policy-rag", extras = ["eval"], editable = "gates/policy_rag" },
     { name = "decisionledger-gate-rules", editable = "gates/rules" },
 ]
-reasoners = [{ name = "ato-reasoner", editable = "reasoners/account_takeover" }]
+integrations = [{ name = "decisionledger-mcp", editable = "integrations/mcp" }]
+reasoners = [
+    { name = "ato-reasoner", editable = "reasoners/account_takeover" },
+    { name = "example-reasoner", editable = "reasoners/example" },
+]
 
 [[package]]
 name = "decisionledger-gate-policy-rag"
@@ -747,6 +759,23 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "structlog", specifier = ">=24.1,<25" },
+]
+
+[[package]]
+name = "decisionledger-mcp"
+version = "0.1.0"
+source = { editable = "integrations/mcp" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "pydantic" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "structlog", specifier = ">=24.1,<25" },
 ]
 
@@ -844,6 +873,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/6b/79/365e306017a9fcfbbefab1a3b588d2404bea8806b36766ff0f886509a20e/elasticsearch-8.19.3.tar.gz", hash = "sha256:e84dd618a220cac25b962790085045dd27ac72e01c0a5d81bd29a2d47a71f03f", size = 800298, upload-time = "2025-12-23T12:56:00.72Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/56/0f/ac126833c385b06166d41c486e4911f58ad7791fd1a53dd6e0b8d16ff214/elasticsearch-8.19.3-py3-none-any.whl", hash = "sha256:fe1db2555811192e8a1be78b01234d0a49d32b185ea7eeeb6f059331dee32838", size = 952820, upload-time = "2025-12-23T12:55:56.796Z" },
+]
+
+[[package]]
+name = "example-reasoner"
+version = "0.1.0"
+source = { editable = "reasoners/example" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "structlog", specifier = ">=24.1,<25" },
 ]
 
 [[package]]

@@ -5,7 +5,9 @@ reasoner under ``tests/_stub_reasoner`` is that second reasoner: it is
 published here as an in-memory ``importlib.metadata.EntryPoint`` named
 ``stub-reasoner`` (value ``tests._stub_reasoner.plugin:PLUGIN``), exactly
 the shape an installed package declares, and composed through
-``create_app(plugins=[...])``:
+``create_app(plugins=[...])``. Since DR-31 a plugin publishes data only —
+its registration and the assets its gates read — and the ledger runs none of
+its code:
 
 - Discovery loads the stub (and any other declared plugin), sorted by
   entry-point name.
@@ -13,21 +15,16 @@ the shape an installed package declares, and composed through
 - An entry-point name that differs from ``registration.reasoner_id``, a
   duplicate ``reasoner_id``, and an object that does not satisfy
   ``ReasonerPlugin`` each raise ``ReasonerPluginError``.
-- ``create_app(plugins=[PLUGIN])`` mounts ``/api/v1/stub/*`` next to the
-  framework routes without starting the lifespan; ``create_app()`` with no
-  argument runs discovery with the ``DECISIONLEDGER_REASONERS`` allowlist.
+- ``create_app`` serves the framework's own routes only, whatever plugins it
+  composes; ``create_app()`` with no argument runs discovery with the
+  ``DECISIONLEDGER_REASONERS`` allowlist.
 - Starting the lifespan (with ``build_framework_services`` replaced by a
-  fake) builds each plugin's services against the framework, exposes them
-  on ``app.state``, closes reasoners before the framework on shutdown,
-  cleans up when a plugin fails to build, and warns when no plugin is
-  composed. No infrastructure is touched.
+  fake) exposes the framework services and the key ring on ``app.state``,
+  keeps no reasoner services there, closes the framework on shutdown, and
+  warns when no reasoner is registered or no key is configured. No
+  infrastructure is touched.
 - ``create_app`` hands explicit gate plugins to the bootstrap unchanged and,
   without them, composes every installed gate (``decisionledger.gates``).
-
-The multi-plugin lifecycle cases need a second, instrumented plugin; the
-small ``_FakePlugin`` below provides it (with a close-order journal). It is
-deliberately not another stub package — the stub is the exemplar, the fake
-is scaffolding.
 """
 
 from __future__ import annotations
@@ -35,13 +32,12 @@ from __future__ import annotations
 import logging
 from importlib.metadata import EntryPoint
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, ConfigDict
 
 from app.main import create_app
 from app.plugin import FrameworkServices, ReasonerPlugin
@@ -51,12 +47,17 @@ from app.plugins import (
     build_registry,
     discover_plugins,
 )
+from app.reasoner_registry import RegisteredReasoner, StaticReasonerRegistry
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
 from core.observation import GateBinding, ReasonerRegistration
 from tests._fake_gate.plugin import FakeGatePlugin
-from tests._stub_reasoner.plugin import PLUGIN, StubServices
+from tests._memory_ledger import TEST_KEYRING
+from tests._stub_reasoner.plugin import PLUGIN
 from tests._stub_reasoner.registry import STUB_REGISTRATION
+
+if TYPE_CHECKING:
+    from app.auth import KeyRing
 
 _HERE = Path(__file__).resolve().parent
 _MODULE = __name__
@@ -70,32 +71,8 @@ STUB_EP = EntryPoint(
 
 
 # ---------------------------------------------------------------------------
-# Instrumented fake plugin (second tenant for the multi-plugin cases)
+# A second, data-only plugin
 # ---------------------------------------------------------------------------
-
-
-class _FakeEvent(BaseModel):
-    model_config = ConfigDict(strict=True, frozen=True)
-
-    gadget_id: str
-
-
-class _FakeServices:
-    """Reasoner services that record when they are closed.
-
-    ``journal`` is a shared list the lifespan tests use to assert close
-    order across reasoners and the framework.
-    """
-
-    def __init__(self, reasoner_id: str, journal: list[str] | None = None) -> None:
-        self.reasoner_id = reasoner_id
-        self.closed = False
-        self._journal = journal
-
-    def close(self) -> None:
-        self.closed = True
-        if self._journal is not None:
-            self._journal.append(self.reasoner_id)
 
 
 def _registration(reasoner_id: str) -> ReasonerRegistration:
@@ -107,35 +84,17 @@ def _registration(reasoner_id: str) -> ReasonerRegistration:
 
 
 class _FakePlugin:
-    def __init__(self, reasoner_id: str, prefix: str) -> None:
+    """A reasoner plugin: a registration and two asset directories."""
+
+    def __init__(self, reasoner_id: str) -> None:
         self.registration = _registration(reasoner_id)
-        self.router = APIRouter(prefix=prefix, tags=[reasoner_id])
         self.prompts_dir = _HERE / "prompts"
         self.corpus_dir = _HERE / "corpus"
-        self.built_with: FrameworkServices | None = None
-        self.services: _FakeServices | None = None
-        self.journal: list[str] | None = None
-
-        @self.router.post("/decisions")
-        def _decide(event: _FakeEvent) -> dict[str, Any]:
-            return {"gadget_id": event.gadget_id}
-
-    def build_services(self, framework: FrameworkServices) -> _FakeServices:
-        self.built_with = framework
-        self.services = _FakeServices(self.registration.reasoner_id, self.journal)
-        return self.services
 
 
-class _ExplodingPlugin(_FakePlugin):
-    """A plugin whose service construction fails at startup."""
-
-    def build_services(self, framework: FrameworkServices) -> _FakeServices:
-        raise RuntimeError(f"{self.registration.reasoner_id} cannot start")
-
-
-ALPHA = _FakePlugin("alpha-reasoner", "/api/v1/alpha")
+ALPHA = _FakePlugin("alpha-reasoner")
 #: Same id as the stub, published under a different entry-point name/value.
-STUB_TWIN = _FakePlugin(STUB_REGISTRATION.reasoner_id, "/api/v1/stub-twin")
+STUB_TWIN = _FakePlugin(STUB_REGISTRATION.reasoner_id)
 
 
 def _ep(name: str, attr: str) -> EntryPoint:
@@ -150,6 +109,43 @@ def _ep(name: str, attr: str) -> EntryPoint:
 def test_stub_plugin_satisfies_the_reasoner_plugin_protocol():
     assert isinstance(PLUGIN, ReasonerPlugin)
     assert isinstance(ALPHA, ReasonerPlugin)
+
+
+def test_a_plugin_publishes_data_only():
+    """The framework never calls into a plugin: no router, no services."""
+    for attribute in ("router", "build_services"):
+        assert not hasattr(PLUGIN, attribute)
+
+
+class _LeakyPlugin(_FakePlugin):
+    """A plugin still carrying the pre-DR-31 surface: a router and services."""
+
+    def __init__(self) -> None:
+        super().__init__("leaky-reasoner")
+        self.router = APIRouter(prefix="/api/v1/leak")
+        self.built = False
+
+        @self.router.get("/ping")
+        def _ping() -> dict[str, str]:
+            return {"leaked": "yes"}
+
+    def build_services(self, framework: Any) -> Any:
+        self.built = True
+        raise AssertionError("the ledger must not build a reasoner's services")
+
+
+def test_the_ledger_ignores_a_plugins_router_and_services(monkeypatch):
+    plugin = _LeakyPlugin()
+    framework = MagicMock(spec=FrameworkServices)
+    framework.gates = {}
+    framework.registry = StaticReasonerRegistry([plugin.registration])
+    monkeypatch.setattr("app.main.build_framework_services", lambda s, p, g: framework)
+    app = create_app(plugins=[plugin], gate_plugins=[], keyring=TEST_KEYRING)
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/leak/ping").status_code == 404
+    assert not plugin.built
+    assert "/api/v1/leak/ping" not in _route_paths(app)
 
 
 def test_stub_plugin_points_at_real_prompt_and_corpus_directories():
@@ -220,7 +216,7 @@ def test_duplicate_reasoner_id_raises():
 
 def test_non_conforming_object_raises():
     # A registration is a real object from the stub package, but it is not a
-    # plugin: no router, no dirs, no build_services.
+    # plugin: no asset directories.
     eps = [
         EntryPoint(
             name="stub-reasoner",
@@ -246,12 +242,16 @@ def test_unloadable_entry_point_raises_plugin_error():
 # ---------------------------------------------------------------------------
 
 
-def test_build_registry_registers_every_plugin():
+def test_build_registry_registers_every_plugin_with_its_source():
     registry = build_registry([ALPHA, PLUGIN])
 
     assert registry.is_registered("alpha-reasoner")
     assert registry.is_registered("stub-reasoner")
     assert registry.get("stub-reasoner") is STUB_REGISTRATION
+    assert [e.source for e in registry.entries()] == [
+        f"plugin:{_MODULE}",
+        "plugin:tests._stub_reasoner.plugin",
+    ]
 
 
 def test_allowlist_from_blank_setting_is_none():
@@ -275,32 +275,29 @@ def _route_paths(app) -> set[str]:
     return {getattr(r, "path", "") for r in app.routes}
 
 
-def test_create_app_mounts_stub_router_next_to_framework_routes():
-    """The 'second reasoner, zero framework diff' proof: no app/ edit needed."""
-    app = create_app(plugins=[PLUGIN], gate_plugins=[])
-
-    paths = _route_paths(app)
-    assert "/api/v1/stub/ping" in paths
-    assert "/health" in paths
-    assert "/api/v1/decisions/{decision_id}" in paths
-    assert "/api/v1/decisions/{decision_id}/replay" in paths
-
-
-def test_create_app_mounts_every_plugin_router():
-    app = create_app(plugins=[ALPHA, PLUGIN], gate_plugins=[])
-
-    paths = _route_paths(app)
-    assert "/api/v1/alpha/decisions" in paths
-    assert "/api/v1/stub/ping" in paths
+#: Every route the ledger serves, whatever it composes.
+FRAMEWORK_PATHS = {
+    "/health",
+    "/api/v1/decisions",
+    "/api/v1/decisions:batch",
+    "/api/v1/decisions/{decision_id}",
+    "/api/v1/decisions/{decision_id}/replay",
+    "/api/v1/decisions/{decision_id}/resolutions",
+    "/api/v1/entities/{entity_id}/decisions",
+    "/api/v1/reasoners",
+    "/api/v1/reasoners/{reasoner_id}",
+    "/api/v1/reasoners/{reasoner_id}/registrations/{version}",
+    "/api/v1/gates",
+}
 
 
-def test_create_app_with_no_plugins_keeps_framework_routes():
-    app = create_app(plugins=[], gate_plugins=[])
+@pytest.mark.parametrize("plugins", [[], [PLUGIN], [ALPHA, PLUGIN]])
+def test_create_app_serves_the_framework_routes_only(plugins):
+    """The 'second reasoner, zero framework diff' proof: no route of its own."""
+    paths = _route_paths(create_app(plugins=plugins, gate_plugins=[]))
 
-    paths = _route_paths(app)
-    assert "/health" in paths
-    assert "/api/v1/decisions/{decision_id}" in paths
-    assert not any(p.startswith("/api/v1/stub") for p in paths)
+    assert paths >= FRAMEWORK_PATHS
+    assert not {p for p in paths if p.startswith("/api/")} - FRAMEWORK_PATHS
 
 
 # ---------------------------------------------------------------------------
@@ -313,13 +310,15 @@ def fake_framework(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Replace ``build_framework_services`` so no infrastructure is touched.
 
     Returns the ``FrameworkServices`` double the lifespan will receive; the
-    gate plugins the lifespan handed to the bootstrap are recorded on its
-    ``received_gate_plugins`` attribute.
+    plugins and gate plugins the lifespan handed to the bootstrap are
+    recorded on its ``received_plugins`` / ``received_gate_plugins``.
     """
     framework = MagicMock(spec=FrameworkServices)
     framework.gates = {}
+    framework.registry = StaticReasonerRegistry([STUB_REGISTRATION])
 
     def _build(settings: Any, plugins: Any, gate_plugins: Any) -> MagicMock:
+        framework.received_plugins = plugins
         framework.received_gate_plugins = gate_plugins
         return framework
 
@@ -327,107 +326,84 @@ def fake_framework(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return framework
 
 
-@pytest.fixture
-def journal(fake_framework: MagicMock) -> list[str]:
-    """Shared close-order journal wired into the fake for one test."""
-    entries: list[str] = []
-    fake_framework.close.side_effect = lambda: entries.append("framework")
-    ALPHA.journal = entries
-    ALPHA.built_with = None
-    ALPHA.services = None
-    PLUGIN.services = None
-    yield entries
-    ALPHA.journal = None
-
-
-def test_lifespan_builds_each_plugin_against_the_framework_services(
-    fake_framework: MagicMock, journal: list[str]
-):
-    app = create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])
+def test_lifespan_exposes_the_framework_and_the_key_ring(fake_framework: MagicMock):
+    app = create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[], keyring=TEST_KEYRING)
 
     with TestClient(app) as client:
         assert app.state.framework is fake_framework
-        assert set(app.state.reasoners) == {"alpha-reasoner", "stub-reasoner"}
-        assert app.state.reasoners["stub-reasoner"] is PLUGIN.services
-        assert app.state.reasoners["alpha-reasoner"] is ALPHA.services
-        assert isinstance(PLUGIN.services, StubServices)
-        assert PLUGIN.services.framework is fake_framework
-        assert ALPHA.built_with is fake_framework
+        assert app.state.keyring is TEST_KEYRING
+        assert not hasattr(app.state, "reasoners")
+        assert fake_framework.received_plugins == [PLUGIN, ALPHA]
         assert client.get("/health").status_code == 200
 
-
-def test_lifespan_serves_stub_routes_once_started(
-    fake_framework: MagicMock, journal: list[str]
-):
-    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[])) as client:
-        response = client.get("/api/v1/stub/ping")
-
-    assert response.status_code == 200
-    assert response.json() == {"reasoner_id": "stub-reasoner", "status": "ok"}
-
-
-def test_shutdown_closes_reasoners_before_the_framework(
-    fake_framework: MagicMock, journal: list[str]
-):
-    with TestClient(create_app(plugins=[PLUGIN, ALPHA], gate_plugins=[])):
-        assert journal == []
-        assert PLUGIN.services is not None
-        assert not PLUGIN.services.closed
-
-    assert PLUGIN.services.closed
-    assert ALPHA.services is not None
-    assert ALPHA.services.closed
-    assert journal == ["alpha-reasoner", "framework"]
     fake_framework.close.assert_called_once()
 
 
-def test_plugin_build_failure_closes_built_services_and_propagates(
-    fake_framework: MagicMock, journal: list[str]
+def test_lifespan_reads_the_key_ring_from_the_settings(
+    fake_framework: MagicMock, monkeypatch: pytest.MonkeyPatch
 ):
-    exploding = _ExplodingPlugin("gamma-reasoner", "/api/v1/gamma")
-    app = create_app(plugins=[ALPHA, exploding], gate_plugins=[])
+    monkeypatch.setenv("DECISIONLEDGER_API_KEYS", "stub-reasoner:from-env")
+    app = create_app(plugins=[PLUGIN], gate_plugins=[])
 
-    with (
-        pytest.raises(RuntimeError, match="gamma-reasoner cannot start"),
-        TestClient(app),
-    ):
-        pass
-
-    assert ALPHA.services is not None
-    assert ALPHA.services.closed
-    assert journal == ["alpha-reasoner", "framework"]
-    assert not hasattr(app.state, "reasoners")
+    with TestClient(app):
+        ring: KeyRing = app.state.keyring
+        principal = ring.principal("from-env")
+        assert principal is not None
+        assert principal.reasoner_id == "stub-reasoner"
 
 
-def test_lifespan_with_no_plugins_warns_and_serves_framework_routes(
-    fake_framework: MagicMock, caplog: pytest.LogCaptureFixture
+def test_lifespan_warns_when_no_reasoner_or_no_key_is_configured(
+    fake_framework: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    fake_framework.registry = StaticReasonerRegistry([])
+    for name in ("DECISIONLEDGER_API_KEYS", "DECISIONLEDGER_OPERATOR_KEY"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("DECISIONLEDGER_API_KEYS_FILE", "")
     app = create_app(plugins=[], gate_plugins=[])
 
     with caplog.at_level(logging.WARNING), TestClient(app) as client:
-        assert app.state.reasoners == {}
         assert client.get("/health").status_code == 200
+        response = client.get("/api/v1/reasoners")
+        assert response.status_code == 401
 
-    assert any("api.no_reasoners" in rec.getMessage() for rec in caplog.records)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("api.no_reasoners" in m for m in messages)
+    assert any("api.no_keys" in m for m in messages)
     fake_framework.close.assert_called_once()
 
 
+def test_a_bootstrap_failure_propagates(monkeypatch: pytest.MonkeyPatch):
+    def _explode(settings: Any, plugins: Any, gate_plugins: Any) -> None:
+        raise RuntimeError("postgres is down")
+
+    monkeypatch.setattr("app.main.build_framework_services", _explode)
+    app = create_app(plugins=[PLUGIN], gate_plugins=[], keyring=TEST_KEYRING)
+
+    with pytest.raises(RuntimeError, match="postgres is down"), TestClient(app):
+        pass
+    assert not hasattr(app.state, "framework")
+
+
 def test_lifespan_hands_explicit_gate_plugins_to_the_bootstrap(
-    fake_framework: MagicMock, journal: list[str]
+    fake_framework: MagicMock,
 ):
     gate = FakeGatePlugin("fake")
 
-    with TestClient(create_app(plugins=[PLUGIN], gate_plugins=[gate])):
+    with TestClient(
+        create_app(plugins=[PLUGIN], gate_plugins=[gate], keyring=TEST_KEYRING)
+    ):
         assert fake_framework.received_gate_plugins == [gate]
 
 
 def test_create_app_without_gate_plugins_composes_every_installed_gate(
-    fake_framework: MagicMock, journal: list[str], monkeypatch: pytest.MonkeyPatch
+    fake_framework: MagicMock, monkeypatch: pytest.MonkeyPatch
 ):
     discovered = [FakeGatePlugin("fake")]
     monkeypatch.setattr("app.main.discover_gates", lambda: discovered)
 
-    with TestClient(create_app(plugins=[PLUGIN])):
+    with TestClient(create_app(plugins=[PLUGIN], keyring=TEST_KEYRING)):
         assert fake_framework.received_gate_plugins == discovered
 
 
@@ -452,7 +428,7 @@ def test_create_app_without_plugins_discovers_through_the_settings_allowlist(
     app = create_app()
 
     assert seen == [frozenset({"stub-reasoner"})]
-    assert "/api/v1/stub/ping" in _route_paths(app)
+    assert _route_paths(app) >= FRAMEWORK_PATHS
 
 
 def test_create_app_without_plugins_passes_no_allowlist_when_setting_is_blank(
@@ -471,3 +447,11 @@ def test_create_app_without_plugins_passes_no_allowlist_when_setting_is_blank(
 
     assert seen == [None]
     assert "/health" in _route_paths(app)
+
+
+def test_registered_reasoner_entries_carry_their_version():
+    [entry] = StaticReasonerRegistry([STUB_REGISTRATION]).entries()
+    assert isinstance(entry, RegisteredReasoner)
+    assert entry.reasoner_id == "stub-reasoner"
+    assert entry.source == "inline"
+    assert len(entry.version) == 16

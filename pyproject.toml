@@ -49,7 +49,11 @@ dependencies = [
     "pydantic>=2.7,<3",
     # --- API layer ---
     "fastapi>=0.111,<1",
+    # Imported directly for the problem handler of routing errors (404/405).
+    "starlette>=0.40,<1",
     "uvicorn[standard]>=0.30,<1",
+    # --- Ledger client (app.client.HttpClient) ---
+    "httpx>=0.27,<1",
     # --- Database (audit ledger) ---
     "psycopg[binary]>=3.1,<4",
     # --- Serialization & config ---
@@ -68,7 +72,6 @@ dev = [
     "pytest-cov>=5.0,<6",
     "pytest-xdist>=3.5,<4",
     "pytest-timeout>=2.3,<3",
-    "httpx>=0.27,<1",              # FastAPI test client
     # --- Linting & formatting ---
     "ruff>=0.5,<1",
     "sqlfluff>=3.1,<4",
@@ -87,6 +90,7 @@ dev = [
 # the pyproject analog of the compose `include:` (see docker-compose.yml).
 reasoners = [
     "ato-reasoner",
+    "example-reasoner",
 ]
 # Deployment composition: the gate plugins this checkout installs (DR-28).
 # The RAG policy gate comes with its `eval` extra (RAGAS) so its eval harness
@@ -94,6 +98,11 @@ reasoners = [
 gates = [
     "decisionledger-gate-rules",
     "decisionledger-gate-policy-rag[eval]",
+]
+# Deployment composition: the clients of the ledger this checkout installs
+# (the MCP server). They talk to the ledger through app.client only.
+integrations = [
+    "decisionledger-mcp",
 ]
 docs = [
     # --- Documentation ---
@@ -113,22 +122,26 @@ Documentation = "https://charleskelley.github.io/decision-ledger/"
 Issues = "https://github.com/charleskelley/decision-ledger/issues"
 
 # =============================================================================
-# uv workspace — reasoner plugins under reasoners/*, gate plugins under gates/*
+# uv workspace — reasoner plugins under reasoners/*, gate plugins under gates/*,
+# ledger clients under integrations/*
 # =============================================================================
 # Reasoners declare their own `decisionledger.reasoners` and
 # `decisionledger.eval_adapters` entry points, and gates their own
-# `decisionledger.gates` entry point, in their member pyproject.
+# `decisionledger.gates` entry point, in their member pyproject. Integrations
+# publish no plugin: they are clients of the ledger.
 
 [tool.uv]
-default-groups = ["dev", "reasoners", "gates"]
+default-groups = ["dev", "reasoners", "gates", "integrations"]
 
 [tool.uv.workspace]
-members = ["reasoners/*", "gates/*"]
+members = ["reasoners/*", "gates/*", "integrations/*"]
 
 [tool.uv.sources]
 ato-reasoner = { workspace = true }
+example-reasoner = { workspace = true }
 decisionledger-gate-rules = { workspace = true }
 decisionledger-gate-policy-rag = { workspace = true }
+decisionledger-mcp = { workspace = true }
 
 # =============================================================================
 # Hatch (build configuration)
@@ -145,7 +158,7 @@ packages = ["core", "app", "eval"]
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-src = ["core", "app", "eval", "tests"]
+src = ["core", "app", "eval", "tests", "conformance"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -193,6 +206,10 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
     "S105",   # hardcoded passwords in test fixtures are fine
     "S106",   # hardcoded passwords in test fixtures are fine
 ]
+"conformance/**/*.py" = [
+    "D",      # no docstring requirements in tests
+    "S101",   # assert is expected in tests
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -214,7 +231,15 @@ typeCheckingMode = "basic"
 # nothing for a single-star directory glob. Member packages (ato_reasoner,
 # rules_gate, policy_rag_gate) resolve via the editable install, so no
 # extraPaths are needed.
-include = ["core", "app", "eval", "reasoners/**/src", "gates/**/src"]
+include = [
+    "core",
+    "app",
+    "eval",
+    "reasoners/**/src",
+    "gates/**/src",
+    "integrations/**/src",
+    "conformance",
+]
 exclude = ["**/__pycache__", "build", "dist", ".venv"]
 reportMissingImports = true
 reportMissingTypeStubs = false
@@ -225,7 +250,7 @@ reportUnnecessaryTypeIgnoreComment = true
 # =============================================================================
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "reasoners/*/tests", "gates/*/tests"]
+testpaths = ["tests", "reasoners/*/tests", "gates/*/tests", "integrations/*/tests"]
 # Repo root on sys.path so ``tests._stub_reasoner.plugin:PLUGIN`` resolves
 # through ``importlib.metadata.EntryPoint.load()`` exactly like an installed
 # plugin would.
@@ -240,6 +265,7 @@ addopts = [
     "--import-mode=importlib",     # several test trees without basename clashes
 ]
 markers = [
+    "conformance: the HTTP contract suite, run against a live instance (make conformance)",
     "integration: requires Docker services (see docker-compose.yml)",
     "evaluation: full evaluation harness tests (slow, LLM calls, costs money)",
     "slow: tests that take >10s for reasons other than integration or eval",

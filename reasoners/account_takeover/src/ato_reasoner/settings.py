@@ -2,10 +2,11 @@
 
 ``AtoSettings`` holds configuration that is unique to the Account Takeover
 reasoner: the Redis instance that backs its sliding-window features and
-login-event stream, the trained scorer model artifact path, and the active
-policy corpus version. Shared infrastructure (Postgres, Elasticsearch, LLM
-credentials, logging) is owned by ``app/settings.py:FrameworkSettings`` and
-reaches the reasoner through ``FrameworkServices``.
+login-event stream, the trained scorer model artifact path, the active
+policy corpus version, and the ledger ATO submits its decisions to. With no
+``ATO_LEDGER_URL`` the ATO service runs the ledger in process
+(``LocalClient``, composed from the framework's own settings); with one it
+calls that ledger over HTTP (``HttpClient``) with ``ATO_LEDGER_KEY``.
 
 Environment variables are read from the same ``.env`` as the framework,
 but each ATO-specific variable is prefixed ``ATO_`` so it never collides
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -47,3 +49,10 @@ class AtoSettings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     scorer_model_path: str = str(DEFAULT_SCORER_MODEL_PATH)
     corpus_version: str = "ato-v1"
+
+    #: Base URL of the ledger ATO submits to (``http://localhost:8000``).
+    #: Blank (the default) runs the ledger in ATO's own process.
+    ledger_url: str = ""
+
+    #: ATO's API key for that ledger (sent as ``X-DecisionLedger-Key``).
+    ledger_key: SecretStr = SecretStr("")

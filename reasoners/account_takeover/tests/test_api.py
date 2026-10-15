@@ -7,7 +7,7 @@ Pydantic's error list rather than a 500 — including every login its
 framework submission would refuse, rejected before the pipeline runs.
 
 The pipeline itself is not exercised: ``run_ato_decision`` is replaced with
-a stub that returns a minimal bundle-like object.
+a stub that returns a decision with a minimal receipt.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import ato_reasoner.api as api_module
-from ato_reasoner.registry import ATO_REGISTRATION
+from app.api.models import DecisionReceipt, GateSummary
+from ato_reasoner.pipeline import AtoDecision
 from core.actions import DecisionAction
 
 
@@ -51,38 +52,44 @@ def _wire_body() -> dict[str, Any]:
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     seen: dict[str, Any] = {}
 
-    async def _fake_run(*, event: Any, services: Any, framework: Any, **kw: Any):
-        del services, framework, kw
+    async def _fake_run(*, event: Any, services: Any, client: Any) -> AtoDecision:
         seen["event"] = event
-        return SimpleNamespace(
+        seen["runtime"] = (services, client)
+        receipt = DecisionReceipt(
             decision_id="00000000-0000-0000-0000-000000000001",
+            reasoner_id="ato-reasoner",
+            event_id=event.event_id,
+            entity_id=str(event.entity_id),
+            mode="record",
             decision_action=DecisionAction.ALLOW,
             decision_level_rule=None,
-            submission=SimpleNamespace(
-                event_id=event.event_id,
-                mode="record",
-                bypass=SimpleNamespace(rule_id="allow-band"),
-            ),
+            enforcement_rule_applied=None,
+            bypass_rule_id="allow-band",
             bypass_rule_holds=True,
-            bypass_check=None,
-            other_bypass_checks=(),
-            gates=(
-                SimpleNamespace(
+            registration_version="v",
+            gates=[
+                GateSummary(
                     gate_id="policy",
                     mandatory=False,
                     status="skipped",
-                    enforcement=None,
-                    enforced_action=None,
-                ),
-            ),
-            latency_breakdown={"features_ms": 1.0, "scorer_ms": 2.0},
+                    action=None,
+                    reason="mode=record",
+                )
+            ],
+            latency_breakdown={"gate_ms": 0.0},
+            created_at=datetime.now(UTC),
+        )
+        return AtoDecision(
+            receipt=receipt, latency_ms={"features_ms": 1.0, "scorer_ms": 2.0}
         )
 
     monkeypatch.setattr(api_module, "run_ato_decision", _fake_run)
     app = FastAPI()
     app.include_router(api_module.router)
-    app.state.reasoners = {ATO_REGISTRATION.reasoner_id: object()}
-    app.state.framework = object()
+    app.state.ato = api_module.AtoRuntime(
+        services=SimpleNamespace(),  # type: ignore[arg-type]
+        client=SimpleNamespace(),  # type: ignore[arg-type]
+    )
     client = TestClient(app)
     client.seen = seen  # type: ignore[attr-defined]
     return client
@@ -106,6 +113,10 @@ def test_decision_endpoint_accepts_iso_timestamps_and_enum_strings(client):
         {"gate_id": "policy", "mandatory": False, "status": "skipped", "action": None}
     ]
     assert body["latency_ms"] == 3.0
+    assert client.seen["runtime"] == (  # type: ignore[attr-defined]
+        client.app.state.ato.services,  # type: ignore[attr-defined]
+        client.app.state.ato.client,  # type: ignore[attr-defined]
+    )
 
 
 def test_decision_endpoint_rejects_invalid_body_with_422_and_field_errors(client):

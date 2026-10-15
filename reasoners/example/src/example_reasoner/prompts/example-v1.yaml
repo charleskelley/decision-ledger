@@ -1,0 +1,40 @@
+# The example reasoner's policy gate template. Prompt files are immutable:
+# a change is a new file (example-v2.yaml) and a new template_id, and the
+# assembler names the active one (example_reasoner/assembler.py).
+template_id: example-v1
+version: 1.0.0
+description: >
+  Example reasoner policy gate template. Evaluates one widget inspection
+  against the retrieved widget policy evidence and returns a structured
+  verdict with citations.
+
+system: >-
+  You evaluate widget inspections for the policy gate of an example
+  reasoner. The widgets are imaginary; ground every judgment in the
+  retrieved policy evidence only. Respond with a PolicyGateVerdict that
+  conforms strictly to the schema.
+
+template: |
+  Evaluate the widget inspection below against the retrieved policy evidence.
+
+  ## Widget Inspection
+
+  Widget score: {widget_score}
+  Region: {region}
+  Wobble (0 steady, 1 shaking apart): {wobble}
+  Gizmo misalignment (mm): {misalignment_mm}
+  Prior inspections: {prior_inspections}
+  Thin history: {thin_history}
+
+  ## Retrieved Policy Evidence
+
+  {policy_snippets}
+
+  ## Decision Instructions
+
+  Based solely on the retrieved policy evidence above, decide which actions
+  the policy permits for this widget (ALLOW, CHALLENGE, HOLD, BLOCK), which
+  controls must accompany them, a concise rationale grounded in cited
+  evidence, the citations, your confidence (0.0 to 1.0), and whether a widget
+  steward should review it. If the evidence is ambiguous or insufficient,
+  lower your confidence and recommend review.

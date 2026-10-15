@@ -370,3 +370,15 @@ async def test_intake_rejects_a_malformed_context_with_the_config_models_name(
         )
 
     assert store.written == []
+
+
+def test_the_gate_serves_only_reasoners_it_holds_a_profile_for(fixture_reasoner):
+    # The framework asks at startup (ReasonerScope) so that a reasoner the
+    # gate would refuse on every submission fails the deployment instead.
+    from app.gates import ReasonerScope
+
+    scoped = _gate(fixture_reasoner, profiles={"stub-reasoner": _PROFILE})
+    assert isinstance(scoped, ReasonerScope)
+    assert scoped.serves("stub-reasoner")
+    assert not scoped.serves("file-reasoner")
+    assert _gate(fixture_reasoner, profiles=None).serves("anyone")

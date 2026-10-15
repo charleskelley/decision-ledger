@@ -161,14 +161,17 @@ baseline report committed as the release receipt.
 ### Quickstart
 
 ```bash
-uv sync                        # Install the framework + every workspace reasoner
-cp .env.example .env           # Then paste your OPENAI_API_KEY and ANTHROPIC_API_KEY
+uv sync                        # Install the framework + every workspace reasoner, gate, and integration
+cp .env.example .env           # Then paste your OPENAI_API_KEY and ANTHROPIC_API_KEY, and set API keys
 docker compose up -d           # Start infra (PostgreSQL+pgvector, Elasticsearch, + ATO's Redis)
 make prepare-account_takeover  # Index the ATO policy corpus; train the scorer if missing
 make install-hooks             # Install pre-commit hooks (gitleaks + ruff)
 
-# Run the API (discovers and mounts every installed reasoner)
+# Run the ledger API (POST /api/v1/decisions with a reasoner's X-DecisionLedger-Key)
 uv run uvicorn --factory app.main:create_app
+
+# Run ATO as its own service, submitting to the ledger (port 8001)
+ATO_LEDGER_URL=http://localhost:8000 ATO_LEDGER_KEY=<ato key> make serve-account_takeover
 
 # Publish synthetic ATO events to the reasoner's Redis stream
 make scenario-account_takeover

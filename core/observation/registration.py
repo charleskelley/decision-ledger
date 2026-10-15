@@ -26,16 +26,26 @@ A ``ReasonerRegistry`` is the protocol any registry implementation must
 satisfy. The reference implementation (``StaticReasonerRegistry`` in
 ``app/``) loads from a list at startup; a production implementation could
 back it with a database — the framework is agnostic to the backing store.
+
+A registration is data (DR-31): ``registration_version`` content-addresses
+it, every decision bundle records the version in effect when it was made,
+and the ledger keeps a snapshot of each version, so replay enforces against
+the profile the decision was made under rather than the one registered now.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import hashlib
+import json
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.actions import DecisionAction
 from core.gate import Predicate
+
+#: Hex digits of the SHA-256 digest a registration version keeps (64 bits).
+REGISTRATION_VERSION_LENGTH = 16
 
 
 class GateBinding(BaseModel):
@@ -185,6 +195,55 @@ class ReasonerRegistration(BaseModel):
         return next((r for r in self.bypass_rules if r.rule_id == rule_id), None)
 
 
+def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]:
+    """Return the registration as JSON-shaped data with every set sorted.
+
+    ``model_dump(mode="json")`` writes a ``frozenset`` in iteration order,
+    which for strings depends on the process's hash seed; the two set-valued
+    fields (``recordable_actions`` and each jurisdiction conflict group) are
+    sorted here so the same registration always has the same form. Tuples
+    keep their order: gate bindings and bypass rules are ordered by meaning.
+
+    Args:
+        registration: The registration.
+
+    Returns:
+        A JSON-serializable dict that reloads into an equal registration.
+    """
+    data = registration.model_dump(mode="json")
+    data["recordable_actions"] = sorted(data["recordable_actions"])
+    data["jurisdiction_conflict_groups"] = [
+        sorted(group) for group in data["jurisdiction_conflict_groups"]
+    ]
+    return data
+
+
+def registration_version(registration: ReasonerRegistration) -> str:
+    """Return the content address of a registration (DR-31). Pure.
+
+    The first ``REGISTRATION_VERSION_LENGTH`` hex digits of the SHA-256 of
+    the canonical form (sorted keys, no whitespace). Equal registrations
+    have equal versions in every process; any change to the gate set, a
+    bypass rule, the recordable actions, or the enforcement profile changes
+    it. Every decision bundle records the version its registration had, and
+    replay reads the snapshot of that version.
+
+    Args:
+        registration: The registration.
+
+    Returns:
+        A 16-character lowercase hex string.
+    """
+    text = json.dumps(
+        canonical_registration(registration),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return digest[:REGISTRATION_VERSION_LENGTH]
+
+
 @runtime_checkable
 class ReasonerRegistry(Protocol):
     """Protocol for reasoner registries the framework depends on at intake.
@@ -226,8 +285,11 @@ class ReasonerRegistry(Protocol):
 
 
 __all__ = [
+    "REGISTRATION_VERSION_LENGTH",
     "BypassRule",
     "GateBinding",
     "ReasonerRegistration",
     "ReasonerRegistry",
+    "canonical_registration",
+    "registration_version",
 ]

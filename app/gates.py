@@ -19,6 +19,11 @@ The seam is five types:
   submitting reasoner, whether a validated ``gate_config`` is allowed (for
   example only resources that reasoner ships). The framework calls it at
   intake, in both modes, right after ``config_model`` validation.
+- ``ReasonerScope`` — an optional ``Gate`` capability: whether the gate can
+  serve a reasoner at all (a gate that loads per-reasoner assets serves only
+  the reasoners whose assets it loaded). The framework asks at startup, for
+  every registration that binds the gate, so a reasoner the gate would
+  refuse on every submission fails the deployment instead.
 - ``GatePlugin`` — what the entry point publishes: ``gate_id``, ``kind``,
   ``deterministic``, an optional ``config_model`` that validates
   ``GateContext.gate_config`` at intake, and ``build(framework) -> Gate``.
@@ -149,6 +154,31 @@ class ConfigAuthorizer(Protocol):
         Raises:
             ValueError: ``reasoner_id`` may not submit ``config``; the
                 message says why.
+        """
+        ...
+
+
+@runtime_checkable
+class ReasonerScope(Protocol):
+    """Optional ``Gate`` capability: which reasoners the gate can serve.
+
+    A gate that serves reasoners from assets it loads when it is built (a
+    prompt template, a corpus) cannot serve a reasoner registered without
+    them — for example one registered through the deployment's registration
+    file, with no plugin installed — and would refuse every submission it is
+    addressed in. ``build_gates`` asks ``serves`` for every registration that
+    binds the gate and refuses the deployment when the answer is no.
+    """
+
+    def serves(self, reasoner_id: str) -> bool:
+        """Whether submissions of ``reasoner_id`` can be served at all.
+
+        Args:
+            reasoner_id: A reasoner whose registration binds this gate.
+
+        Returns:
+            ``False`` when every submission of that reasoner addressed to
+            this gate would be refused.
         """
         ...
 
@@ -325,13 +355,17 @@ def build_gates(
             (``DECISIONLEDGER_MANDATORY_GATES``); each must be among
             ``plugins``.
 
-    Once every gate is built, the composed reasoners' gate sets are checked
-    against them (``framework.reasoners``), so a deployment that cannot
+    Once every gate is built, the gate set of every registration the
+    deployment serves (``framework.registry``: installed plugins and the
+    registration file) is checked against them, so a deployment that cannot
     serve a reasoner fails here rather than on every decision:
 
     - a gate a registration binds as mandatory must be composed (an
       advisory binding to a missing gate is only logged: that reasoner's
       gated decisions fail closed at that gate);
+    - a composed gate a registration binds must serve that reasoner, when
+      the gate says whom it serves (``ReasonerScope``): otherwise intake
+      would refuse every submission of the reasoner;
     - a gate the deployment mandates must accept, from every composed
       reasoner that does not bind it, the empty configuration it will run
       with: its ``config_model`` validates ``{}`` and, when the built gate
@@ -378,12 +412,21 @@ def build_gates(
             composed[plugin.gate_id] = ComposedGate(
                 plugin=plugin, gate=gate, mandatory=plugin.gate_id in mandated
             )
-        reasoners = getattr(framework, "reasoners", ())
-        _check_gate_sets([r.registration for r in reasoners], composed)
+        _check_gate_sets(_served_registrations(framework), composed)
     except Exception:
         _close_quietly(composed)
         raise
     return composed
+
+
+def _served_registrations(framework: object) -> list[ReasonerRegistration]:
+    """Every registration the services serve: the registry's, else the plugins'."""
+    registry = getattr(framework, "registry", None)
+    if registry is not None and hasattr(registry, "entries"):
+        served: Iterable[Any] = registry.entries()
+        return [entry.registration for entry in served]
+    plugins: Iterable[Any] = getattr(framework, "reasoners", ())
+    return [plugin.registration for plugin in plugins]
 
 
 def _check_gate_sets(
@@ -394,7 +437,18 @@ def _check_gate_sets(
     for registration in registrations:
         reasoner_id = registration.reasoner_id
         for binding in registration.gates:
-            if binding.gate_id in gates:
+            composed = gates.get(binding.gate_id)
+            if composed is not None:
+                gate = composed.gate
+                if isinstance(gate, ReasonerScope) and not gate.serves(reasoner_id):
+                    raise GatePluginError(
+                        binding.gate_id,
+                        f"reasoner {reasoner_id!r} binds this gate, which does not "
+                        "serve it (a gate that loads per-reasoner assets serves "
+                        "only the reasoners whose assets it loaded): intake would "
+                        "refuse every submission of that reasoner. Install the "
+                        "reasoner's plugin, or remove the binding.",
+                    )
                 continue
             if binding.mandatory:
                 raise GatePluginError(

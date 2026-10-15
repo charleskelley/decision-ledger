@@ -1,0 +1,1125 @@
+{
+  "$defs": {
+    "AllOf": {
+      "additionalProperties": false,
+      "description": "Conjunction: holds when every child predicate holds.\n\nAttributes:\n    kind: Discriminator, always ``\"all\"``.\n    predicates: Children, evaluated left to right with short-circuit.",
+      "properties": {
+        "kind": {
+          "const": "all",
+          "default": "all",
+          "title": "Kind",
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all": "#/$defs/AllOf",
+                "any": "#/$defs/AnyOf",
+                "compare": "#/$defs/Compare",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Compare"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Predicates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "predicates"
+      ],
+      "title": "AllOf",
+      "type": "object"
+    },
+    "AnyOf": {
+      "additionalProperties": false,
+      "description": "Disjunction: holds when at least one child predicate holds.\n\nAttributes:\n    kind: Discriminator, always ``\"any\"``.\n    predicates: Children, evaluated left to right with short-circuit.",
+      "properties": {
+        "kind": {
+          "const": "any",
+          "default": "any",
+          "title": "Kind",
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all": "#/$defs/AllOf",
+                "any": "#/$defs/AnyOf",
+                "compare": "#/$defs/Compare",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Compare"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Predicates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "predicates"
+      ],
+      "title": "AnyOf",
+      "type": "object"
+    },
+    "AttributionSummary": {
+      "additionalProperties": false,
+      "description": "Flexible attribution evidence from a domain reasoner.\n\nAccommodates three forms of model attribution — all optional — to support\nthe range of what different model types can produce:\n\n- ``feature_contributions``: per-event contributions from any attribution\n  method (why THIS prediction for THIS event).\n- ``feature_importance``: global model-level weights from training\n  (which features matter most in general — not per-event).\n- ``narrative``: free-form explanation for cases where neither structured\n  form applies (e.g., vendor black-box models, rule-based reasoners).\n\nAt least one field should be populated for meaningful audit quality.\nThe framework stores this verbatim in the DecisionBundle without\ninterpreting its contents.\n\nAttributes:\n    feature_contributions: Per-event feature contributions ranked by\n        magnitude. Present when the model produces per-observation\n        attribution (SHAP, LIME, rule weights, etc.). None when\n        attribution is not available.\n    feature_importance: Global feature weight map from model training\n        (feature name → importance score). Provides model-level\n        explainability when per-event attribution is unavailable.\n    narrative: Free-form explanation. Used when neither structured form\n        applies, or to supplement them with domain context.",
+      "properties": {
+        "feature_contributions": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Contribution"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Contributions"
+        },
+        "feature_importance": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Importance"
+        },
+        "narrative": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narrative"
+        }
+      },
+      "title": "AttributionSummary",
+      "type": "object"
+    },
+    "BypassCheck": {
+      "additionalProperties": false,
+      "description": "The ledger's evaluation of one registered bypass rule for a record.\n\nStored in the bundle with the rule itself — for the cited rule and for\nevery other rule the reasoner registers — so replay re-evaluates the\nexact predicates that were checked, without the registration.\n\nAttributes:\n    rule: The registered rule, as evaluated.\n    observed: The submission's value for every field the predicate\n        references (fields the evidence lacks are omitted).\n    holds: Whether the predicate held against the evidence. ``False``\n        when it could not be evaluated.\n    error: Why the predicate could not be evaluated (a missing feature,\n        a non-numeric operand), or ``None``.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "holds": {
+          "title": "Holds",
+          "type": "boolean"
+        },
+        "observed": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Observed",
+          "type": "object"
+        },
+        "rule": {
+          "$ref": "#/$defs/BypassRule"
+        }
+      },
+      "required": [
+        "rule",
+        "holds"
+      ],
+      "title": "BypassCheck",
+      "type": "object"
+    },
+    "BypassCitation": {
+      "additionalProperties": false,
+      "description": "The registered bypass rule a recorded decision cites.\n\nAttributes:\n    rule_id: A ``BypassRule.rule_id`` from the reasoner's registration.\n    rule_version: Optional pin. When set it must equal the registered\n        rule's ``version``, so a reasoner built against an older rule\n        cannot record under a newer one unnoticed.",
+      "properties": {
+        "rule_id": {
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "rule_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Version"
+        }
+      },
+      "required": [
+        "rule_id"
+      ],
+      "title": "BypassCitation",
+      "type": "object"
+    },
+    "BypassRule": {
+      "additionalProperties": false,
+      "description": "A registered condition under which a reasoner may record a decision.\n\nA recorded submission cites a rule by ``rule_id``. The ledger accepts\nthe citation only when the rule is registered and the submission's\n``proposed_action`` is the rule's ``action``; it then evaluates\n``predicate`` against the submission's ``reasoner_context`` (the\n``label_value`` and ``feature_set`` the reasoner reported), records\nwhether it holds, and snapshots the rule into the bundle so replay can\nevaluate it again from the bundle alone. The predicate language is the\none the rules gate uses (``core.gate.predicate``): pure, closed, and\nJSON-serializable.\n\nAttributes:\n    rule_id: Identifier a recorded submission cites; unique within the\n        registration.\n    version: Version label recorded with every decision that cites the\n        rule. Change it whenever the predicate or action changes.\n    description: Human-readable intent of the rule.\n    predicate: When the rule applies, over ``label_value`` and\n        ``feature_set.<name>``.\n    action: The one action the rule justifies recording. A reasoner\n        that may record different actions under different conditions\n        registers one rule per action.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/DecisionAction"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/AllOf",
+              "any": "#/$defs/AnyOf",
+              "compare": "#/$defs/Compare",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Compare"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "rule_id": {
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "version",
+        "description",
+        "predicate",
+        "action"
+      ],
+      "title": "BypassRule",
+      "type": "object"
+    },
+    "Compare": {
+      "additionalProperties": false,
+      "description": "Leaf node: compare one field of the subject with a constant.\n\nAttributes:\n    kind: Discriminator, always ``\"compare\"``.\n    field: ``\"label_value\"`` or ``\"feature_set.<name>\"``.\n    op: One of ``eq``, ``ne``, ``lt``, ``le``, ``gt``, ``ge``, ``in``,\n        ``not_in``.\n    value: The constant. A number for ordering operators, a non-empty\n        list of scalars for ``in`` / ``not_in``, any scalar otherwise.",
+      "properties": {
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "kind": {
+          "const": "compare",
+          "default": "compare",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "in",
+            "not_in"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "type": "array"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "title": "Compare",
+      "type": "object"
+    },
+    "Contribution": {
+      "additionalProperties": false,
+      "description": "Per-event feature contribution from a domain reasoner.\n\nCarried in ``AttributionSummary.feature_contributions`` to provide\nper-observation feature attribution in the DecisionBundle.\n\nWorks with any feature attribution method: SHAP values, LIME\ncoefficients, rule weights, attention scores, etc. Sign and magnitude\nsemantics are defined by ``method`` — the framework carries the value\nwithout interpreting it. For example, SHAP values are signed (positive\npushes the prediction toward the positive class; negative pushes away),\nwhile attention scores are typically non-negative.\n\nAttributes:\n    feature_name: Name of the contributing feature (snake_case).\n    feature_value: Raw feature value as seen by the model at inference\n        time.\n    method: Attribution method that produced the contribution value\n        (e.g., ``\"shap\"``, ``\"lime\"``, ``\"rule_weight\"``,\n        ``\"attention\"``). Set by the domain assembler.\n        Descriptive — the framework never switches on this field.\n    value: Numeric contribution value from the attribution method.\n        Sign and magnitude semantics vary by method — see ``method``.",
+      "properties": {
+        "feature_name": {
+          "title": "Feature Name",
+          "type": "string"
+        },
+        "feature_value": {
+          "title": "Feature Value",
+          "type": "number"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "feature_name",
+        "feature_value",
+        "method",
+        "value"
+      ],
+      "title": "Contribution",
+      "type": "object"
+    },
+    "DecisionAction": {
+      "description": "Final action the enforcement layer produces for a governed decision.\n\nMembers are declared in ascending severity: ALLOW, CHALLENGE, HOLD, BLOCK.\nSeverity ordering is not a property of this enum: the conjunction\ncombinator (``core.gate.combinator``) owns the authoritative ranking,\n``SEVERITY_ORDER``, which enforcement and the combinator both read.\n\n.. warning::\n    ``StrEnum`` comparison is lexicographic — ``BLOCK < CHALLENGE``\n    alphabetically. Never use ``<`` / ``>`` on ``DecisionAction`` to\n    determine severity.\n\nAttributes:\n    ALLOW: No friction. The request proceeds without additional controls.\n    CHALLENGE: A friction control is applied before the request proceeds.\n        The specific control is domain-defined (e.g., step-up\n        authentication, CAPTCHA, manual approval gate).\n    HOLD: The request is suspended pending asynchronous human review.\n        No automated resolution occurs until the review is completed.\n    BLOCK: The request is immediately rejected. No further pipeline\n        processing occurs.",
+      "enum": [
+        "ALLOW",
+        "CHALLENGE",
+        "HOLD",
+        "BLOCK"
+      ],
+      "title": "DecisionAction",
+      "type": "string"
+    },
+    "EnforcementDecision": {
+      "additionalProperties": false,
+      "description": "Decision-time action plus override log from the deterministic enforcement layer.\n\nThe enforcement layer is purely rule-based — no calls to the gate,\nthe domain reasoner, or any other non-deterministic component. Every\nexecution path is deterministic given the same inputs. This is what\nmakes replay work: re-executing enforcement against the cached gate\noutputs in a bundle must produce the same ``decision_action``.\n\nFor non-terminal actions (CHALLENGE, HOLD), the ultimately-realized\naction is recorded later in the resolution attempt log (see\n``core.resolution``). The enforcement layer's job ends at producing\nthis decision; resolution is a separate, append-only artifact.\n\nAttributes:\n    decision_action: The action this decision produces. Immutable.\n        For terminal actions (ALLOW, BLOCK) this is the realized\n        action; for non-terminal actions (CHALLENGE, HOLD) the\n        realized action is computed from the resolution attempt log.\n    enforcement_rule_applied: The rule that fired, if any: a gate-level\n        tier for a gate's enforcement, a decision-level rule for the\n        decision's. ``None`` when no rule overrode the result.\n    override_log: Ordered list of rule evaluations and outcomes.\n        Records every trigger check performed, including those that\n        did not fire.",
+      "properties": {
+        "decision_action": {
+          "$ref": "#/$defs/DecisionAction"
+        },
+        "enforcement_rule_applied": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Enforcement Rule Applied"
+        },
+        "override_log": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Override Log",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision_action",
+        "enforcement_rule_applied",
+        "override_log"
+      ],
+      "title": "EnforcementDecision",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a policy document id, a\n        rule-set id, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.",
+      "properties": {
+        "jurisdictions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Jurisdictions",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locator"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "GateContext": {
+      "additionalProperties": false,
+      "description": "Gate dispatch envelope — selects the gate and carries its configuration.\n\nBuilt by the reasoner from its own event, feature, and scoring\nartifacts. The framework uses ``gate_id`` for dispatch and authorization,\nthen passes ``gate_config`` through to the selected gate implementation.\n\nAttributes:\n    gate_id: Identifier of the gate this envelope addresses (e.g.,\n        ``\"policy\"``). Must name a gate in the reasoner's gate set.\n    gate_config: Gate-specific configuration, as JSON values (it is\n        stored verbatim in the bundle and must survive the round trip).\n        Validated against the gate's declared ``config_model`` at intake\n        when it has one; otherwise interpreted only by the gate.\n        ``None`` means no gate-specific config.",
+      "properties": {
+        "gate_config": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gate Config"
+        },
+        "gate_id": {
+          "title": "Gate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate_id"
+      ],
+      "title": "GateContext",
+      "type": "object"
+    },
+    "GateInput": {
+      "additionalProperties": false,
+      "description": "The framework's record of one gate invocation.\n\nAttributes:\n    gate_id: Identifier of the gate the framework dispatched to. Mirrors\n        the ``GateContext.gate_id`` it dispatched on.",
+      "properties": {
+        "gate_id": {
+          "title": "Gate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate_id"
+      ],
+      "title": "GateInput",
+      "type": "object"
+    },
+    "GateOutput": {
+      "additionalProperties": false,
+      "description": "Universal output contract for a gate invocation (open per DR-28).\n\nAttributes:\n    gate_id: Identifier of the gate that ran. Equals the\n        ``GateContext.gate_id`` the framework dispatched on.\n    deterministic: ``True`` when the gate is a pure function of its\n        input (the plugin's declared value, recorded here so replay\n        applies the same tiers). Deterministic gates skip enforcement\n        Tiers 2 (adversarial probe) and 4 (low confidence).\n    verdict: The validated verdict enforcement consumes. ``None`` when\n        the gate produced no valid verdict; enforcement routes to HOLD\n        via the schema-failure tier and ``extra`` may carry forensics.\n        When present, ``verdict.gate_id`` equals ``gate_id``.\n    evidence: References to the sources the gate relied on. Enforcement\n        Tier 5 (jurisdiction conflict) runs only when at least one\n        reference carries jurisdictions.\n    evidence_snapshot: Opaque, gate-owned JSON describing what the gate\n        consulted, stored verbatim for audit and replay. ``None`` when\n        the gate has nothing to record.\n    extra: Opaque, gate-specific output fields (JSON values). The\n        framework stores them without interpretation.",
+      "properties": {
+        "deterministic": {
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "evidence_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extra": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Extra",
+          "type": "object"
+        },
+        "gate_id": {
+          "title": "Gate Id",
+          "type": "string"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateVerdict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "gate_id",
+        "deterministic",
+        "verdict"
+      ],
+      "title": "GateOutput",
+      "type": "object"
+    },
+    "GateRecord": {
+      "additionalProperties": false,
+      "description": "What happened at one gate of a decision's gate set.\n\nField semantics by ``status``:\n\n* ``ran`` — the framework invoked the gate (``input``) and it returned a\n  valid universal output (``output``); ``enforcement`` holds the\n  gate-level tiers applied to it.\n* ``failed`` — the gate produced no usable output: it raised, timed out,\n  returned something other than a plain ``GateOutput`` for itself, or no\n  gate is composed under its id. ``output`` is ``None``, ``reason`` says\n  why, ``input`` is set when the framework did invoke it, and\n  ``enforcement`` holds the fail-closed result (the schema-failure tier:\n  HOLD).\n* ``skipped`` — the framework did not invoke the gate: an advisory gate\n  on a recorded decision, or any advisory gate once the decision was\n  already BLOCK. ``reason`` says which; nothing else is set.\n\nAttributes:\n    gate_id: The gate.\n    mandatory: Whether the gate was mandatory for this decision (bound\n        mandatory by the registration or mandated by the deployment).\n    status: ``ran`` | ``skipped`` | ``failed``.\n    reason: Why the gate was skipped or failed; ``None`` when it ran.\n    input: The framework's record that it invoked the gate.\n    output: The gate's universal output (opaque extension included).\n    enforcement: Gate-level enforcement of this gate's output.\n    duration_ms: Wall-clock time of the gate call, or ``None`` when the\n        gate was not invoked.",
+      "properties": {
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "enforcement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnforcementDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gate_id": {
+          "title": "Gate Id",
+          "type": "string"
+        },
+        "input": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mandatory": {
+          "title": "Mandatory",
+          "type": "boolean"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateOutput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "ran",
+            "skipped",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate_id",
+        "mandatory",
+        "status"
+      ],
+      "title": "GateRecord",
+      "type": "object"
+    },
+    "GateVerdict": {
+      "additionalProperties": false,
+      "description": "Universal, enforcement-consumable verdict.\n\nCarries only the fields ``app.enforcement.resolver`` reads.\nExplanation artifacts the framework does not interpret live in the\ngate's ``GateOutput`` extension, not here.\n\nAttributes:\n    gate_id: Identifier of the gate that produced this verdict. Equals\n        the enclosing ``GateOutput.gate_id``.\n    permitted_actions: Actions the gate permits for this event.\n        Enforcement selects the most conservative action from this list.\n    required_controls: Controls that must be applied alongside the\n        action (e.g., ``\"log_step_up_reason\"``,\n        ``\"adversarial_probe_detected\"``,\n        ``\"jurisdiction_conflict\"``). Enforcement matches against\n        sentinel values.\n    confidence: Gate's self-reported confidence in the verdict, in\n        [0.0, 1.0]. Low confidence + high-risk action triggers a HOLD\n        override in enforcement.\n    escalate_to_human: True if the gate recommends human review\n        regardless of the chosen action.\n    escalation_reason: Required when ``escalate_to_human`` is True;\n        describes the specific concern requiring human judgment.",
+      "properties": {
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "escalate_to_human": {
+          "title": "Escalate To Human",
+          "type": "boolean"
+        },
+        "escalation_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Escalation Reason"
+        },
+        "gate_id": {
+          "title": "Gate Id",
+          "type": "string"
+        },
+        "permitted_actions": {
+          "items": {
+            "$ref": "#/$defs/DecisionAction"
+          },
+          "title": "Permitted Actions",
+          "type": "array"
+        },
+        "required_controls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Controls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "gate_id",
+        "permitted_actions",
+        "required_controls",
+        "confidence",
+        "escalate_to_human",
+        "escalation_reason"
+      ],
+      "title": "GateVerdict",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "LabelType": {
+      "description": "Classification of the domain model's output type.\n\nAttributes:\n    NUMERICAL: Continuous score output (e.g., probability ∈ [0.0, 1.0]).\n        Typical of regression models and probability estimators.\n    CATEGORICAL: Discrete class label output (e.g., ``\"POSITIVE\"``,\n        ``\"NEGATIVE\"``). Typical of classifiers with a hard decision\n        boundary.",
+      "enum": [
+        "NUMERICAL",
+        "CATEGORICAL"
+      ],
+      "title": "LabelType",
+      "type": "string"
+    },
+    "NativeSubject": {
+      "additionalProperties": false,
+      "description": "The subject as the reasoner knows it — reserved for DR-32.\n\nThe identity contract (DR-32) lets a reasoner name its subject in its\nown namespace and has the ledger resolve it to ``entity_id``. Until\nthen the field is accepted, validated, stored, and otherwise ignored.\n\nAttributes:\n    native_namespace: The reasoner's identifier namespace (for example\n        the system the key comes from).\n    native_subject_id: The subject's key in that namespace.",
+      "properties": {
+        "native_namespace": {
+          "minLength": 1,
+          "title": "Native Namespace",
+          "type": "string"
+        },
+        "native_subject_id": {
+          "minLength": 1,
+          "title": "Native Subject Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "native_namespace",
+        "native_subject_id"
+      ],
+      "title": "NativeSubject",
+      "type": "object"
+    },
+    "Not": {
+      "additionalProperties": false,
+      "description": "Negation: holds when its child predicate does not.\n\nAttributes:\n    kind: Discriminator, always ``\"not\"``.\n    predicate: The negated child.",
+      "properties": {
+        "kind": {
+          "const": "not",
+          "default": "not",
+          "title": "Kind",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/AllOf",
+              "any": "#/$defs/AnyOf",
+              "compare": "#/$defs/Compare",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Compare"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate"
+      ],
+      "title": "Not",
+      "type": "object"
+    },
+    "ReasonerContext": {
+      "additionalProperties": false,
+      "description": "Generic lattice for domain reasoner evidence submitted to DecisionLedger.\n\nAll fields are domain-agnostic. Domain assemblers translate their internal\nmodel output types into this contract before submitting to the\nframework. The framework stores ReasonerContext verbatim in the\nDecisionBundle (inside the stored submission).\n\n``label_type``, ``label_name``, and ``label_value`` together describe the\nmodel's prediction in a self-documenting way that is interpretable without\ndomain knowledge — for example, a bundle reader can understand\n``label_type=NUMERICAL, label_name=\"risk_score\", label_value=0.87``\nwithout knowing anything about the originating domain.\n\n``feature_set`` captures the complete feature snapshot at the time of\nprediction. This is what makes decisions replayable and auditable from\nthe DecisionBundle without calling back to the source reasoner.\n\nAn LLM-agent reasoner (one that decides with a model call and tools —\nfor example an agent submitting through the MCP tools — rather than a\ntrained scorer) fills the same fields with what it actually ran. The\nledger stores them verbatim and auditors read them, so an optional field\nthe agent cannot fill truthfully stays empty; it is never a placeholder:\n\n- ``model_version``: the provider's model id exactly as called (for\n  example ``\"claude-opus-5-5\"``), not an invented version label.\n- ``model_artifact_sha256``: the SHA-256 of the exact prompt the agent\n  ran (system and instruction text, rendered), so two decisions with\n  the same digest ran the same instructions; ``None`` when no prompt is\n  under the reasoner's control.\n- ``inference_latency_ms``: wall-clock time of the agent's run up to its\n  proposal.\n- ``label_type`` / ``label_name`` / ``label_value``: the agent's own\n  output that its bypass rules read — a ``CATEGORICAL`` verdict such as\n  ``label_name=\"recommended_action\"``, or a ``NUMERICAL`` score such as\n  ``label_name=\"risk_score\"`` — not a restatement of the proposal.\n- ``feature_set``: the scalar inputs the agent actually consulted (tool\n  results it read, flags it computed), plus ``tool_trace_sha256``: the\n  SHA-256 of its ordered tool-call trace, as a string.\n- ``attribution.narrative``: the agent's stated reasoning, verbatim.\n\nAttributes:\n    reasoner_id: Machine identifier for this reasoner, matching the\n        DecisionLedger registration record. Used as the stable key for\n        cross-bundle queries and comparisons.\n    reasoner_name: Human-readable display name. Recorded in the bundle\n        for display contexts — dashboards, review packets, audit\n        reports.\n    model_version: Model artifact version string. Enables detection of\n        version drift between the original decision and any\n        retrospective replay.\n    model_artifact_sha256: SHA-256 hex digest of the model binary at\n        load time. Provides content-addressable proof of which exact\n        artifact produced the prediction — compare against a candidate\n        file to verify. ``None`` for API-based or vendor models where\n        no local artifact exists. Artifact storage and discovery are\n        the domain's responsibility (or an external model registry's).\n    inference_latency_ms: Wall-clock inference time in milliseconds.\n        Recorded in the bundle latency breakdown. ``None`` for batch\n        reasoners where per-observation latency is not meaningful.\n    label_type: Whether the model output is a continuous score or a\n        discrete class label.\n    label_name: Semantic name of the output label\n        (e.g., ``\"risk_score\"``, ``\"fraud_probability\"``,\n        ``\"churn_label\"``). Self-documents the prediction in the bundle.\n    label_value: The model's prediction. ``float`` for ``NUMERICAL``;\n        ``str`` for ``CATEGORICAL``.\n    feature_set: Complete snapshot of the named feature values the model\n        consumed at prediction time. Enables audit and replay without\n        calling back to the source reasoner. Keys are feature names\n        (snake_case); values are the raw feature values.\n    attribution: Optional attribution evidence. Strongly encouraged for\n        audit quality — omitting it reduces the explainability of\n        decisions in the bundle.",
+      "properties": {
+        "attribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttributionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "feature_set": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Feature Set",
+          "type": "object"
+        },
+        "inference_latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inference Latency Ms"
+        },
+        "label_name": {
+          "title": "Label Name",
+          "type": "string"
+        },
+        "label_type": {
+          "$ref": "#/$defs/LabelType"
+        },
+        "label_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Label Value"
+        },
+        "model_artifact_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Artifact Sha256"
+        },
+        "model_version": {
+          "title": "Model Version",
+          "type": "string"
+        },
+        "reasoner_id": {
+          "title": "Reasoner Id",
+          "type": "string"
+        },
+        "reasoner_name": {
+          "title": "Reasoner Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reasoner_id",
+        "reasoner_name",
+        "model_version",
+        "label_type",
+        "label_name",
+        "label_value",
+        "feature_set"
+      ],
+      "title": "ReasonerContext",
+      "type": "object"
+    },
+    "Submission": {
+      "additionalProperties": false,
+      "description": "One decision a reasoner hands the ledger, to record or to gate.\n\nAttributes:\n    schema_version: Wire schema version; always ``2``.\n    reasoner_id: The submitting reasoner. Must equal\n        ``reasoner_context.reasoner_id``.\n    event_id: Reasoner-assigned unique id of the event the decision is\n        about. The default idempotency key and the log correlation id.\n    timestamp: When the event occurred (timezone-aware).\n    entity_id: Framework UUID of the decision subject (typically UUID5\n        of the reasoner's business key).\n    entity_type: Classification of the subject (``\"account\"``,\n        ``\"customer\"``, ...).\n    native_subject: Reserved for the identity contract (DR-32); ignored\n        by the ledger until then.\n    mode: ``\"record\"`` or ``\"gate\"``.\n    proposed_action: The reasoner's action. Required to record (it is\n        the decision); optional to gate (a floor: the ledger's result is\n        never less restrictive than a proposal).\n    bypass: The bypass rule a record cites. Required exactly when\n        ``mode == \"record\"``.\n    reasoner_context: The reasoner's evidence: model identity, the\n        prediction, and the complete feature snapshot it used.\n    gate_contexts: One dispatch envelope per gate, each ``gate_id`` at\n        most once.\n    raw_event: The reasoner's event as JSON, stored verbatim and never\n        interpreted by the ledger.",
+      "properties": {
+        "bypass": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BypassCitation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "entity_id": {
+          "format": "uuid",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "entity_type": {
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "gate_contexts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GateContext"
+          },
+          "title": "Gate Contexts",
+          "type": "array"
+        },
+        "mode": {
+          "enum": [
+            "record",
+            "gate"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "native_subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proposed_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "raw_event": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Raw Event",
+          "type": "object"
+        },
+        "reasoner_context": {
+          "$ref": "#/$defs/ReasonerContext"
+        },
+        "reasoner_id": {
+          "minLength": 1,
+          "title": "Reasoner Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "default": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reasoner_id",
+        "event_id",
+        "timestamp",
+        "entity_id",
+        "entity_type",
+        "mode",
+        "reasoner_context",
+        "raw_event"
+      ],
+      "title": "Submission",
+      "type": "object"
+    }
+  },
+  "$id": "urn:decisionledger:schema:bundle:2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Complete, replayable audit record for every decision (schema version 2).\n\nStored in PostgreSQL (``decisionledger.decision_bundles``), indexed by\n``decision_id``. Every field is logged at decision time — nothing is\ncomputed on read, and the row is never updated once written.\n\nReplay guarantee: given a bundle and its reasoner's enforcement profile\n(the registration's novel-entity feature and jurisdiction conflict\ngroups), re-running the gate-level tiers on each stored gate output,\nre-evaluating the stored bypass rules against the stored submission's\nevidence, and re-running the decision-level rules and the combinator\nproduce the same ``decision_action``. Replay does **not** re-invoke any\ngate, reads no corpus, and needs no reasoner code.\n\nAction vocabulary:\n    * ``decision_action`` — the action this bundle produced at decision\n      time. Immutable.\n    * ``resolution_action`` — for non-terminal decisions (CHALLENGE,\n      HOLD), the action a resolver later produced. Lives on\n      ``core.resolution.ResolutionAttempt`` rows; never on the bundle.\n    * ``realized_action`` — the action ultimately taken on the entity,\n      computed from the bundle plus the resolution attempt log; never\n      stored.\n\nAttributes:\n    schema_version: Always ``2``.\n    decision_id: UUID of this decision record.\n    created_at: When the bundle was constructed (UTC).\n    submission: The reasoner's submission, verbatim — identity, mode,\n        proposal and citation, evidence, gate contexts, and its opaque\n        ``raw_event``.\n    idempotency_key: Deduplication key (the event id unless the caller\n        supplied one).\n    ingestion_timestamp: When the ledger received the submission (over\n        HTTP or through a client; the event's own time is\n        ``submission.timestamp``).\n    gates: One record per gate in the decision's gate set, mandatory\n        gates first, each in gate-set order.\n    decision_action: The action this decision produced.\n    decision_level_rule: The decision-level rule that fired, if any\n        (not necessarily the one that set the final action — a mandatory\n        gate may still be stricter; the combinator line says what did):\n        ``tier3_novel_entity`` (a gated decision about a novel entity,\n        its advisory verdicts held for review, unless an advisory gate's\n        own Tier 1 or 2 outranked it), ``bypass_rule_not_satisfied`` (a\n        record whose cited rule did not hold: HOLD floor), or\n        ``bypass_rule_superseded`` (a record citing a rule while another\n        registered rule that also holds justifies a stricter action:\n        floor at that action).\n    override_log: The decision-level trail — the bypass check or the\n        novel-entity tier, then the combinator line. Each gate's own\n        tier log is in its ``GateRecord.enforcement``.\n    bypass_rule_holds: For a record, whether the cited rule held\n        against the submission's evidence; ``None`` for a gated\n        decision. Equals ``bypass_check.holds``.\n    bypass_check: For a record, the cited rule as evaluated (snapshot)\n        and the values it read; ``None`` for a gated decision.\n    other_bypass_checks: For a record, every other rule the reasoner\n        registers, as evaluated (snapshots), so replay can re-check that\n        no stricter rule also held; empty for a gated decision.\n    registration_version: The version (content address) of the\n        reasoner's registration the decision was made under (DR-31).\n        Replay enforces against that version's snapshot, served at\n        ``GET /api/v1/reasoners/{reasoner_id}/registrations/{version}``.\n        ``None`` only on a bundle written before registrations were\n        versioned.\n    latency_breakdown: The ledger's own steps in milliseconds:\n        ``gate_ms`` (wall-clock time of the whole gate phase; each\n        gate's own time is in its record) and ``enforcement_ms``, plus\n        any step an in-process caller of ``submit`` reported. A reasoner\n        reports its own timings itself.",
+  "properties": {
+    "bypass_check": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BypassCheck"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bypass_rule_holds": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Bypass Rule Holds"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "decision_action": {
+      "$ref": "#/$defs/DecisionAction"
+    },
+    "decision_id": {
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "decision_level_rule": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Decision Level Rule"
+    },
+    "gates": {
+      "items": {
+        "$ref": "#/$defs/GateRecord"
+      },
+      "title": "Gates",
+      "type": "array"
+    },
+    "idempotency_key": {
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "ingestion_timestamp": {
+      "format": "date-time",
+      "title": "Ingestion Timestamp",
+      "type": "string"
+    },
+    "latency_breakdown": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Latency Breakdown",
+      "type": "object"
+    },
+    "other_bypass_checks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/BypassCheck"
+      },
+      "title": "Other Bypass Checks",
+      "type": "array"
+    },
+    "override_log": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Override Log",
+      "type": "array"
+    },
+    "registration_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Registration Version"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "submission": {
+      "$ref": "#/$defs/Submission"
+    }
+  },
+  "required": [
+    "decision_id",
+    "created_at",
+    "submission",
+    "idempotency_key",
+    "ingestion_timestamp",
+    "gates",
+    "decision_action",
+    "decision_level_rule",
+    "override_log",
+    "bypass_rule_holds",
+    "bypass_check",
+    "latency_breakdown"
+  ],
+  "title": "DecisionBundle",
+  "type": "object"
+}

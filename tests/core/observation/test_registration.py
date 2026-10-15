@@ -9,9 +9,16 @@ Key contracts (DR-29, DR-30):
   through JSON with the registration.
 - Registrations, bindings, and rules are immutable.
 - A registry satisfies ``ReasonerRegistry`` structurally.
+- ``registration_version`` content-addresses a registration (DR-31): equal
+  registrations have equal versions in every process (sets are canonically
+  ordered), and any change to what enforcement or intake reads changes it.
 """
 
 from __future__ import annotations
+
+import os
+import subprocess
+import sys
 
 import pytest
 from pydantic import ValidationError
@@ -24,6 +31,8 @@ from core.observation import (
     GateBinding,
     ReasonerRegistration,
     ReasonerRegistry,
+    canonical_registration,
+    registration_version,
 )
 
 ALLOW, CHALLENGE, HOLD, BLOCK = (
@@ -303,3 +312,92 @@ def test_registry_stub_get_raises_for_unknown_id():
     with pytest.raises(UnregisteredReasonerError) as exc_info:
         _RegistryStub([_registration()]).get("unknown-reasoner")
     assert exc_info.value.reasoner_id == "unknown-reasoner"
+
+
+# ---------------------------------------------------------------------------
+# registration_version — the content address every bundle records (DR-31)
+# ---------------------------------------------------------------------------
+
+
+def _profiled(**overrides: object) -> ReasonerRegistration:
+    fields: dict[str, object] = {
+        "bypass_rules": (_rule(), _rule("high-score", action=BLOCK)),
+        "recordable_actions": frozenset({ALLOW, BLOCK}),
+        "novel_entity_feature": "thin_history",
+        "jurisdiction_conflict_groups": (
+            frozenset({"REGION_A", "REGION_C"}),
+            frozenset({"REGION_B"}),
+        ),
+    }
+    fields.update(overrides)
+    return _registration(**fields)
+
+
+def test_a_registration_version_is_a_short_hex_digest():
+    version = registration_version(_profiled())
+    assert len(version) == 16
+    assert int(version, 16) >= 0
+
+
+def test_equal_registrations_have_equal_versions():
+    reloaded = ReasonerRegistration.model_validate_json(_profiled().model_dump_json())
+    assert registration_version(reloaded) == registration_version(_profiled())
+
+
+def test_the_canonical_form_sorts_every_set():
+    data = canonical_registration(_profiled())
+    assert data["recordable_actions"] == ["ALLOW", "BLOCK"]
+    assert data["jurisdiction_conflict_groups"] == [
+        ["REGION_A", "REGION_C"],
+        ["REGION_B"],
+    ]
+    # ...and reloads into an equal registration.
+    assert ReasonerRegistration.model_validate_json(
+        ReasonerRegistration.model_validate(data, strict=False).model_dump_json()
+    ) == ReasonerRegistration.model_validate_json(_profiled().model_dump_json())
+
+
+_VERSION_IN_A_SUBPROCESS = """
+from core.actions import DecisionAction as A
+from core.observation import GateBinding, ReasonerRegistration, registration_version
+r = ReasonerRegistration(
+    reasoner_id="stub-reasoner",
+    reasoner_name="Test Reasoner",
+    gates=(GateBinding(gate_id="fake"),),
+    recordable_actions=frozenset({A.ALLOW, A.HOLD, A.BLOCK}),
+    jurisdiction_conflict_groups=(frozenset({"X", "Y", "Z", "W"}),),
+)
+print(registration_version(r))
+"""
+
+
+def test_the_version_does_not_depend_on_the_process_hash_seed():
+    versions = {
+        subprocess.run(  # noqa: S603 (fixed interpreter and script)
+            [sys.executable, "-c", _VERSION_IN_A_SUBPROCESS],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout.strip()
+        for seed in ("1", "2", "3", "4")
+    }
+    assert len(versions) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"reasoner_name": "Renamed"},
+        {"gates": (GateBinding(gate_id="fake", mandatory=True),)},
+        {"bypass_rules": (_rule(version="2"), _rule("high-score", action=BLOCK))},
+        {"recordable_actions": frozenset({ALLOW, BLOCK, HOLD})},
+        {"novel_entity_feature": None},
+        {"jurisdiction_conflict_groups": (frozenset({"REGION_A"}),)},
+    ],
+    ids=["name", "gate-set", "rule-version", "recordable", "tier3", "tier5"],
+)
+def test_any_change_changes_the_version(change):
+    assert registration_version(_profiled(**change)) != registration_version(
+        _profiled()
+    )

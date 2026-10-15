@@ -1,10 +1,12 @@
 """In-process ATO pipeline driver for the eval harness.
 
-Builds the same ``FrameworkServices`` the API lifespan builds (via
+Builds the same ``FrameworkServices`` the ledger's lifespan builds (via
 ``app.bootstrap.build_framework_services``) and the same ``AtoServices``
-the ATO plugin builds, then exposes async wrappers around
-``ato_reasoner.pipeline.run_ato_decision()``. Because both
-go through the plugin seam, eval cannot drift from runtime wiring.
+ATO's own service builds (``build_ato_services``), then exposes async
+wrappers around ``ato_reasoner.pipeline.run_ato_decision()``, which submits
+through a ``LocalClient`` over those framework services — the same
+operation the ledger's HTTP route runs. Eval cannot drift from runtime
+wiring.
 
 Satisfies the framework's ``eval.adapter.EvalDriver`` protocol (and with
 it the consistency ``PipelineDriver`` and robustness ``RobustnessDriver``
@@ -16,9 +18,9 @@ wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
 the production failure surfaces without polluting production code. Both
 build a policy gate (``policy_rag_gate.PolicyGate``, the RAG policy gate ATO
 binds) around the wrapper and swap it into the framework's composed gates
-for one decision; the retriever, prompt registry, and per-reasoner profiles
-they reuse come from the composed policy gate itself (DR-28: the gate owns
-them).
+for one decision (a ``LocalClient`` over those services); the retriever,
+prompt registry, and per-reasoner profiles they reuse come from the composed
+policy gate itself (DR-28: the gate owns them).
 """
 
 from __future__ import annotations
@@ -30,13 +32,15 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from app.bootstrap import build_framework_services
+from app.client import LocalClient
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from app.gates import discover_gates
 from app.settings import FrameworkSettings
 from ato_reasoner.assembler import build_submission
 from ato_reasoner.pipeline import run_ato_decision
-from ato_reasoner.plugin import PLUGIN, AtoPlugin, resolve_model_path
+from ato_reasoner.plugin import PLUGIN, build_ato_services, resolve_model_path
 from ato_reasoner.registry import ATO_REGISTRATION
+from ato_reasoner.settings import AtoSettings
 from core.bundle import GateRecord
 from core.gate import GateInput, GateOutput
 from eval.dimensions.consistency import PipelineRunResult
@@ -51,8 +55,8 @@ if TYPE_CHECKING:
     from app.plugin import FrameworkServices
     from ato_reasoner.events import LoginEvent
     from ato_reasoner.plugin import AtoServices
-    from ato_reasoner.settings import AtoSettings
     from core.actions import DecisionAction
+    from core.bundle import DecisionBundle
     from core.llm.client import CompletionResult
     from policy_rag_gate.models.snippet import RetrievedSnippet
     from policy_rag_gate.retriever import PolicyRetriever
@@ -111,8 +115,8 @@ class PipelineDriver:
             )
             raise ValueError(msg)
 
-        plugin = PLUGIN if ato_settings is None else AtoPlugin(settings=ato_settings)
-        resolve_model_path(plugin.settings)
+        ato = ato_settings if ato_settings is not None else AtoSettings()
+        resolve_model_path(ato)
 
         # Every installed gate, with the policy gate bound to the settings
         # checked above rather than to the entry point's own lazy settings.
@@ -120,8 +124,13 @@ class PipelineDriver:
             PolicyGatePlugin(settings=gate) if p.gate_id == POLICY_GATE_ID else p
             for p in discover_gates()
         ]
-        self._framework = build_framework_services(fw, [plugin], gate_plugins)
-        self._services = plugin.build_services(self._framework)
+        self._framework = build_framework_services(fw, [PLUGIN], gate_plugins)
+        self._client = LocalClient(self._framework)
+        try:
+            self._services = build_ato_services(ato)
+        except Exception:
+            self._framework.close()
+            raise
 
         log.info(
             "eval.pipeline_driver.ready",
@@ -170,6 +179,38 @@ class PipelineDriver:
     def services(self) -> AtoServices:
         """The ATO reasoner's services (feature service, scorer, Redis)."""
         return self._services
+
+    @property
+    def client(self) -> LocalClient:
+        """The in-process ledger client the pipeline submits through."""
+        return self._client
+
+    async def decide(
+        self,
+        event: LoginEvent,
+        *,
+        client: LocalClient | None = None,
+        services: AtoServices | None = None,
+    ) -> DecisionBundle:
+        """Run one event through the pipeline and return the written bundle.
+
+        Args:
+            event: The login.
+            client: The ledger to submit to (a fault-injected one); this
+                driver's own by default.
+            services: ATO's services (a mislabeled corpus version); this
+                driver's own by default.
+
+        Returns:
+            The bundle the ledger wrote for the decision.
+        """
+        ledger = client if client is not None else self._client
+        decision = await run_ato_decision(
+            event=event,
+            services=services if services is not None else self._services,
+            client=ledger,
+        )
+        return await ledger.get_bundle(decision.receipt.decision_id)
 
     def _policy_gate(self) -> PolicyGate:
         """Return the composed policy gate this reasoner routes to.
@@ -222,11 +263,7 @@ class PipelineDriver:
         """
         last_bundle = None
         for event in events:
-            last_bundle = await run_ato_decision(
-                event=event,
-                services=self._services,
-                framework=self._framework,
-            )
+            last_bundle = await self.decide(event)
 
         if last_bundle is None:
             msg = "PipelineDriver.run() requires at least one event"
@@ -254,12 +291,7 @@ class PipelineDriver:
 
     async def run_event(self, event: LoginEvent) -> DecisionAction:
         """Run a single event through the normal pipeline."""
-        bundle = await run_ato_decision(
-            event=event,
-            services=self._services,
-            framework=self._framework,
-        )
-        return bundle.decision_action
+        return (await self.decide(event)).decision_action
 
     async def run_with_forced_schema_failure(
         self,
@@ -351,10 +383,11 @@ class PipelineDriver:
                 retriever=policy_gate.retriever,
                 profiles=policy_gate.profiles,
             )
-            bundle = await run_ato_decision(
-                event=event,
-                services=self._services,
-                framework=self._framework_with_policy_gate(faulty_gate),
+            bundle = await self.decide(
+                event,
+                client=self._client.with_framework(
+                    self._framework_with_policy_gate(faulty_gate)
+                ),
             )
             return bundle.decision_action
 
@@ -366,20 +399,20 @@ class PipelineDriver:
                 retriever=_RaisingRetriever(policy_gate.retriever),  # type: ignore[arg-type]
                 profiles=policy_gate.profiles,
             )
-            bundle = await run_ato_decision(
-                event=event,
-                services=self._services,
-                framework=self._framework_with_policy_gate(faulty_gate),
+            bundle = await self.decide(
+                event,
+                client=self._client.with_framework(
+                    self._framework_with_policy_gate(faulty_gate)
+                ),
             )
             return bundle.decision_action
 
         if fallback_kind == "corpus_mismatch":
-            bundle = await run_ato_decision(
-                event=event,
+            bundle = await self.decide(
+                event,
                 services=dataclasses.replace(
                     self._services, corpus_version="stale-v0-mismatch"
                 ),
-                framework=self._framework,
             )
             return bundle.decision_action
 

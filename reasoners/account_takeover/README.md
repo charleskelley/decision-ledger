@@ -28,7 +28,7 @@ Two entry points in `pyproject.toml`, both named after the `reasoner_id`:
 
 | Group | Target | Consumed by |
 | --- | --- | --- |
-| `decisionledger.reasoners` | `ato_reasoner.plugin:PLUGIN` | `app.plugins.discover_plugins` (runtime: router, registration, prompts, corpus, services) |
+| `decisionledger.reasoners` | `ato_reasoner.plugin:PLUGIN` | `app.plugins.discover_plugins` (the registration; the policy gate reads `prompts_dir` and `corpus_dir`) |
 | `decisionledger.eval_adapters` | `ato_reasoner.eval.adapter:ADAPTER` | `eval.adapter.load_eval_adapter` (eval harness) |
 
 The root workspace installs it through the `reasoners` dependency group
@@ -39,6 +39,25 @@ points refresh only on reinstall: re-run `uv sync` after editing this
 Infrastructure: `compose.yaml` defines the `redis` service, pulled into the
 root stack by `include:` in `docker-compose.yml`. Make targets come from
 `reasoner.mk`, included by the root `Makefile`.
+
+## Runs as its own service (DR-31)
+
+The ledger mounts no reasoner router. ATO is its own FastAPI service,
+`ato_reasoner.app:create_app` (`make serve-account_takeover`, port 8001),
+serving `POST /api/v1/ato/decisions`: it scores the login (Redis feature
+windows, the XGBoost scorer), builds its `Submission`, and submits it
+through a ledger client (`ato_reasoner.pipeline.run_ato_decision`):
+
+- `ATO_LEDGER_URL` unset (the default): the ledger runs in ATO's process
+  (`LocalClient`, composed exactly as the ledger service would be);
+- `ATO_LEDGER_URL=http://localhost:8000`: ATO calls that ledger over HTTP
+  (`HttpClient`) with its API key `ATO_LEDGER_KEY` (configured on the
+  ledger as `DECISIONLEDGER_API_KEYS=ato-reasoner:<key>`).
+
+The response summarizes the ledger's receipt; the full bundle, replay, and
+the account's decision timeline are the ledger's routes
+(`GET /api/v1/decisions/{id}`, `.../replay`,
+`GET /api/v1/entities/{entity_id}/decisions`).
 
 ## Make targets (run from the repo root)
 
@@ -51,6 +70,7 @@ root stack by `include:` in `docker-compose.yml`. Make targets come from
 | `make prepare-account_takeover` | Build the policy index and train the scorer if the artifact is missing |
 | `make eval-account_takeover` | Run the framework eval harness (consistency, robustness) with this reasoner's adapter (slow, paid); the policy gate's own eval (`make eval-gate-policy_rag`) reads this reasoner's retrieval, faithfulness, and citation datasets |
 | `make capture-baselines-account_takeover` | Re-capture faithfulness fixtures from live gate runs |
+| `make serve-account_takeover` | Run ATO's own service (port 8001; `ATO_LEDGER_URL` selects an HTTP ledger) |
 
 The aggregate root targets (`make train`, `make build-policy-index`,
 `make prepare-reasoners`, `make eval`) fan out to these.
@@ -65,6 +85,8 @@ the process environment):
 | `ATO_REDIS_URL` | `redis://localhost:6379` | Feature windows, dedup store, login-event stream |
 | `ATO_SCORER_MODEL_PATH` | packaged `scorer/models/ato-v1.ubj` | Override the scorer artifact |
 | `ATO_CORPUS_VERSION` | `ato-v1` | Corpus version recorded in every Decision Bundle |
+| `ATO_LEDGER_URL` | blank | The ledger ATO's service submits to over HTTP; blank runs the ledger in process |
+| `ATO_LEDGER_KEY` | blank | ATO's API key for that ledger (`X-DecisionLedger-Key`) |
 | `ATO_REDIS_PORT` | `6379` | Host port mapping in `compose.yaml` (Compose only) |
 
 ## Tests

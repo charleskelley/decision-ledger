@@ -39,6 +39,7 @@ from fastapi.testclient import TestClient
 
 from app.audit.schema import apply_canonical_schema
 from app.audit.store import BundleStore
+from app.auth import KEY_HEADER
 from app.gates import ComposedGate
 from app.main import create_app
 from app.reasoner_registry import StaticReasonerRegistry
@@ -48,6 +49,7 @@ from core.actions import DecisionAction
 from core.exceptions import BundleSchemaUnsupportedError
 from core.observation import GateBinding, GateContext, ReasonerRegistration
 from tests._fake_gate.plugin import FakeGatePlugin, FakeLookupGatePlugin
+from tests._memory_ledger import STUB_KEY, TEST_KEYRING
 from tests._stub_reasoner.assembler import build_submission
 from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.plugin import PLUGIN
@@ -338,20 +340,28 @@ def test_a_v1_row_is_looked_up_as_stored_but_not_loaded_or_replayed(
 
 
 def test_the_http_routes_return_a_v1_row_and_refuse_to_replay_it(v1_decision_id):
-    app = create_app(plugins=[PLUGIN], gate_plugins=[FakeGatePlugin()])
+    app = create_app(
+        plugins=[PLUGIN], gate_plugins=[FakeGatePlugin()], keyring=TEST_KEYRING
+    )
+    headers = {KEY_HEADER: STUB_KEY}
     with TestClient(app) as client:
-        got = client.get(f"/api/v1/decisions/{v1_decision_id}")
+        got = client.get(f"/api/v1/decisions/{v1_decision_id}", headers=headers)
         assert got.status_code == 200
         body = got.json()
         assert body["schema_version"] == 1
         assert body["decision_action"] == "ALLOW"
         assert body["raw_event"]["route"] == "FAST_PATH_ALLOW"
 
-        replayed = client.post(f"/api/v1/decisions/{v1_decision_id}/replay")
+        replayed = client.post(
+            f"/api/v1/decisions/{v1_decision_id}/replay", headers=headers
+        )
         assert replayed.status_code == 409
-        detail = replayed.json()["detail"]
-        assert detail["error_code"] == "BUNDLE_SCHEMA_UNSUPPORTED"
-        assert detail["details"] == {"schema_version": 1, "supported_schema_version": 2}
+        problem = replayed.json()
+        assert problem["code"] == "BUNDLE_SCHEMA_UNSUPPORTED"
+        assert (problem["schema_version"], problem["supported_schema_version"]) == (
+            1,
+            2,
+        )
 
 
 # ---------------------------------------------------------------------------

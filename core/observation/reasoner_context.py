@@ -132,6 +132,29 @@ class ReasonerContext(BaseModel):
     prediction. This is what makes decisions replayable and auditable from
     the DecisionBundle without calling back to the source reasoner.
 
+    An LLM-agent reasoner (one that decides with a model call and tools —
+    for example an agent submitting through the MCP tools — rather than a
+    trained scorer) fills the same fields with what it actually ran. The
+    ledger stores them verbatim and auditors read them, so an optional field
+    the agent cannot fill truthfully stays empty; it is never a placeholder:
+
+    - ``model_version``: the provider's model id exactly as called (for
+      example ``"claude-opus-5-5"``), not an invented version label.
+    - ``model_artifact_sha256``: the SHA-256 of the exact prompt the agent
+      ran (system and instruction text, rendered), so two decisions with
+      the same digest ran the same instructions; ``None`` when no prompt is
+      under the reasoner's control.
+    - ``inference_latency_ms``: wall-clock time of the agent's run up to its
+      proposal.
+    - ``label_type`` / ``label_name`` / ``label_value``: the agent's own
+      output that its bypass rules read — a ``CATEGORICAL`` verdict such as
+      ``label_name="recommended_action"``, or a ``NUMERICAL`` score such as
+      ``label_name="risk_score"`` — not a restatement of the proposal.
+    - ``feature_set``: the scalar inputs the agent actually consulted (tool
+      results it read, flags it computed), plus ``tool_trace_sha256``: the
+      SHA-256 of its ordered tool-call trace, as a string.
+    - ``attribution.narrative``: the agent's stated reasoning, verbatim.
+
     Attributes:
         reasoner_id: Machine identifier for this reasoner, matching the
             DecisionLedger registration record. Used as the stable key for

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# decisionledger-mcp — the ledger as six MCP tools, for agents
+# =============================================================================
+#
+# A uv workspace member and a client of the ledger: it talks to a ledger
+# service through app.client.HttpClient and publishes no plugin (no
+# decisionledger.* entry point). The MCP server is hand-rolled (JSON-RPC 2.0
+# over stdio, no MCP SDK): six tools with descriptions written for agents
+# (plan section 9).
+
+[project]
+name = "decisionledger-mcp"
+version = "0.1.0"
+description = "MCP server exposing a DecisionLedger as six tools for agents."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "pydantic>=2.7,<3",
+    "structlog>=24.1,<25",
+]
+
+[project.scripts]
+decisionledger-mcp = "decisionledger_mcp.__main__:main"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/decisionledger_mcp"]

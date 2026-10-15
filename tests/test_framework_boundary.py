@@ -55,15 +55,27 @@ Scans and build-metadata checks codify those rules:
   band names, as a listed exception that must stay needed. Member Markdown
   is not scanned: the reference policy corpus is indexed content, and its
   documents may name the bands of their time.
+- **Ledger API** (DR-31, Phase 3): the framework no longer hosts reasoners.
+  No framework file mounts a plugin's router, builds a reasoner's
+  request-time services, or keeps them on ``app.state``; reasoners run as
+  their own services or in process through ``app.client.LocalClient``. No
+  framework file names any workspace reasoner (package, distribution, or
+  ``reasoner_id``, read from the members' pyprojects). The conformance suite
+  is a black box: it reaches an instance over HTTP only and imports no
+  framework, member, or test code. Integration members (``integrations/*``)
+  reach the ledger through ``app.client`` only and publish no plugin.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
 - **Framework DDL**: ``app/audit/sql`` creates no Postgres extension.
 - **Root build metadata** (``pyproject.toml`` via ``tomllib``): the framework
   distribution depends on exactly the framework set (no reasoner, gate
-  member, or gate infrastructure), declares no optional extras and no entry
-  points of its own, and ships only ``core``, ``app``, ``eval``; every
-  third-party module the framework imports comes from that set.
+  member, or gate infrastructure; ``httpx`` and ``starlette`` since Phase 3,
+  for the HTTP client and the problem handlers), declares no optional
+  extras and no entry points of its own, and ships only ``core``, ``app``,
+  ``eval``; every third-party module the
+  framework imports comes from that set. The uv workspace is exactly
+  ``reasoners/*``, ``gates/*``, and ``integrations/*``.
 - **Member build metadata**: each reasoner workspace member under
   ``reasoners/*`` declares its runtime plugin and eval adapter entry points
   itself, and each gate member under ``gates/*`` declares its gate entry
@@ -92,6 +104,8 @@ EVAL_DIR = REPO_ROOT / "eval"
 FRAMEWORK_SQL_DIR = APP_DIR / "audit" / "sql"
 REASONERS_DIR = REPO_ROOT / "reasoners"
 GATES_DIR = REPO_ROOT / "gates"
+INTEGRATIONS_DIR = REPO_ROOT / "integrations"
+CONFORMANCE_DIR = REPO_ROOT / "conformance"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 FRAMEWORK_DIRS = (APP_DIR, CORE_DIR, EVAL_DIR)
@@ -222,6 +236,24 @@ FORMER_HANDOFF_HOMES = (
     "app/decide.py",
 )
 
+# How the framework hosted reasoners until Phase 3 (DR-31): it mounted each
+# plugin's router into its app and built each plugin's request-time services
+# onto ``app.state.reasoners``. A reasoner now runs as its own service, or in
+# process through ``app.client.LocalClient``; the framework serves only its
+# own routes.
+FORMER_REASONER_HOSTING_TOKENS = re.compile(
+    r"\b(ReasonerServices|build_services)\b|\bstate\.reasoners\b|"
+    r"\bplugin\.router\b|\binclude_router\(\s*plugin"
+)
+
+#: Modules an integration member may import from ``app``: the clients and
+#: the API's wire models. Anything else in ``app`` is the ledger's own runtime.
+INTEGRATION_APP_MODULES = frozenset({"app.client", "app.api.models"})
+
+#: Third-party roots the conformance suite may import: it drives an instance
+#: over HTTP and reads its own example payloads.
+CONFORMANCE_THIRD_PARTY = frozenset({"pytest", "httpx", "yaml"})
+
 # Gate contracts whose subclasses the framework must never define or import:
 # the bundle stores the universal base of each, and ``app/submit.py`` fails
 # a gate closed when its output, verdict, or evidence reference is a
@@ -333,9 +365,9 @@ def test_framework_code_does_not_import_gate_members_or_tests():
 
 
 def _workspace_member_packages() -> set[str]:
-    """The import package of every reasoner and gate workspace member."""
+    """The import package of every reasoner, gate, and integration member."""
     packages: set[str] = set()
-    for root in (REASONERS_DIR, GATES_DIR):
+    for root in (REASONERS_DIR, GATES_DIR, INTEGRATIONS_DIR):
         for pyproject in _member_pyprojects(root):
             package = _member_package(
                 tomllib.loads(pyproject.read_text(encoding="utf-8"))
@@ -371,12 +403,21 @@ _LLM_SDKS = frozenset({"openai", "anthropic"})
 
 
 def test_llm_sdks_are_imported_only_by_the_policy_gates_llm_adapters():
-    """DR-23 across every tree: framework, reasoners, gates, and tests.
+    """DR-23 across every tree: framework, reasoners, gates, integrations,
+    the conformance suite, and tests.
 
     An AST scan, so indented and function-local imports count and docstring
     examples do not.
     """
-    roots = (APP_DIR, CORE_DIR, EVAL_DIR, REASONERS_DIR, GATES_DIR)
+    roots = (
+        APP_DIR,
+        CORE_DIR,
+        EVAL_DIR,
+        REASONERS_DIR,
+        GATES_DIR,
+        INTEGRATIONS_DIR,
+        CONFORMANCE_DIR,
+    )
     offenders = [
         (_rel(path), sorted(_imported_roots(path) & _LLM_SDKS))
         for root in (*roots, REPO_ROOT / "tests")
@@ -611,6 +652,157 @@ def test_the_observation_handoff_left_its_former_homes():
     assert not leftovers, f"former handoff modules still exist: {leftovers}"
 
 
+# ---------------------------------------------------------------------------
+# Ledger API — the framework serves its own routes only (DR-31, Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_framework_no_longer_hosts_reasoners():
+    """No framework file mounts a reasoner's router or builds its services.
+
+    The ledger is a service reasoners call (``POST /api/v1/decisions``), or
+    a function they call in process through ``LocalClient``; it never runs
+    a reasoner's code. A reasoner plugin publishes its registration and the
+    assets its gates read, nothing more.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted(
+            {m.group(0) for m in FORMER_REASONER_HOSTING_TOKENS.finditer(text)}
+        )
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, f"framework files still host reasoners: {offenders}"
+
+
+def _reasoner_member_names() -> set[str]:
+    """Every workspace reasoner's distribution, package, and ``reasoner_id``."""
+    names: set[str] = set()
+    for pyproject in _member_pyprojects(REASONERS_DIR):
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        names.add(data["project"]["name"])
+        package = _member_package(data)
+        if package is not None:
+            names.add(package)
+        eps = data["project"].get("entry-points", {})
+        names.update(eps.get("decisionledger.reasoners", {}))
+    return names
+
+
+def _name_pattern(name: str) -> str:
+    """``name`` in any case, with ``-`` and ``_`` interchangeable."""
+    return "".join("[-_]" if char in "-_" else re.escape(char) for char in name)
+
+
+def test_framework_names_no_workspace_reasoner():
+    """No framework file names any reasoner member, however it is spelled.
+
+    The names are read from every member's pyproject (its distribution, its
+    import package, and the ``reasoner_id`` its entry point is published
+    under), so a reasoner added later is covered without editing this test.
+    Matched case-insensitively, with ``-`` and ``_`` interchangeable, and
+    inside longer identifiers too (``EXAMPLE_REASONER_ID``,
+    ``ato_reasoner_url``): only a letter or digit right before the name
+    breaks the match.
+    """
+    names = _reasoner_member_names()
+    assert {"ato-reasoner", "ato_reasoner"} <= names, names
+    alternatives = "|".join(sorted({_name_pattern(n) for n in names}))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])({alternatives})", re.IGNORECASE)
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        hits = sorted(
+            {m.group(0) for m in pattern.finditer(path.read_text(encoding="utf-8"))}
+        )
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, f"framework files name a workspace reasoner: {offenders}"
+
+
+def test_conformance_suite_is_a_black_box():
+    """The conformance suite reaches an instance over HTTP and nothing else.
+
+    It is the artifact a reasoner team runs against any DecisionLedger
+    instance instead of reading the code, so it imports no framework,
+    member, or test module — only the standard library, ``pytest``,
+    ``httpx``, ``yaml``, and its own helpers.
+    """
+    files = _py_files(CONFORMANCE_DIR)
+    assert files, f"no conformance suite found under {_rel(CONFORMANCE_DIR)}"
+    allowed = CONFORMANCE_THIRD_PARTY | {"conformance", "__future__"}
+    offenders = [
+        (_rel(path), sorted(roots))
+        for path in files
+        if (
+            roots := {
+                root
+                for root in _imported_roots(path) - allowed
+                if root not in sys.stdlib_module_names
+            }
+        )
+    ]
+    assert not offenders, f"conformance code imports beyond HTTP: {offenders}"
+
+
+def _imported_modules(path: Path) -> set[str]:
+    """Full dotted names of every absolute import in ``path`` (AST, any depth)."""
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            modules.add(node.module)
+    return modules
+
+
+def test_integration_members_reach_the_ledger_only_through_its_client():
+    """An integration (the MCP server) is a ledger client, not a deployment.
+
+    Its source imports no reasoner or gate member and nothing under
+    ``tests``, and from ``app`` only the clients and the API's wire models:
+    composing gates, writing bundles, or running enforcement is the
+    ledger's job, reached over ``LocalClient`` or ``HttpClient``.
+    """
+    members = _member_pyprojects(INTEGRATIONS_DIR)
+    assert members, "no integration workspace members found under integrations/*"
+    forbidden_roots = (
+        _workspace_member_packages()
+        - {_member_package(tomllib.loads(p.read_text("utf-8"))) for p in members}
+    ) | {"reasoner", "reasoners", "gates", "tests", "eval"}
+    offenders: list[tuple[str, list[str]]] = []
+    for src in sorted(INTEGRATIONS_DIR.glob("*/src")):
+        for path in _py_files(src):
+            modules = _imported_modules(path)
+            bad = sorted(
+                module
+                for module in modules
+                if module.split(".")[0] in forbidden_roots
+                or (
+                    module.split(".")[0] == "app"
+                    and module not in INTEGRATION_APP_MODULES
+                )
+            )
+            if bad:
+                offenders.append((_rel(path), bad))
+    assert not offenders, f"integration members bypass the ledger client: {offenders}"
+
+
+def test_every_integration_member_publishes_no_plugin():
+    """An integration declares no reasoner, gate, or eval-adapter entry point."""
+    problems: list[str] = []
+    for pyproject in _member_pyprojects(INTEGRATIONS_DIR):
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        groups = sorted(
+            group
+            for group in data["project"].get("entry-points", {})
+            if group.startswith("decisionledger.")
+        )
+        if groups:
+            problems.append(f"{_rel(pyproject)}: publishes {groups}")
+    assert not problems, problems
+
+
 def test_framework_ddl_creates_no_extension():
     """The framework's Postgres needs no extension (DR-27).
 
@@ -708,16 +900,20 @@ def test_framework_never_defines_or_imports_a_gate_contract_subclass():
 _REASONER_DEPS = re.compile(r"^(xgboost|pandas|redis|sqlalchemy|alembic)\b", re.I)
 _GATE_MEMBER_DEPS = re.compile(r"^decisionledger-gate-", re.I)
 
-#: The framework distribution's complete runtime dependency set after Phase
-#: 1b (plan section 2): contracts, API, Postgres, config, and logging.
+#: The framework distribution's complete runtime dependency set: contracts,
+#: API, Postgres, config, and logging (Phase 1b, plan section 2), plus, since
+#: Phase 3, the HTTP client ``app.client.HttpClient`` speaks to a remote
+#: ledger with and the ASGI toolkit the problem handlers import directly.
 _FRAMEWORK_DEPENDENCIES = frozenset(
     {
         "fastapi",
+        "httpx",
         "orjson",
         "psycopg",
         "pydantic",
         "pydantic-settings",
         "pyyaml",
+        "starlette",
         "structlog",
         "uvicorn",
     }
@@ -816,6 +1012,12 @@ def test_root_wheel_ships_only_framework_packages():
     """The framework wheel is exactly core, app, eval."""
     packages = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
     assert set(packages) == {"core", "app", "eval"}, packages
+
+
+def test_workspace_members_are_reasoners_gates_and_integrations():
+    """Every plugin and client lives in a member directory of its kind."""
+    members = _pyproject()["tool"]["uv"]["workspace"]["members"]
+    assert sorted(members) == ["gates/*", "integrations/*", "reasoners/*"], members
 
 
 def _member_pyprojects(root: Path) -> list[Path]:

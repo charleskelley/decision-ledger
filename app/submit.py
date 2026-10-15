@@ -36,7 +36,14 @@ The steps, in order:
    (``app.enforcement.resolver.resolve_decision``); a record's cited rule,
    and every other rule its reasoner registers, are evaluated against its
    evidence and snapshotted into the bundle.
-7. **Write** the version-2 bundle.
+7. **Write** the version-2 bundle, stamped with the
+   ``registration_version`` of the registration intake used (DR-31), so
+   replay enforces against that version's snapshot.
+
+``decide()`` runs steps 1-6 and returns the bundle without writing it (the
+batch route writes many in one round trip); ``submit()`` is ``decide()``
+plus the write. Both are what the ledger's API operations call, so an HTTP
+request, a ``LocalClient`` call, and an eval run decide identically.
 
 Async (DR-23): the gates are the only awaits; enforcement and the store are
 synchronous and run inline. The function logs no per-step events of its own
@@ -62,7 +69,7 @@ from core.bundle import GateRecord
 from core.exceptions import SubmissionContractError
 from core.gate import GateInput
 from core.gate_request import GateRequest
-from core.observation import GateContext
+from core.observation import GateContext, registration_version
 from core.submission import (
     effective_gate_set,
     evaluate_bypass,
@@ -116,24 +123,19 @@ async def submit(
     idempotency_key: str | None = None,
     gate_budget_ms: int = DEFAULT_GATE_BUDGET_MS,
 ) -> DecisionBundle:
-    """Run the framework half of a decision on a reasoner's submission.
+    """Run the framework half of a decision on a submission and write it.
+
+    ``decide()`` followed by ``store.write``; see ``decide`` for the
+    arguments and the intake errors.
 
     Args:
-        submission: The reasoner's submission (already a validated
-            ``Submission``: its shape rules hold).
-        gates: The deployment's composed gates, keyed by ``gate_id``
-            (``FrameworkServices.gates``). Each is flagged when the
-            deployment mandates it for every decision.
+        submission: The reasoner's submission.
+        gates: The deployment's composed gates.
         store: Bundle persistence store (Postgres-backed).
-        registry: Registry of known reasoners. The submitting reasoner must
-            be registered; its registration supplies the gate set, the
-            bypass rules, and the enforcement profile.
-        ingestion_timestamp: When the event entered the reasoner's
-            pipeline. Recorded in the bundle.
-        upstream_latency: Optional latency breakdown for the steps the
-            reasoner ran before this call (e.g., ``{"features_ms": 1.2,
-            "scorer_ms": 3.1}``). Merged into the bundle's
-            ``latency_breakdown``.
+        registry: Registry of known reasoners.
+        ingestion_timestamp: When the ledger (or, in process, the
+            reasoner's pipeline) received the event.
+        upstream_latency: Optional latency breakdown of the caller's steps.
         decision_id: Optional explicit UUID; generated when omitted.
         idempotency_key: Optional explicit key; defaults to
             ``submission.event_id``.
@@ -146,12 +148,73 @@ async def submit(
         UnregisteredReasonerError: ``submission.reasoner_id`` is not in
             ``registry``.
         SubmissionContractError: The submission violates the intake
+            contract.
+
+    Side effects:
+        - Calls the gates of the decision's gate set.
+        - Writes the bundle to Postgres.
+    """
+    bundle = await decide(
+        submission=submission,
+        gates=gates,
+        registry=registry,
+        ingestion_timestamp=ingestion_timestamp,
+        upstream_latency=upstream_latency,
+        decision_id=decision_id,
+        idempotency_key=idempotency_key,
+        gate_budget_ms=gate_budget_ms,
+    )
+    store.write(bundle)
+    return bundle
+
+
+async def decide(
+    *,
+    submission: Submission,
+    gates: Mapping[str, ComposedGate],
+    registry: ReasonerRegistry,
+    ingestion_timestamp: datetime,
+    upstream_latency: dict[str, float] | None = None,
+    decision_id: str | None = None,
+    idempotency_key: str | None = None,
+    gate_budget_ms: int = DEFAULT_GATE_BUDGET_MS,
+) -> DecisionBundle:
+    """Decide a submission — intake, the gate set, enforcement — without writing.
+
+    Args:
+        submission: The reasoner's submission (already a validated
+            ``Submission``: its shape rules hold).
+        gates: The deployment's composed gates, keyed by ``gate_id``
+            (``FrameworkServices.gates``). Each is flagged when the
+            deployment mandates it for every decision.
+        registry: Registry of known reasoners. The submitting reasoner must
+            be registered; its registration supplies the gate set, the
+            bypass rules, and the enforcement profile, and its
+            ``registration_version`` is stamped on the bundle.
+        ingestion_timestamp: When the ledger received the submission (an
+            in-process caller may pass when the event entered its own
+            pipeline). Recorded in the bundle.
+        upstream_latency: Optional latency breakdown for the steps the
+            reasoner ran before this call (e.g., ``{"features_ms": 1.2,
+            "scorer_ms": 3.1}``). Merged into the bundle's
+            ``latency_breakdown``.
+        decision_id: Optional explicit UUID; generated when omitted.
+        idempotency_key: Optional explicit key; defaults to
+            ``submission.event_id``.
+        gate_budget_ms: Wall-clock budget for each gate invocation.
+
+    Returns:
+        The version-2 ``DecisionBundle``, not yet persisted.
+
+    Raises:
+        UnregisteredReasonerError: ``submission.reasoner_id`` is not in
+            ``registry``.
+        SubmissionContractError: The submission violates the intake
             contract (see ``SubmissionContractError`` for the codes).
 
     Side effects:
         - Calls the gates of the decision's gate set (each may reach its own
           infrastructure, such as an index or an LLM API).
-        - Writes the bundle to Postgres.
     """
     registration = registry.get(submission.reasoner_id)
     deployment_mandatory = frozenset(g for g, c in gates.items() if c.mandatory)
@@ -235,7 +298,7 @@ async def submit(
     # measurement cannot land in the persisted record. Keeping the response
     # total and the persisted total identical matters more than capturing
     # the bundle write time.
-    bundle = build_bundle(
+    return build_bundle(
         decision_id=decision_id,
         submission=submission,
         idempotency_key=idempotency_key,
@@ -245,9 +308,8 @@ async def submit(
         bypass_check=bypass_check,
         other_bypass_checks=competing_checks,
         latency_breakdown=latency,
+        registration_version=registration_version(registration),
     )
-    store.write(bundle)
-    return bundle
 
 
 async def run_gate_set(

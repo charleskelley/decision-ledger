@@ -14,8 +14,11 @@ client is touched. What is asserted is the composition:
 - the canonical DDL is applied to the framework's connection, and that
   connection is all the framework itself opens (DR-28: gates own their
   infrastructure);
-- the bundle store receives one raw-event factory per ``reasoner_id`` and the
-  registry built from the plugins' registrations;
+- the bundle store receives the connection and the registry built from the
+  plugins' registrations, every registration the registry serves is
+  snapshotted before the first decision (so every bundle's
+  ``registration_version`` has one), and the resolution journal shares the
+  connection;
 - every gate plugin is built once against the services, ``FrameworkServices``
   exposes the composed gates read-only, and a gate sees the composed
   reasoners but never another gate;
@@ -172,6 +175,21 @@ def test_bootstrap_registry_holds_each_plugin_registration(
 
     assert services.registry.get(STUB_REGISTRATION.reasoner_id) is STUB_REGISTRATION
     assert _RecordingStore.last_registry is services.registry
+
+
+def test_bootstrap_snapshots_every_registration_before_serving(
+    fakes: dict[str, Any], settings: FrameworkSettings, monkeypatch: pytest.MonkeyPatch
+):
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        "app.audit.registrations.RegistrationSnapshots.record",
+        lambda self, registration: recorded.append(registration.reasoner_id) or "v",
+    )
+
+    services = bootstrap.build_framework_services(settings, [PLUGIN], [])
+
+    assert recorded == [STUB_REGISTRATION.reasoner_id]
+    assert services.journal is not None
 
 
 def test_bootstrap_with_no_plugins_builds_an_empty_registry_store_and_gate_set(

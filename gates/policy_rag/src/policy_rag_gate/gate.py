@@ -260,6 +260,24 @@ class PolicyGate:
         for resource in self._resources:
             resource.close()
 
+    def serves(self, reasoner_id: str) -> bool:
+        """Whether this gate can serve ``reasoner_id`` at all.
+
+        The gate authorizes each reasoner against the profile it derived
+        from that reasoner's own prompts and corpus when it was built, so a
+        reasoner it has no profile for — one registered without a plugin —
+        would have every submission refused. The framework asks at startup
+        (``ReasonerScope``) and refuses such a deployment instead.
+
+        Args:
+            reasoner_id: A reasoner whose registration binds this gate.
+
+        Returns:
+            ``True`` when the gate was built without profiles (it authorizes
+            everyone) or holds one for ``reasoner_id``.
+        """
+        return self._profiles is None or reasoner_id in self._profiles
+
     def authorize_config(self, config: object, *, reasoner_id: str) -> None:
         """Check that ``reasoner_id`` may submit ``config`` to this gate.
 

@@ -71,3 +71,32 @@ def test_get_raises_unregistered_error_for_unknown_id():
     with pytest.raises(UnregisteredReasonerError) as exc_info:
         registry.get("unknown")
     assert exc_info.value.reasoner_id == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# The registrations resource view: versions and sources (DR-31)
+# ---------------------------------------------------------------------------
+
+
+def test_entries_carry_each_registrations_version_and_source():
+    from app.reasoner_registry import INLINE_SOURCE
+    from core.observation import registration_version
+
+    first, second = _reg("stub-reasoner"), _reg("b-reasoner")
+    registry = StaticReasonerRegistry(
+        [second, first], sources={"b-reasoner": "file:/etc/r.yaml"}
+    )
+
+    entries = registry.entries()
+
+    assert [e.reasoner_id for e in entries] == ["b-reasoner", "stub-reasoner"]
+    assert entries[0].source == "file:/etc/r.yaml"
+    assert entries[1].source == INLINE_SOURCE
+    assert entries[1].version == registration_version(first)
+    assert registry.entry("stub-reasoner") is entries[1]
+
+
+def test_an_unknown_entry_raises_unregistered():
+    registry = StaticReasonerRegistry([_reg("stub-reasoner")])
+    with pytest.raises(UnregisteredReasonerError):
+        registry.entry("nobody")

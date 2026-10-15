@@ -9,13 +9,19 @@ same decision action.
 Replay does NOT re-invoke any gate. Each gate's stored output is fed directly to
 enforcement. This is what makes replay deterministic and gate-implementation-
 agnostic — non-deterministic gates (like LLMs at any temperature) cannot be
-reproduced from inputs alone, so the bundle caches the outputs instead.
+reproduced from inputs alone, so the bundle caches the outputs instead. The
+enforcement profile comes from the snapshot of the registration version the
+bundle cites (``RegistrationSnapshots``), and human resolutions of held
+decisions are appended to the ``ResolutionJournal``.
 """
 
 from app.audit.bundle import build_bundle
+from app.audit.registrations import RegistrationSnapshot, RegistrationSnapshots
+from app.audit.resolution_journal import ResolutionJournal
 from app.audit.schema import apply_canonical_schema
 from app.audit.store import (
     BundleStore,
+    DecisionSummary,
     GateReplay,
     RecordedSample,
     ReplayResult,
@@ -26,9 +32,13 @@ from app.audit.store import (
 
 __all__ = [
     "BundleStore",
+    "DecisionSummary",
     "GateReplay",
     "RecordedSample",
+    "RegistrationSnapshot",
+    "RegistrationSnapshots",
     "ReplayResult",
+    "ResolutionJournal",
     "StoredBundle",
     "apply_canonical_schema",
     "as_bundle",

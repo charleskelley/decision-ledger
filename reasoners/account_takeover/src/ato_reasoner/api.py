@@ -1,34 +1,45 @@
-"""FastAPI route for the ATO Reasoner.
+"""FastAPI route for the ATO Reasoner service.
 
-Exposes ``POST /api/v1/ato/decisions`` — the ATO-specific decision
-endpoint. The handler reads this reasoner's services from
-``request.app.state.reasoners["ato-reasoner"]`` and the shared framework
-services from ``request.app.state.framework``; ``app/main.py:create_app``
-populates both during lifespan startup after discovering the plugin.
+Exposes ``POST /api/v1/ato/decisions`` — ATO's own decision endpoint, served
+by ATO's own application (``ato_reasoner.app:create_app``), not by the
+ledger (DR-31). The handler reads ATO's runtime from
+``request.app.state.ato``: its services (feature windows, scorer) and the
+``LedgerClient`` it submits through.
 
-This module is the ATO-side half of the FastAPI surface. Generic
-framework-side routes (decision lookup by ID, replay) live in
-``app/main.py`` since they don't depend on ATO domain types.
+The ledger's own routes — decision lookup, replay, the subject timeline —
+are served by the ledger (``app.main:create_app``), for every reasoner.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from app.enforcement.resolver import credited_rule
 from ato_reasoner.events import LoginEvent
 from ato_reasoner.pipeline import run_ato_decision
-from ato_reasoner.registry import ATO_REGISTRATION
 
 if TYPE_CHECKING:
-    from app.plugin import FrameworkServices
+    from app.client import LedgerClient
     from ato_reasoner.plugin import AtoServices
 
 log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class AtoRuntime:
+    """What the ATO route needs: its services and the ledger it submits to.
+
+    Args:
+        services: Feature service, scorer, and corpus version stamp.
+        client: The ledger (``LocalClient`` or ``HttpClient``).
+    """
+
+    services: AtoServices
+    client: LedgerClient
 
 
 class AtoGateSummary(BaseModel):
@@ -47,7 +58,8 @@ class AtoDecisionResponse(BaseModel):
     ``bypass_rule_id`` names it and ``bypass_rule_holds`` says whether the
     ledger confirmed it) and ``gate`` when the login went to the gates.
     ``enforcement_rule_applied`` is the rule credited with the action, if
-    any; ``gates`` lists every gate of the decision's gate set.
+    any; ``gates`` lists every gate of the decision's gate set;
+    ``latency_ms`` is the whole decision, ATO's steps and the ledger's.
     """
 
     decision_id: str
@@ -109,57 +121,52 @@ async def create_ato_decision(request: Request) -> AtoDecisionResponse:
 
     Scores the event, records it under a score band's bypass rule or asks
     the ledger to gate it (the LLM policy gate then retrieves relevant
-    policies and judges it), and produces a final action via deterministic
-    enforcement. The complete DecisionBundle is persisted; this endpoint
-    returns a summary.
+    policies and judges it), and returns a summary of the ledger's decision.
+    The complete DecisionBundle is in the ledger.
 
     Args:
         request: FastAPI request. The JSON body is a ``LoginEvent``; the
-            app state carries this reasoner's services and the framework's.
+            app state carries ATO's runtime.
 
     Returns:
         ``AtoDecisionResponse`` summary with decision_id and decision_action.
+
+    Raises:
+        LedgerError: The ledger refused the submission (the ATO app renders
+            it as the ledger's problem document).
     """
     event = parse_login_event(await request.body())
-    services: AtoServices = request.app.state.reasoners[ATO_REGISTRATION.reasoner_id]
-    framework: FrameworkServices = request.app.state.framework
-    bundle = await run_ato_decision(
-        event=event,
-        services=services,
-        framework=framework,
-        idempotency_key=event.event_id,
+    runtime: AtoRuntime = request.app.state.ato
+    decision = await run_ato_decision(
+        event=event, services=runtime.services, client=runtime.client
     )
-
-    total_ms = sum(bundle.latency_breakdown.values())
-    submission = bundle.submission
+    receipt = decision.receipt
 
     log.info(
         "ato_api.decision_complete",
         component="ato_api",
-        decision_id=bundle.decision_id,
-        event_id=submission.event_id,
-        decision_action=bundle.decision_action.value,
-        mode=submission.mode,
-        duration_ms=total_ms,
+        decision_id=receipt.decision_id,
+        event_id=receipt.event_id,
+        decision_action=receipt.decision_action.value,
+        mode=receipt.mode,
+        duration_ms=decision.total_ms,
     )
 
     return AtoDecisionResponse(
-        decision_id=bundle.decision_id,
-        decision_action=bundle.decision_action.value,
-        mode=submission.mode,
-        bypass_rule_id=submission.bypass.rule_id if submission.bypass else None,
-        bypass_rule_holds=bundle.bypass_rule_holds,
-        enforcement_rule_applied=credited_rule(bundle),
+        decision_id=receipt.decision_id,
+        decision_action=receipt.decision_action.value,
+        mode=receipt.mode,
+        bypass_rule_id=receipt.bypass_rule_id,
+        bypass_rule_holds=receipt.bypass_rule_holds,
+        enforcement_rule_applied=receipt.enforcement_rule_applied,
         gates=[
             AtoGateSummary(
-                gate_id=record.gate_id,
-                mandatory=record.mandatory,
-                status=record.status,
-                action=(
-                    record.enforced_action.value if record.enforced_action else None
-                ),
+                gate_id=gate.gate_id,
+                mandatory=gate.mandatory,
+                status=gate.status,
+                action=gate.action.value if gate.action else None,
             )
-            for record in bundle.gates
+            for gate in receipt.gates
         ],
-        latency_ms=total_ms,
+        latency_ms=decision.total_ms,
     )
