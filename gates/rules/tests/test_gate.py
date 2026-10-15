@@ -23,8 +23,8 @@ def gate(ruleset_data) -> RulesGate:
     return RulesGate({ruleset.ruleset_id: ruleset})
 
 
-async def _evaluate(gate, observation_for, request_for, **kwargs) -> GateOutput:
-    return await gate.evaluate(request_for(observation_for(**kwargs)))
+async def _evaluate(gate, submission_for, request_for, **kwargs) -> GateOutput:
+    return await gate.evaluate(request_for(submission_for(**kwargs)))
 
 
 def _snapshot(output: GateOutput) -> RulesGateSnapshot:
@@ -32,9 +32,9 @@ def _snapshot(output: GateOutput) -> RulesGateSnapshot:
 
 
 async def test_no_matching_rule_permits_the_default_action(
-    gate, observation_for, request_for
+    gate, submission_for, request_for
 ):
-    output = await _evaluate(gate, observation_for, request_for)
+    output = await _evaluate(gate, submission_for, request_for)
 
     assert type(output) is GateOutput
     assert output.gate_id == "rules"
@@ -52,9 +52,9 @@ async def test_no_matching_rule_permits_the_default_action(
 
 
 async def test_a_matching_rule_permits_its_action_and_requires_its_controls(
-    gate, observation_for, request_for
+    gate, submission_for, request_for
 ):
-    output = await _evaluate(gate, observation_for, request_for, thin_history=True)
+    output = await _evaluate(gate, submission_for, request_for, thin_history=True)
 
     assert output.verdict is not None
     assert output.verdict.permitted_actions == [DecisionAction.HOLD]
@@ -66,11 +66,11 @@ async def test_a_matching_rule_permits_its_action_and_requires_its_controls(
 
 
 async def test_every_matching_rule_contributes_its_action_and_controls(
-    gate, observation_for, request_for
+    gate, submission_for, request_for
 ):
     output = await _evaluate(
         gate,
-        observation_for,
+        submission_for,
         request_for,
         label_value=0.97,
         thin_history=True,
@@ -93,17 +93,17 @@ async def test_every_matching_rule_contributes_its_action_and_controls(
 
 
 async def test_rule_evidence_carries_no_jurisdictions(
-    gate, observation_for, request_for
+    gate, submission_for, request_for
 ):
-    output = await _evaluate(gate, observation_for, request_for, label_value=0.97)
+    output = await _evaluate(gate, submission_for, request_for, label_value=0.97)
 
     assert output.evidence_jurisdictions() == frozenset()
 
 
 async def test_the_snapshot_records_the_ruleset_and_every_observed_field(
-    gate, observation_for, request_for, ruleset_data
+    gate, submission_for, request_for, ruleset_data
 ):
-    output = await _evaluate(gate, observation_for, request_for, label_value=0.42)
+    output = await _evaluate(gate, submission_for, request_for, label_value=0.42)
 
     snapshot = _snapshot(output)
     assert snapshot.ruleset_id == "widget-guardrails"
@@ -116,9 +116,9 @@ async def test_the_snapshot_records_the_ruleset_and_every_observed_field(
     }
 
 
-async def test_an_unknown_ruleset_fails_closed(gate, observation_for, request_for):
+async def test_an_unknown_ruleset_fails_closed(gate, submission_for, request_for):
     output = await _evaluate(
-        gate, observation_for, request_for, ruleset_id="no-such-set"
+        gate, submission_for, request_for, ruleset_id="no-such-set"
     )
 
     assert output.verdict is None
@@ -128,10 +128,10 @@ async def test_an_unknown_ruleset_fails_closed(gate, observation_for, request_fo
 
 
 async def test_a_ruleset_registered_for_another_reasoner_fails_closed(
-    gate, observation_for, request_for
+    gate, submission_for, request_for
 ):
     output = await _evaluate(
-        gate, observation_for, request_for, reasoner_id="other-reasoner"
+        gate, submission_for, request_for, reasoner_id="other-reasoner"
     )
 
     assert output.verdict is None
@@ -143,34 +143,33 @@ async def test_a_ruleset_registered_for_another_reasoner_fails_closed(
 
 
 async def test_a_predicate_that_cannot_evaluate_fails_closed(
-    observation_for, request_for, ruleset_data
+    submission_for, request_for, ruleset_data
 ):
     # The first rule reads feature_set.thin_history; drop it from the subject.
     gate = RulesGate({"widget-guardrails": parse_ruleset(ruleset_data)})
-    observation = observation_for()
-    assert observation.reasoner_context is not None
-    features = dict(observation.reasoner_context.feature_set)
+    submission = submission_for()
+    features = dict(submission.reasoner_context.feature_set)
     del features["thin_history"]
-    observation = observation.model_copy(
+    submission = submission.model_copy(
         update={
-            "reasoner_context": observation.reasoner_context.model_copy(
+            "reasoner_context": submission.reasoner_context.model_copy(
                 update={"feature_set": features}
             )
         }
     )
 
-    output = await gate.evaluate(request_for(observation))
+    output = await gate.evaluate(request_for(submission))
 
     assert output.verdict is None
     assert output.extra["failure"] == "predicate_error"
     assert "thin_history" in str(output.extra["detail"])
 
 
-async def test_evaluation_is_deterministic(gate, observation_for, request_for):
-    observation = observation_for(label_value=0.97, thin_history=True)
+async def test_evaluation_is_deterministic(gate, submission_for, request_for):
+    submission = submission_for(label_value=0.97, thin_history=True)
 
-    first = await gate.evaluate(request_for(observation))
-    second = await gate.evaluate(request_for(observation))
+    first = await gate.evaluate(request_for(submission))
+    second = await gate.evaluate(request_for(submission))
 
     assert first == second
 

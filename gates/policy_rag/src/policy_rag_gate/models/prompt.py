@@ -18,7 +18,7 @@ Design rationale:
     across the decision log. The policy gate resolves the
     full template content from the registry at render time. Keeping the
     template out of ``GateContext`` enforces immutability: a reasoner
-    cannot inject arbitrary prompt content per-observation.
+    cannot inject arbitrary prompt content per decision.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class PromptSnapshot(BaseModel):
 
     Attributes:
         template_id: Stable template identifier (e.g., ``"example-v1"``).
-            Matches ``GateContext.prompt_template_id`` on the Observation.
+            Matches the ``template_id`` a gate context's ``PolicyGateConfig`` names.
         version: Semantic version of the template at invocation time
             (e.g., ``"1.0.0"``).
         template_text: Full template content at invocation time. Contains

@@ -1,7 +1,7 @@
 """Fixtures for the rules gate member's tests.
 
-The gate is reasoner-agnostic, so these tests use a minimal local
-Observation (``WidgetObservation``) rather than any reasoner package or the
+The gate is reasoner-agnostic, so these tests build a minimal widget
+``Submission`` locally rather than using any reasoner package or the
 framework's test doubles. Rule-set files are written to a temporary
 directory per test.
 """
@@ -15,16 +15,16 @@ from uuid import UUID
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, computed_field
 
 from core.gate_request import GateRequest
 from core.observation import (
+    GateBinding,
     GateContext,
     LabelType,
     ReasonerContext,
     ReasonerRegistration,
 )
-from core.routes import GateRoute
+from core.submission import Submission
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,45 +90,27 @@ RULESET: dict[str, Any] = {
 _NAMESPACE = UUID("6a1d1f9e-2b0c-5d7e-9f3a-4c8b7e6d5a21")
 
 
-class WidgetObservation(BaseModel):
-    """A minimal Observation: just the fields the framework protocol needs."""
-
-    model_config = ConfigDict(strict=True, frozen=True)
-
-    event_id: str
-    entity_type: str = "widget"
-    timestamp: datetime
-    widget_id: str
-    route: GateRoute = GateRoute.ROUTE_TO_GATE
-    reasoner_context: ReasonerContext | None = None
-    fast_path_rationale: str | None = None
-    gate_context: GateContext
-
-    @computed_field
-    @property
-    def entity_id(self) -> UUID:
-        """Framework UUID derived from ``widget_id``."""
-        return uuid.uuid5(_NAMESPACE, self.widget_id)
-
-
-def make_observation(
+def make_submission(
     *,
     label_value: float = 0.5,
     reasoner_id: str = REASONER_ID,
     ruleset_id: str = "widget-guardrails",
     **features: float | int | str | bool,
-) -> WidgetObservation:
-    """A widget observation routed to the rules gate."""
+) -> Submission:
+    """A widget submission asking the ledger to gate it through the rules gate."""
     feature_set: dict[str, float | int | str | bool] = {
         "thin_history": False,
         "region": "REGION_C",
         "wobble": 1,
     }
     feature_set.update(features)
-    return WidgetObservation(
+    return Submission(
+        reasoner_id=reasoner_id,
         event_id=f"evt-{uuid.uuid4().hex[:8]}",
         timestamp=datetime(2026, 10, 11, 12, 0, tzinfo=UTC),
-        widget_id="widget-1",
+        entity_id=uuid.uuid5(_NAMESPACE, "widget-1"),
+        entity_type="widget",
+        mode="gate",
         reasoner_context=ReasonerContext(
             reasoner_id=reasoner_id,
             reasoner_name="Widget Reasoner",
@@ -138,18 +120,19 @@ def make_observation(
             label_value=label_value,
             feature_set=feature_set,
         ),
-        gate_context=GateContext(
-            gate_id="rules", gate_config={"ruleset_id": ruleset_id}
+        gate_contexts=(
+            GateContext(gate_id="rules", gate_config={"ruleset_id": ruleset_id}),
         ),
+        raw_event={"widget_id": "widget-1"},
     )
 
 
-def make_request(observation: WidgetObservation) -> GateRequest:
-    """The request the framework builds for ``observation``."""
+def make_request(submission: Submission) -> GateRequest:
+    """The request the framework builds for ``submission``'s rules context."""
     return GateRequest(
         decision_id="dec-rules-001",
-        observation=observation,
-        gate_context=observation.gate_context,
+        submission=submission,
+        gate_context=submission.gate_contexts[0],
         budget_ms=1_000,
     )
 
@@ -161,24 +144,24 @@ def ruleset_data() -> dict[str, Any]:
 
 
 @pytest.fixture
-def observation_for() -> Callable[..., WidgetObservation]:
-    """``make_observation`` as a fixture (test modules cannot import conftest)."""
-    return make_observation
+def submission_for() -> Callable[..., Submission]:
+    """``make_submission`` as a fixture (test modules cannot import conftest)."""
+    return make_submission
 
 
 @pytest.fixture
-def request_for() -> Callable[[WidgetObservation], GateRequest]:
+def request_for() -> Callable[[Submission], GateRequest]:
     """``make_request`` as a fixture."""
     return make_request
 
 
 @pytest.fixture
 def registration() -> ReasonerRegistration:
-    """A registration that allows the rules gate and declares no profile."""
+    """A registration binding the rules gate (advisory), with no profile."""
     return ReasonerRegistration(
         reasoner_id=REASONER_ID,
         reasoner_name="Widget Reasoner",
-        allowed_gate_ids=frozenset({"rules"}),
+        gates=(GateBinding(gate_id="rules"),),
     )
 
 

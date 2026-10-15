@@ -113,9 +113,7 @@ class RulesGate:
             ``deterministic=True``).
         """
         config = RulesGateConfig.model_validate(request.gate_context.gate_config or {})
-        subject = request.observation.reasoner_context
-        # Intake validation guarantees a populated reasoner_context.
-        assert subject is not None
+        subject = request.submission.reasoner_context
         log_ctx = {
             "component": "rules_gate",
             "decision_id": request.decision_id,
