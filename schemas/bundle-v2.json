@@ -429,6 +429,28 @@
       "title": "EnforcementDecision",
       "type": "object"
     },
+    "EntityDerivation": {
+      "additionalProperties": false,
+      "description": "How a subject's id follows from an enterprise key.\n\nAttributes:\n    namespace_uuid: The UUID5 namespace.\n    enterprise_key: The key under it.",
+      "properties": {
+        "enterprise_key": {
+          "minLength": 1,
+          "title": "Enterprise Key",
+          "type": "string"
+        },
+        "namespace_uuid": {
+          "format": "uuid",
+          "title": "Namespace Uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace_uuid",
+        "enterprise_key"
+      ],
+      "title": "EntityDerivation",
+      "type": "object"
+    },
     "EvidenceRef": {
       "additionalProperties": false,
       "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a policy document id, a\n        rule-set id, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.",
@@ -710,6 +732,104 @@
       "title": "GateVerdict",
       "type": "object"
     },
+    "IdentityProvenance": {
+      "additionalProperties": false,
+      "description": "How a decision's subject was established.\n\nAttributes:\n    native_namespace: The namespace of the native subject the reasoner\n        named; ``None`` when its submission named none.\n    native_subject_id: That native subject's key; ``None`` likewise.\n    resolved_by: Who established the subject: the active resolver's id,\n        or ``passthrough`` when the ledger kept the reasoner's own.\n    crosswalk_version: The version of the mapping the resolver used, if\n        it versions one.\n    method: ``deterministic``, ``probabilistic``, or ``unresolved``.\n    confidence: The match confidence, in [0, 1]: set exactly when the\n        method is ``probabilistic``.\n    resolved_at: When the subject was established (timezone-aware).\n    reason: Why the subject is unresolved (no resolver is active, the\n        resolver found no match, failed, or timed out, ...): set exactly\n        when the method is ``unresolved``.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "crosswalk_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crosswalk Version"
+        },
+        "method": {
+          "enum": [
+            "deterministic",
+            "probabilistic",
+            "unresolved"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "native_namespace": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Namespace"
+        },
+        "native_subject_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Subject Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "resolved_at": {
+          "format": "date-time",
+          "title": "Resolved At",
+          "type": "string"
+        },
+        "resolved_by": {
+          "minLength": 1,
+          "title": "Resolved By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resolved_by",
+        "method",
+        "resolved_at"
+      ],
+      "title": "IdentityProvenance",
+      "type": "object"
+    },
     "JsonValue": {},
     "LabelType": {
       "description": "Classification of the domain model's output type.\n\nAttributes:\n    NUMERICAL: Continuous score output (e.g., probability ∈ [0.0, 1.0]).\n        Typical of regression models and probability estimators.\n    CATEGORICAL: Discrete class label output (e.g., ``\"POSITIVE\"``,\n        ``\"NEGATIVE\"``). Typical of classifiers with a hard decision\n        boundary.",
@@ -722,7 +842,7 @@
     },
     "NativeSubject": {
       "additionalProperties": false,
-      "description": "The subject as the reasoner knows it — reserved for DR-32.\n\nThe identity contract (DR-32) lets a reasoner name its subject in its\nown namespace and has the ledger resolve it to ``entity_id``. Until\nthen the field is accepted, validated, stored, and otherwise ignored.\n\nAttributes:\n    native_namespace: The reasoner's identifier namespace (for example\n        the system the key comes from).\n    native_subject_id: The subject's key in that namespace.",
+      "description": "The subject as the reasoner knows it: a key in one of its namespaces.\n\nCarried on a ``Submission`` (``native_subject``). The ledger resolves it\nto the decision's subject through the active identity resolver; when the\nnamespace is one the reasoner's registration declares, the reasoner's\nown ``entity_id`` must be the one the declaration derives\n(``NATIVE_SUBJECT_MISMATCH`` otherwise).\n\nAttributes:\n    native_namespace: The namespace the key belongs to, in the\n        reasoner's terms (the system it comes from, for example).\n    native_subject_id: The subject's key in that namespace.",
       "properties": {
         "native_namespace": {
           "minLength": 1,
@@ -888,9 +1008,82 @@
       "title": "ReasonerContext",
       "type": "object"
     },
+    "RelatedEntity": {
+      "additionalProperties": false,
+      "description": "A subject related to the decision's subject, as the resolver reports it.\n\nFlat from the subject and typed: the resolver declares every\n``relationship_type`` it emits when it is composed, and the ledger\nrefuses any other. Cardinality and meaning are the resolver's.\n\nAttributes:\n    relationship_type: The relationship, one of the resolver's declared\n        types.\n    entity_type: The related subject's type.\n    entity_id: The related subject's id.",
+      "properties": {
+        "entity_id": {
+          "format": "uuid",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "entity_type": {
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "relationship_type": {
+          "minLength": 1,
+          "title": "Relationship Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "relationship_type",
+        "entity_type",
+        "entity_id"
+      ],
+      "title": "RelatedEntity",
+      "type": "object"
+    },
+    "ResolvedIdentity": {
+      "additionalProperties": false,
+      "description": "A decision's subject: the bundle's identity layer.\n\nAttributes:\n    entity_id: The subject's id: the bundle's subject, its timeline key.\n    entity_type: The subject's type (``\"customer\"``, ``\"account\"``, ...).\n    derivation: The namespace and enterprise key the id derives from;\n        the model recomputes ``entity_id`` from it and refuses a\n        mismatch. Required of a resolved subject; ``None`` only for an\n        unresolved subject that is the reasoner's asserted ``entity_id``.\n    provenance: Who established the subject, how, and when.\n    related: The subject's related subjects, each ``(relationship_type,\n        entity_id)`` once. An unresolved subject has none.",
+      "properties": {
+        "derivation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityDerivation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "entity_id": {
+          "format": "uuid",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "entity_type": {
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/IdentityProvenance"
+        },
+        "related": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelatedEntity"
+          },
+          "title": "Related",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "entity_type",
+        "provenance"
+      ],
+      "title": "ResolvedIdentity",
+      "type": "object"
+    },
     "Submission": {
       "additionalProperties": false,
-      "description": "One decision a reasoner hands the ledger, to record or to gate.\n\nAttributes:\n    schema_version: Wire schema version; always ``2``.\n    reasoner_id: The submitting reasoner. Must equal\n        ``reasoner_context.reasoner_id``.\n    event_id: Reasoner-assigned unique id of the event the decision is\n        about. The default idempotency key and the log correlation id.\n    timestamp: When the event occurred (timezone-aware).\n    entity_id: Framework UUID of the decision subject (typically UUID5\n        of the reasoner's business key).\n    entity_type: Classification of the subject (``\"account\"``,\n        ``\"customer\"``, ...).\n    native_subject: Reserved for the identity contract (DR-32); ignored\n        by the ledger until then.\n    mode: ``\"record\"`` or ``\"gate\"``.\n    proposed_action: The reasoner's action. Required to record (it is\n        the decision); optional to gate (a floor: the ledger's result is\n        never less restrictive than a proposal).\n    bypass: The bypass rule a record cites. Required exactly when\n        ``mode == \"record\"``.\n    reasoner_context: The reasoner's evidence: model identity, the\n        prediction, and the complete feature snapshot it used.\n    gate_contexts: One dispatch envelope per gate, each ``gate_id`` at\n        most once.\n    raw_event: The reasoner's event as JSON, stored verbatim and never\n        interpreted by the ledger.",
+      "description": "One decision a reasoner hands the ledger, to record or to gate.\n\nAttributes:\n    schema_version: Wire schema version; always ``2``.\n    reasoner_id: The submitting reasoner. Must equal\n        ``reasoner_context.reasoner_id``.\n    event_id: Reasoner-assigned unique id of the event the decision is\n        about. The default idempotency key and the log correlation id.\n    timestamp: When the event occurred (timezone-aware).\n    entity_id: The reasoner's own UUID for the subject it scored\n        (UUID5 of its native key under its namespace). The decision's\n        subject is the identity the ledger resolves\n        (``DecisionBundle.identity``, DR-32): the same id when no\n        resolver matches the subject, an enterprise subject's when one\n        does.\n    entity_type: Classification of that subject (``\"account\"``,\n        ``\"customer\"``, ...).\n    native_subject: The subject in the reasoner's own terms (a native\n        namespace and key), which the ledger resolves through the\n        deployment's identity resolver; ``None`` when the reasoner names\n        none (its ``entity_id`` is then recorded as the subject,\n        unresolved). In a namespace the reasoner's registration\n        declares, ``entity_id`` and ``entity_type`` must be the ones the\n        declaration derives.\n    mode: ``\"record\"`` or ``\"gate\"``.\n    proposed_action: The reasoner's action. Required to record (it is\n        the decision); optional to gate (a floor: the ledger's result is\n        never less restrictive than a proposal).\n    bypass: The bypass rule a record cites. Required exactly when\n        ``mode == \"record\"``.\n    reasoner_context: The reasoner's evidence: model identity, the\n        prediction, and the complete feature snapshot it used.\n    gate_contexts: One dispatch envelope per gate, each ``gate_id`` at\n        most once.\n    raw_event: The reasoner's event as JSON, stored verbatim and never\n        interpreted by the ledger.",
       "properties": {
         "bypass": {
           "anyOf": [
@@ -1000,7 +1193,7 @@
   "$id": "urn:decisionledger:schema:bundle:2",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Complete, replayable audit record for every decision (schema version 2).\n\nStored in PostgreSQL (``decisionledger.decision_bundles``), indexed by\n``decision_id``. Every field is logged at decision time — nothing is\ncomputed on read, and the row is never updated once written.\n\nReplay guarantee: given a bundle and its reasoner's enforcement profile\n(the registration's novel-entity feature and jurisdiction conflict\ngroups), re-running the gate-level tiers on each stored gate output,\nre-evaluating the stored bypass rules against the stored submission's\nevidence, and re-running the decision-level rules and the combinator\nproduce the same ``decision_action``. Replay does **not** re-invoke any\ngate, reads no corpus, and needs no reasoner code.\n\nAction vocabulary:\n    * ``decision_action`` — the action this bundle produced at decision\n      time. Immutable.\n    * ``resolution_action`` — for non-terminal decisions (CHALLENGE,\n      HOLD), the action a resolver later produced. Lives on\n      ``core.resolution.ResolutionAttempt`` rows; never on the bundle.\n    * ``realized_action`` — the action ultimately taken on the entity,\n      computed from the bundle plus the resolution attempt log; never\n      stored.\n\nAttributes:\n    schema_version: Always ``2``.\n    decision_id: UUID of this decision record.\n    created_at: When the bundle was constructed (UTC).\n    submission: The reasoner's submission, verbatim — identity, mode,\n        proposal and citation, evidence, gate contexts, and its opaque\n        ``raw_event``.\n    idempotency_key: Deduplication key (the event id unless the caller\n        supplied one).\n    ingestion_timestamp: When the ledger received the submission (over\n        HTTP or through a client; the event's own time is\n        ``submission.timestamp``).\n    gates: One record per gate in the decision's gate set, mandatory\n        gates first, each in gate-set order.\n    decision_action: The action this decision produced.\n    decision_level_rule: The decision-level rule that fired, if any\n        (not necessarily the one that set the final action — a mandatory\n        gate may still be stricter; the combinator line says what did):\n        ``tier3_novel_entity`` (a gated decision about a novel entity,\n        its advisory verdicts held for review, unless an advisory gate's\n        own Tier 1 or 2 outranked it), ``bypass_rule_not_satisfied`` (a\n        record whose cited rule did not hold: HOLD floor), or\n        ``bypass_rule_superseded`` (a record citing a rule while another\n        registered rule that also holds justifies a stricter action:\n        floor at that action).\n    override_log: The decision-level trail — the bypass check or the\n        novel-entity tier, then the combinator line. Each gate's own\n        tier log is in its ``GateRecord.enforcement``.\n    bypass_rule_holds: For a record, whether the cited rule held\n        against the submission's evidence; ``None`` for a gated\n        decision. Equals ``bypass_check.holds``.\n    bypass_check: For a record, the cited rule as evaluated (snapshot)\n        and the values it read; ``None`` for a gated decision.\n    other_bypass_checks: For a record, every other rule the reasoner\n        registers, as evaluated (snapshots), so replay can re-check that\n        no stricter rule also held; empty for a gated decision.\n    registration_version: The version (content address) of the\n        reasoner's registration the decision was made under (DR-31).\n        Replay enforces against that version's snapshot, served at\n        ``GET /api/v1/reasoners/{reasoner_id}/registrations/{version}``.\n        ``None`` only on a bundle written before registrations were\n        versioned.\n    latency_breakdown: The ledger's own steps in milliseconds:\n        ``gate_ms`` (wall-clock time of the whole gate phase; each\n        gate's own time is in its record) and ``enforcement_ms``, plus\n        any step an in-process caller of ``submit`` reported. A reasoner\n        reports its own timings itself.",
+  "description": "Complete, replayable audit record for every decision (schema version 2).\n\nStored in PostgreSQL (``decisionledger.decision_bundles``), indexed by\n``decision_id``. Every field is logged at decision time — nothing is\ncomputed on read, and the row is never updated once written.\n\nReplay guarantee: given a bundle and its reasoner's enforcement profile\n(the registration's novel-entity feature and jurisdiction conflict\ngroups), re-running the gate-level tiers on each stored gate output,\nre-evaluating the stored bypass rules against the stored submission's\nevidence, and re-running the decision-level rules and the combinator\nproduce the same ``decision_action``. Replay does **not** re-invoke any\ngate, reads no corpus, and needs no reasoner code.\n\nAction vocabulary:\n    * ``decision_action`` — the action this bundle produced at decision\n      time. Immutable.\n    * ``resolution_action`` — for non-terminal decisions (CHALLENGE,\n      HOLD), the action a resolver later produced. Lives on\n      ``core.resolution.ResolutionAttempt`` rows; never on the bundle.\n    * ``realized_action`` — the action ultimately taken on the entity,\n      computed from the bundle plus the resolution attempt log; never\n      stored.\n\nAttributes:\n    schema_version: Always ``2``.\n    decision_id: UUID of this decision record.\n    created_at: When the bundle was constructed (UTC).\n    submission: The reasoner's submission, verbatim — identity, mode,\n        proposal and citation, evidence, gate contexts, and its opaque\n        ``raw_event``.\n    identity: The decision's subject as the ledger resolved it before\n        any gate ran (DR-32): the subject's id and type, how the id was\n        derived, the provenance of the mapping (resolver, crosswalk\n        version, method, confidence, time, and why an unresolved\n        subject is unresolved), and the subject's related subjects.\n        ``entity_id`` is the bundle's timeline key. ``None`` only on a\n        bundle written before the identity contract; such a bundle's\n        subject is ``submission.entity_id``.\n    idempotency_key: Deduplication key (the event id unless the caller\n        supplied one).\n    ingestion_timestamp: When the ledger received the submission (over\n        HTTP or through a client; the event's own time is\n        ``submission.timestamp``).\n    gates: One record per gate in the decision's gate set, mandatory\n        gates first, each in gate-set order.\n    decision_action: The action this decision produced.\n    decision_level_rule: The decision-level rule that fired, if any\n        (not necessarily the one that set the final action — a mandatory\n        gate may still be stricter; the combinator line says what did):\n        ``tier3_novel_entity`` (a gated decision about a novel entity,\n        its advisory verdicts held for review, unless an advisory gate's\n        own Tier 1 or 2 outranked it), ``bypass_rule_not_satisfied`` (a\n        record whose cited rule did not hold: HOLD floor), or\n        ``bypass_rule_superseded`` (a record citing a rule while another\n        registered rule that also holds justifies a stricter action:\n        floor at that action).\n    override_log: The decision-level trail — the bypass check or the\n        novel-entity tier, then the combinator line. Each gate's own\n        tier log is in its ``GateRecord.enforcement``.\n    bypass_rule_holds: For a record, whether the cited rule held\n        against the submission's evidence; ``None`` for a gated\n        decision. Equals ``bypass_check.holds``.\n    bypass_check: For a record, the cited rule as evaluated (snapshot)\n        and the values it read; ``None`` for a gated decision.\n    other_bypass_checks: For a record, every other rule the reasoner\n        registers, as evaluated (snapshots), so replay can re-check that\n        no stricter rule also held; empty for a gated decision.\n    registration_version: The version (content address) of the\n        reasoner's registration the decision was made under (DR-31).\n        Replay enforces against that version's snapshot, served at\n        ``GET /api/v1/reasoners/{reasoner_id}/registrations/{version}``.\n        ``None`` only on a bundle written before registrations were\n        versioned.\n    latency_breakdown: The ledger's own steps in milliseconds:\n        ``gate_ms`` (wall-clock time of the whole gate phase; each\n        gate's own time is in its record) and ``enforcement_ms``, plus\n        any step an in-process caller of ``submit`` reported. A reasoner\n        reports its own timings itself.",
   "properties": {
     "bypass_check": {
       "anyOf": [
@@ -1056,6 +1249,17 @@
     "idempotency_key": {
       "title": "Idempotency Key",
       "type": "string"
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResolvedIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "ingestion_timestamp": {
       "format": "date-time",
