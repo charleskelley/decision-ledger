@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-31.** The next record is DR-32.
+**Current head: DR-32.** The next record is DR-33.
 
 ### Status values
 
@@ -2990,3 +2990,181 @@ not replayable); thresholds in the framework; a separate audit-only mode
   gate phases) and without a read timeout for a batch; and an unreachable
   ledger is reported by error type, never by an `httpx` message that could
   quote the key header.
+
+---
+
+## DR-32: Identity contract — resolved subjects, provenance, entity journals
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Extends DR-12 (`entity_id` is the universal subject) and amends DR-14 (the
+> framework, not the reasoner, assigns a decision's subject). Phase 3b
+> implements it (below); the rationale and the cross-references land in the
+> documentation pass.
+
+**Decision.**
+
+- **The sentence to be exact about.** DecisionLedger requires every decision
+  to carry a resolved subject identity, obtains it through a resolver the
+  enterprise supplies, records the mapping and its version on the bundle,
+  and journals merges and detaches. It does not implement identity
+  resolution: the matching logic, the crosswalk, and the master entity index
+  belong to the enterprise. A wrong mapping becomes visible and replayable
+  rather than silent.
+- **Contract in `core/identity.py`.** A reasoner names the subject it scored
+  as a `NativeSubject(native_namespace, native_subject_id)`. An
+  `IdentityResolver` maps it to a `ResolvedIdentity`: `entity_id`,
+  `entity_type`, its `IdentityProvenance` (`native_subject_id`,
+  `native_namespace`, `resolved_by`, `crosswalk_version`, `method`:
+  `deterministic | probabilistic | unresolved`, `confidence`, `resolved_at`),
+  and flat, typed `RelatedEntity(relationship_type, entity_type, entity_id)`
+  values. `derive_entity_id(namespace_uuid, enterprise_key)` is UUID5: the
+  resolver names the namespace and the key, core does the arithmetic, and
+  the model recomputes it and refuses a mismatch. The subject is who the
+  decision affects; the native subject is what the reasoner scored.
+- **The framework resolves, before any gate.** After intake validation the
+  ledger asks the deployment's one active resolver and records the result on
+  the bundle. No match, an error, or a timeout records the subject
+  unresolved under the reasoner's own namespace; a decision is never dropped
+  over its identity.
+- **Relationship types are the resolver's.** A resolver declares the types it
+  emits when it is composed; the ledger refuses any other on write. The
+  framework has no household (or any other) relationship concept.
+- **Journal and projection.** `entity_events` is append-only (`merge`,
+  `detach`, `relate`, `unrelate`; framework UUIDs only); bundles never
+  change. `entity_membership` is a rebuildable projection of validity
+  intervals (`valid_from`, `valid_to`) derived from the journal and from the
+  relationships decisions asserted. A subject's timeline unions the ids
+  merged with it, and on request the subjects related to it.
+- **Discovery.** Entry-point group `decisionledger.identity_resolvers`; one
+  active resolver per deployment (`DECISIONLEDGER_IDENTITY_RESOLVER`); the
+  `passthrough` default ships with the framework, so it and its example
+  reasoner run with no enterprise resolver installed.
+- **Routes.** `GET /api/v1/identity/resolve?namespace=&native_id=` (served
+  by the active resolver) and `GET /api/v1/entities/{id}/decisions` with
+  `include_related=<relationship_type>`, unioning merged ids.
+
+**Implementation (Phase 3b).**
+
+- **`core/identity.py`** is a leaf of `core` (it imports nothing from the
+  rest of it; the boundary test checks). Besides the types above it holds
+  `NativeNamespace` (a reasoner's declared namespace), `EntityDerivation`
+  (the namespace and key an id derives from), the journal's `EntityEvent`
+  and `JournalProvenance`, `Membership`, the pure fold
+  `project_membership(events, identities)` (the projection's definition),
+  and `linked_entities` (the timeline's walk over the current projection).
+  `NativeSubject` moved here from `core/submission.py`, which re-exports it.
+- **Registration.** `ReasonerRegistration.native_namespaces` declares, per
+  native namespace, the subject type it names and the UUID5 namespace its
+  ids derive under. Within a deployment one namespace name has one
+  declaration (startup refuses a conflict). The canonical form sorts the
+  declarations and omits the field when it is empty, so a registration that
+  declares no namespace keeps the version it had before.
+- **Intake.** A native subject in a namespace the reasoner's registration
+  declares must come with the `entity_id` and `entity_type` that declaration
+  derives: `422 NATIVE_SUBJECT_MISMATCH` otherwise (the native key is not
+  echoed).
+- **The identity step** (`app/identity`). `IdentityService.identify` runs in
+  `app/submit.py` after validation and before the gates; its result is the
+  bundle's `identity` and every gate's `GateRequest.identity`, and its time
+  is `latency_breakdown["identity_ms"]`. A resolver is synchronous and runs
+  in a worker thread under a 50 ms budget. Its answer is used only if it is
+  exactly a `ResolvedIdentity`, survives the JSON round trip, is storable,
+  is a match, names this resolver and the subject asked about, and relates
+  by declared types only. Anything else (no match, an exception, a timeout,
+  an unusable answer) falls back to the **passthrough**: a native subject in
+  a declared namespace is that declaration's derivation; any other subject
+  is the submission's own `entity_id` and `entity_type`. Either way the
+  subject is `unresolved`, with the reason. Discovery loads only the
+  configured entry point; an unknown, malformed, or unbuildable resolver is
+  a `ResolverPluginError` at startup. `FrameworkServices.identity` holds the
+  step and closes the resolver on shutdown.
+- **The bundle.** `DecisionBundle.identity` (`None` only on a bundle written
+  before this phase) must name the native subject its submission named.
+  `DecisionBundle.entity_id` / `entity_type` are the resolved subject, and
+  so are the `decision_bundles.entity_id` column and the receipt's
+  `entity_id` (the receipt gains `entity_type`). The submission keeps the
+  reasoner's own `entity_id`. Replay is unaffected: enforcement never reads
+  the identity, and a stored identity whose id no longer follows from its
+  derivation does not reload.
+- **Storage** (`app/audit/sql/02_tables.sql`, `app/audit`). `entity_events`
+  (an identity column orders appends; checks keep events well formed) and
+  `entity_membership` (one open interval per link, by a partial unique index
+  with `nulls not distinct`). Writing a new bundle opens the relationships
+  its identity asserts unless they are open. `EntityJournal` appends events
+  in one transaction and rebuilds the projection by default; its
+  `rebuild_membership` locks the projection against writes and replaces it
+  with the fold of the journal and the bundles. The timeline's
+  `entity_decisions(include_related=...)` walks the current projection and
+  says, per decision, which subject it is about and how it is linked.
+- **API and clients.** `GET /api/v1/identity/resolve` (any authenticated
+  principal; `404 IDENTITY_UNRESOLVED` when the resolver does not match and
+  no registration declares the namespace); the timeline's `include_related`;
+  `LedgerClient.resolve_identity` and `entity_decisions(include_related=)`
+  on both clients; the MCP `list_decisions_for_entity` tool takes
+  `include_related`. The conformance suite checks the route and the
+  identity layer on any instance.
+- **ATO.** The account namespace leaves `ato_reasoner/events.py` for ATO's
+  registration (`ATO_ACCOUNT_NAMESPACE`: `ato-account`, the same UUID5
+  namespace, `account`). Every ATO submission names `(ato-account,
+  account_id)` as its native subject, and the passthrough assigns exactly
+  the `entity_id` and `entity_type` ATO decisions always had (a test pins
+  the namespace literal).
+- **Test double.** `tests/_stub_resolver`: widgets in `widget-registry` map
+  to owners (deterministic), owners to fleets — its one relationship type —
+  and every fallback is scriptable.
+- **Boundary.** No framework file has a household concept or names the stub
+  resolver, and no member keeps ATO's former private namespace constant.
+
+**Judgment calls and deviations (Phase 3b).**
+
+- **`Submission.entity_id` stays required.** DR-31 reserved `native_subject`
+  so the wire shape changes once: in this phase the submission's JSON schema
+  changes in descriptions only. A reasoner still sends its own id for the
+  subject it scored; the ledger's subject is the resolved identity. Making
+  `entity_id` optional (so a reasoner names only its native subject) is a
+  later, compatible relaxation.
+- **Registrations declare native namespaces.** The plan has the passthrough
+  reproduce ATO's ids "using the namespace UUID moved out of
+  `ato_reasoner/events.py`", and the framework may not import ATO; the
+  namespace therefore moved into ATO's registration, which is data the
+  ledger reads. The `NATIVE_SUBJECT_MISMATCH` intake rule follows from it.
+- **"The reasoner's own namespace" is the reasoner's own id.** An
+  unresolved subject in an undeclared namespace (or with no native subject)
+  is the submission's `entity_id`, which the reasoner derived under its own
+  namespace; the ledger invents no second derivation.
+- **Contract additions beyond the plan's field lists.** `IdentityProvenance`
+  gains `reason` (an unresolved subject says why) and its native fields are
+  optional (a submission may name no native subject). `ResolvedIdentity`
+  gains `derivation`, which is where the brief's "the validator recomputes"
+  lives. A resolver returns `None` for no match: it may not return an
+  unresolved identity, since recording one is the ledger's job.
+- **Gates see the subject.** `GateRequest.identity` carries the resolved
+  subject; a lookup gate about a person (do-not-contact, sanctions) keys on
+  it. It is optional only so shadow evaluation can re-run a bundle written
+  before this phase.
+- **Bounded, not cancelled.** Python cannot stop a thread: a resolver that
+  never returns keeps its worker thread busy while the decision proceeds
+  unresolved. Resolvers are in-process lookups by contract.
+- **The projection's rules.** A merge is a membership row with a null
+  relationship type; `detach` matches the two ids in either order; an
+  interval that would end as it begins is dropped; at one instant asserted
+  relationships apply before journal events, so the journal has the last
+  word. The write path opens relationships incrementally, and
+  `rebuild_membership` is the definition (a journal event dated in the
+  future is reflected at the next rebuild).
+- **No route appends to the journal.** The plan names no write route;
+  `EntityJournal` is used in process, on a connection of its own (its
+  appends and rebuilds are transactions, which the framework's shared
+  connection never opens). A `relate` must use a type the active resolver
+  declares; `unrelate` may end any type.
+- **`include_related` is one step.** It follows current relationships of
+  one type, in either direction, plus the merged ids at each end. There is
+  no as-of-time timeline: the bundle records membership as of its decision.
+- **The resolve route is open to every key.** An identity is the
+  enterprise's mapping, not a tenant's decisions; the 404 detail never
+  echoes the native key.
+- **The example reasoner is unchanged.** It names no native subject, so its
+  decisions are recorded under its own ids by the passthrough; it can adopt
+  the contract in the documentation pass.
