@@ -13,7 +13,8 @@ ATO_MODEL_PATH  := reasoners/account_takeover/src/ato_reasoner/scorer/models/ato
 
 .PHONY: train-account_takeover eval-model-account_takeover \
         scenario-account_takeover prepare-account_takeover \
-        eval-account_takeover capture-baselines-account_takeover
+        eval-account_takeover capture-baselines-account_takeover \
+        serve-account_takeover
 
 REASONER_TRAIN_TARGETS   += train-account_takeover
 REASONER_INDEX_TARGETS   += build-policy-index-$(ATO_REASONER_ID)
@@ -28,6 +29,7 @@ REASONER_HELP += "    build-policy-index-$(ATO_REASONER_ID)     Embed and index 
 REASONER_HELP += "    prepare-account_takeover            Index the corpus; train the scorer if missing"
 REASONER_HELP += "    eval-account_takeover               Framework eval with the ATO adapter (slow, paid)"
 REASONER_HELP += "    capture-baselines-account_takeover  Re-capture faithfulness fixtures (live gate)"
+REASONER_HELP += "    serve-account_takeover              Run ATO's own service (port 8001; ledger in process, or ATO_LEDGER_URL)"
 
 train-account_takeover:
 	uv run python -m ato_reasoner.scorer train \
@@ -54,3 +56,9 @@ eval-account_takeover:
 
 capture-baselines-account_takeover:
 	uv run python -m ato_reasoner.eval.capture_baselines
+
+# ATO's own service (DR-31): POST /api/v1/ato/decisions. With ATO_LEDGER_URL
+# set it submits to that ledger over HTTP with ATO_LEDGER_KEY; without it,
+# the ledger runs in ATO's process.
+serve-account_takeover:
+	uv run uvicorn --factory ato_reasoner.app:create_app --port $(or $(PORT),8001)

@@ -18,6 +18,7 @@ the run() rationale case uses a scripted gate that returns a finished
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,8 @@ from uuid import uuid4
 
 import pytest
 
+from app.audit import StoredBundle
+from app.client import LocalClient
 from app.gates import ComposedGate
 from app.plugin import FrameworkServices
 from app.reasoner_registry import StaticReasonerRegistry
@@ -37,7 +40,7 @@ from ato_reasoner.plugin import PLUGIN, AtoServices
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
 from core.actions import DecisionAction
-from core.exceptions import SubmissionContractError
+from core.exceptions import LedgerError
 from core.gate import GateOutput, GateVerdict
 from policy_rag_gate.config import ReasonerProfile
 from policy_rag_gate.gate import PolicyGate
@@ -166,6 +169,25 @@ def _policy_gate(retriever: _StubRetriever) -> PolicyGate:
     )
 
 
+class _Store:
+    """Keeps written bundles; answers lookup as the real store does."""
+
+    def __init__(self) -> None:
+        self.written: list[Any] = []
+
+    def write(self, bundle: Any) -> None:
+        self.written.append(bundle)
+
+    def lookup(self, decision_id: str) -> StoredBundle:
+        bundle = next(b for b in self.written if b.decision_id == decision_id)
+        return StoredBundle(
+            decision_id=decision_id,
+            reasoner_id=bundle.submission.reasoner_id,
+            schema_version=2,
+            payload=json.loads(bundle.model_dump_json()),
+        )
+
+
 def _driver(gates: dict[str, Any]) -> PipelineDriver:
     """A PipelineDriver around stub services, built without ``__init__``."""
     driver = PipelineDriver.__new__(PipelineDriver)
@@ -182,11 +204,18 @@ def _driver(gates: dict[str, Any]) -> PipelineDriver:
     driver._framework = FrameworkServices(
         settings=MagicMock(),
         pg_conn=MagicMock(),
-        store=MagicMock(),
+        store=_Store(),  # type: ignore[arg-type]
         registry=StaticReasonerRegistry([ATO_REGISTRATION]),
         gates=gates,
     )
+    driver._client = LocalClient(driver._framework)
     return driver
+
+
+def _written(driver: PipelineDriver) -> list[Any]:
+    store = driver._framework.store
+    assert isinstance(store, _Store)
+    return store.written
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +286,11 @@ def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
     )
     driver = _driver({"policy": _composed(gate)})
 
-    with pytest.raises(SubmissionContractError, match="'ato-v3' is not a prompt"):
+    with pytest.raises(LedgerError, match="'ato-v3' is not a prompt") as err:
         asyncio.run(driver.run_with_forced_fallback(_event(), fallback_kind="llm_5xx"))
 
-    driver._framework.store.write.assert_not_called()
+    assert err.value.code == "GATE_CONFIG_UNAUTHORIZED"
+    assert _written(driver) == []
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +309,7 @@ def test_forced_llm_5xx_runs_retrieval_then_holds_on_the_failed_call():
     assert action == DecisionAction.HOLD
     (call,) = retriever.calls
     assert call["reasoner_id"] == ATO_REGISTRATION.reasoner_id
-    bundle = driver._framework.store.write.call_args[0][0]
+    [bundle] = _written(driver)
     policy = bundle.gate("policy")
     assert policy.status == "ran"
     assert policy.enforcement.enforcement_rule_applied == "tier1_schema_failure"
@@ -297,7 +327,7 @@ def test_a_forced_retrieval_error_fails_the_gate_closed_and_holds():
     )
 
     assert action == DecisionAction.HOLD
-    bundle = driver._framework.store.write.call_args[0][0]
+    [bundle] = _written(driver)
     policy = bundle.gate("policy")
     assert policy.status == "failed"
     assert policy.reason.startswith("raised _RetrievalForcedError: ")
@@ -318,7 +348,7 @@ def test_forced_schema_failure_holds_without_calling_the_gate(risk_score):
 
     assert action == DecisionAction.HOLD
     assert retriever.calls == []
-    driver._framework.store.write.assert_not_called()
+    assert _written(driver) == []
 
 
 # ---------------------------------------------------------------------------

@@ -106,8 +106,6 @@ def _bundle_to_case(scenario_id: str, bundle) -> dict | None:
 
 async def _capture() -> list[dict]:
     """Drive every capture scenario and collect faithfulness cases."""
-    from ato_reasoner.pipeline import run_ato_decision
-
     cases: list[dict] = []
     driver = PipelineDriver()
     try:
@@ -129,11 +127,7 @@ async def _capture() -> list[dict]:
             # most recent semantically valid case.
             captured_case: dict | None = None
             for event in events:
-                bundle = await run_ato_decision(
-                    event=event,
-                    services=driver.services,
-                    framework=driver.framework,
-                )
+                bundle = await driver.decide(event)
                 case = _bundle_to_case(scenario_id, bundle)
                 if case is not None:
                     captured_case = case

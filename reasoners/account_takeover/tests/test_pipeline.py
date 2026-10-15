@@ -1,15 +1,17 @@
 """Tests for the ATO domain pipeline orchestrator.
 
 The ATO route handler and the eval harness's PipelineDriver both delegate
-to ``run_ato_decision()``. These tests lock in the orchestration contract:
-which services are called, in which order, with which arguments.
-Downstream artifact construction (build_bundle, enforcement,
-build_submission) is exercised by their own dedicated test files; we don't
-re-test that here.
+to ``run_ato_decision()``, which scores a login and submits it to the
+ledger through a ``LedgerClient`` (DR-31). These tests lock in the
+orchestration contract: which services are called with which arguments,
+what ATO submits, and what it returns (the ledger's receipt and ATO's own
+step timings). The ledger's half — intake, gates, enforcement, the bundle —
+is the framework's and is tested there.
 
-Mostly the recorded path (a score in a bypass band): the gated path through
-the real policy gate is covered end-to-end by the scenario smoke test
-against the real stack. A mid-band score is checked to ask for the gate.
+Two clients: a recording fake (what ATO hands the ledger), and a
+``LocalClient`` over framework services with a gate double (the in-process
+path end to end). The gated path through the real policy gate is covered by
+the scenario smoke test against the real stack.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from uuid import uuid4
 
 import pytest
 
+from app.api.models import DecisionReceipt
+from app.client import LocalClient
 from app.gates import ComposedGate, GateKind
 from app.plugin import FrameworkServices
 from app.reasoner_registry import StaticReasonerRegistry
@@ -31,14 +35,14 @@ from ato_reasoner.events import (
     LoginEvent,
 )
 from ato_reasoner.features import AtoFeatureVector, WindowSpec
-from ato_reasoner.pipeline import run_ato_decision
+from ato_reasoner.pipeline import AtoDecision, run_ato_decision
 from ato_reasoner.plugin import AtoServices
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
 from core.actions import DecisionAction
 
 if TYPE_CHECKING:
-    from core.bundle import DecisionBundle
+    from core.submission import Submission
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +121,34 @@ class _PolicyGatePlugin:
         raise AssertionError("the stack composes its gate directly")
 
 
+class _RecordingClient:
+    """A ledger client that records what ATO submits and answers a receipt."""
+
+    def __init__(self) -> None:
+        self.submitted: list[Submission] = []
+
+    async def submit(self, submission: Submission) -> DecisionReceipt:
+        self.submitted.append(submission)
+        return DecisionReceipt(
+            decision_id=str(uuid4()),
+            reasoner_id=submission.reasoner_id,
+            event_id=submission.event_id,
+            entity_id=str(submission.entity_id),
+            mode=submission.mode,
+            decision_action=submission.proposed_action or DecisionAction.HOLD,
+            decision_level_rule=None,
+            enforcement_rule_applied=None,
+            bypass_rule_id=submission.bypass.rule_id if submission.bypass else None,
+            bypass_rule_holds=True if submission.bypass else None,
+            registration_version="v",
+            gates=[],
+            latency_breakdown={"gate_ms": 0.0, "enforcement_ms": 0.1},
+            created_at=datetime.now(UTC),
+        )
+
+
 class _Stack:
-    """The two service objects ``run_ato_decision`` takes, built on stubs.
+    """ATO's services on stubs, and a ledger over framework services.
 
     feature_svc and scorer return real domain objects so build_submission
     can run against them. The composed policy gate and the store are
@@ -148,6 +178,12 @@ class _Stack:
             registry=StaticReasonerRegistry([ATO_REGISTRATION]),
             gates={"policy": ComposedGate(plugin=_PolicyGatePlugin(), gate=self.gate)},
         )
+        self.recording = _RecordingClient()
+
+    @property
+    def written(self):
+        [call] = self.store.write.call_args_list
+        return call.args[0]
 
 
 @pytest.fixture
@@ -155,56 +191,56 @@ def stack() -> _Stack:
     return _Stack()
 
 
-async def _run(
-    stack: _Stack,
-    *,
-    event: LoginEvent | None = None,
-    decision_id: str | None = None,
-    idempotency_key: str | None = None,
-) -> DecisionBundle:
-    """Invoke run_ato_decision with the stub services and an event."""
+async def _local(stack: _Stack, event: LoginEvent | None = None) -> AtoDecision:
+    """Run the pipeline against the ledger in process."""
     return await run_ato_decision(
         event=event or _make_event(),
         services=stack.services,
-        framework=stack.framework,
-        decision_id=decision_id,
-        idempotency_key=idempotency_key,
+        client=LocalClient(stack.framework),
     )
 
 
+async def _recorded(stack: _Stack, event: LoginEvent | None = None) -> Submission:
+    """Run the pipeline against the recording client; return the submission."""
+    await run_ato_decision(
+        event=event or _make_event(),
+        services=stack.services,
+        client=stack.recording,  # type: ignore[arg-type]
+    )
+    [submission] = stack.recording.submitted
+    return submission
+
+
 # ---------------------------------------------------------------------------
-# Tests
+# Through the ledger, in process
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_an_allow_band_score_is_recorded_without_invoking_the_gate(stack):
     """A score in the allow band → a record; the advisory gate is skipped."""
-    bundle = await _run(stack)
+    decision = await _local(stack)
 
+    receipt = decision.receipt
     assert stack.gate.evaluate.call_count == 0
-    assert bundle.submission.mode == "record"
-    assert bundle.submission.bypass is not None
-    assert bundle.submission.bypass.rule_id == "allow-band"
-    assert bundle.decision_action == DecisionAction.ALLOW
-    [policy] = bundle.gates
+    assert receipt.mode == "record"
+    assert receipt.bypass_rule_id == "allow-band"
+    assert receipt.bypass_rule_holds is True
+    assert receipt.decision_action == DecisionAction.ALLOW
+    [policy] = receipt.gates
     assert (policy.gate_id, policy.status) == ("policy", "skipped")
-    assert policy.output is None
+    assert stack.written.decision_id == receipt.decision_id
 
 
-@pytest.mark.asyncio
 async def test_a_block_band_score_is_recorded_as_block(stack):
     stack.scorer.score.return_value = _make_scorer_output(0.97)
-    bundle = await _run(stack)
+    receipt = (await _local(stack)).receipt
 
     assert stack.gate.evaluate.call_count == 0
-    assert bundle.submission.bypass is not None
-    assert bundle.submission.bypass.rule_id == "block-band"
-    assert bundle.decision_action == DecisionAction.BLOCK
-    assert bundle.bypass_rule_holds is True
+    assert receipt.bypass_rule_id == "block-band"
+    assert receipt.decision_action == DecisionAction.BLOCK
+    assert receipt.bypass_rule_holds is True
 
 
-@pytest.mark.asyncio
 async def test_a_mid_band_score_asks_the_policy_gate(stack):
     """Between the bands → gate mode; the composed policy gate is invoked.
 
@@ -212,110 +248,94 @@ async def test_a_mid_band_score_asks_the_policy_gate(stack):
     framework fails it closed and holds the login (DR-29).
     """
     stack.scorer.score.return_value = _make_scorer_output(0.61)
-    bundle = await _run(stack)
+    receipt = (await _local(stack)).receipt
 
-    assert bundle.submission.mode == "gate"
+    assert receipt.mode == "gate"
     assert stack.gate.evaluate.call_count == 1
-    [policy] = bundle.gates
+    [policy] = receipt.gates
     assert policy.status == "failed"
-    assert bundle.decision_action == DecisionAction.HOLD
+    assert receipt.decision_action == DecisionAction.HOLD
 
 
-@pytest.mark.asyncio
-async def test_persists_bundle_via_store_write(stack):
-    """The returned bundle is the same object passed to store.write."""
-    bundle = await _run(stack)
+async def test_the_written_bundle_records_atos_registration_version(stack):
+    from core.observation import registration_version
 
-    assert stack.store.write.call_count == 1
-    persisted = stack.store.write.call_args[0][0]
-    assert persisted is bundle
-
-
-@pytest.mark.asyncio
-async def test_uses_provided_decision_id(stack):
-    """An explicit decision_id flows through to the persisted bundle."""
-    bundle = await _run(stack, decision_id="custom-decision-id")
-
-    assert bundle.decision_id == "custom-decision-id"
+    decision = await _local(stack)
+    assert decision.receipt.registration_version == registration_version(
+        ATO_REGISTRATION
+    )
+    assert stack.written.registration_version == registration_version(ATO_REGISTRATION)
 
 
-@pytest.mark.asyncio
-async def test_defaults_decision_id_to_generated_uuid(stack):
-    """When omitted, decision_id is auto-generated and non-empty."""
-    bundle = await _run(stack)
-
-    assert bundle.decision_id
-    assert len(bundle.decision_id) >= 32  # UUID4 string form
+# ---------------------------------------------------------------------------
+# What ATO submits, and what it returns
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_defaults_idempotency_key_to_event_id(stack):
-    """When omitted, idempotency_key falls back to event.event_id."""
-    event = _make_event(event_id="evt-fallback-key")
-    bundle = await _run(stack, event=event)
+async def test_the_submission_is_atos_scored_login(stack):
+    event = _make_event(event_id="evt-submitted")
+    submission = await _recorded(stack, event)
 
-    assert bundle.idempotency_key == "evt-fallback-key"
-
-
-@pytest.mark.asyncio
-async def test_uses_provided_idempotency_key(stack):
-    """An explicit idempotency_key takes precedence over event.event_id."""
-    bundle = await _run(stack, idempotency_key="explicit-key")
-
-    assert bundle.idempotency_key == "explicit-key"
+    assert submission.reasoner_id == ATO_REGISTRATION.reasoner_id
+    assert submission.event_id == "evt-submitted"
+    assert submission.entity_id == event.entity_id
+    assert submission.raw_event == event.model_dump(mode="json")
+    assert submission.reasoner_context.label_value == 0.05
 
 
-@pytest.mark.asyncio
-async def test_populates_latency_breakdown_for_each_phase(stack):
-    """Bundle latency_breakdown carries one entry per measurable phase.
+async def test_atos_own_steps_are_timed(stack):
+    decision = await run_ato_decision(
+        event=_make_event(),
+        services=stack.services,
+        client=stack.recording,  # type: ignore[arg-type]
+    )
 
-    bundle_ms is intentionally not tracked — see app/submit.py for why.
-    """
-    bundle = await _run(stack)
-
-    expected_phases = {
-        "features_ms",
-        "scorer_ms",
-        "gate_ms",
-        "enforcement_ms",
-    }
-    assert expected_phases.issubset(bundle.latency_breakdown.keys())
-    # A record with no mandatory gate spends next to nothing in the gate
-    # phase (retrieval runs inside the policy gate, so it is part of
-    # gate_ms when the gate runs).
-    assert bundle.latency_breakdown["gate_ms"] < 5.0
+    assert set(decision.latency_ms) == {"features_ms", "scorer_ms", "ledger_ms"}
+    assert decision.total_ms == round(sum(decision.latency_ms.values()), 1)
 
 
-@pytest.mark.asyncio
 async def test_calls_feature_svc_with_event(stack):
     """feature_svc.compute receives the input event verbatim."""
     event = _make_event(event_id="evt-feature-check")
-    await _run(stack, event=event)
+    await _recorded(stack, event)
 
     assert stack.feature_svc.compute.call_count == 1
     assert stack.feature_svc.compute.call_args[0][0] is event
 
 
-@pytest.mark.asyncio
 async def test_calls_scorer_with_features(stack):
     """scorer.score receives the AtoFeatureVector from feature_svc.compute."""
     features = stack.feature_svc.compute.return_value
-    await _run(stack)
+    await _recorded(stack)
 
     assert stack.scorer.score.call_count == 1
     assert stack.scorer.score.call_args[0][0] is features
 
 
-@pytest.mark.asyncio
 async def test_the_gate_context_carries_the_policy_gates_retrieval_inputs(stack):
     """The assembler renders the retrieval query and corpus version into the
     policy gate's gate_config — the gate runs retrieval itself (DR-28)."""
-    bundle = await _run(stack)
+    submission = await _recorded(stack)
 
-    gate_context = bundle.submission.gate_context("policy")
+    gate_context = submission.gate_context("policy")
     assert gate_context is not None
     gate_config = gate_context.gate_config
     assert gate_config is not None
     assert gate_config["corpus_version"] == "corpus-test"
     assert isinstance(gate_config["retrieval_query"], str)
-    assert gate_config["retrieval_query"]
+
+
+async def test_a_ledger_refusal_propagates(stack):
+    from core.exceptions import LedgerError
+
+    class _Refusing:
+        async def submit(self, submission):
+            raise LedgerError(403, "REASONER_MISMATCH", "wrong key")
+
+    with pytest.raises(LedgerError) as err:
+        await run_ato_decision(
+            event=_make_event(),
+            services=stack.services,
+            client=_Refusing(),  # type: ignore[arg-type]
+        )
+    assert err.value.code == "REASONER_MISMATCH"
