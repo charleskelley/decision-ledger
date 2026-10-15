@@ -4,9 +4,10 @@
 --
 -- All tables live in the framework-owned `decisionledger` schema. Reasoners
 -- are tenants distinguished by the `reasoner_id` column on row-level. These
--- are the audit ledger's tables only: decision bundles, replay logs, and
--- resolution attempts. Gates keep whatever they store in their own schemas,
--- created by their own DDL.
+-- are the audit ledger's tables only: decision bundles, replay logs,
+-- resolution attempts, and the reasoner registration snapshots bundles cite.
+-- Gates keep whatever they store in their own schemas, created by their own
+-- DDL.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -148,3 +149,23 @@ on decisionledger.decision_resolution_attempts (decision_id);
 
 create index if not exists idx_resolution_attempts_status
 on decisionledger.decision_resolution_attempts (status);
+
+-- ---------------------------------------------------------------------------
+-- reasoner_registrations — every registration version a decision can cite
+--
+-- A registration is data (DR-31). Its version is the content address of its
+-- canonical JSON (core.observation.registration_version); every bundle
+-- records the version in effect when it was decided
+-- (bundle ->> 'registration_version'), and replay reads that version's
+-- snapshot here, so a decision is re-enforced against the profile it was
+-- made under even after its registration changed or its reasoner left the
+-- deployment. A row is written the first time a deployment serves that
+-- version (insert ... on conflict do nothing) and is never updated.
+-- ---------------------------------------------------------------------------
+create table if not exists decisionledger.reasoner_registrations (
+    reasoner_id text not null,
+    registration_version text not null,
+    registration jsonb not null,
+    first_registered_at timestamptz not null default now(),
+    primary key (reasoner_id, registration_version)
+);

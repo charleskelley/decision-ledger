@@ -13,9 +13,15 @@ dict and answers the store's statements the way psycopg would:
   identically. A failed write leaves the store usable.
 - ``lookup()`` returns any row as stored; ``load()`` and ``replay()`` serve
   schema version 2 and refuse older rows (``BundleSchemaUnsupportedError``).
-- ``replay()`` uses the registry's registration for the row's tenant,
-  re-checks every gate and every bypass rule from the bundle, logs a match
-  with a null diff, and a disagreement with the diff.
+- ``replay()`` enforces against the snapshot of the registration version
+  the bundle cites (the registry's registration for an unversioned bundle,
+  or when the snapshot is missing but the version is current), re-checks
+  every gate and every bypass rule from the bundle, logs a match with a null
+  diff, and a disagreement with the diff.
+- ``write_many()`` checks every bundle, then sends them in one
+  ``executemany``; ``entity_decisions()`` lists a subject's rows, newest
+  first, filtered by tenant and paged by ``before``.
+- Registration snapshots are written once per version and reload equal.
 - ``recent_recorded()`` samples a tenant's recorded v2 bundles, newest first,
   scoped by ``since``, and skips unloadable rows.
 - ``replay_bundle`` is pure and reproduces records, gated decisions, failed
@@ -36,8 +42,13 @@ from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from app.reasoner_registry import StaticReasonerRegistry
 from core.actions import DecisionAction
 from core.bundle import DecisionBundle, GateRecord
-from core.exceptions import BundleSchemaUnsupportedError, UnregisteredReasonerError
+from core.exceptions import (
+    BundleSchemaUnsupportedError,
+    RegistrationSnapshotMissingError,
+    UnregisteredReasonerError,
+)
 from core.gate import GateInput
+from core.observation import registration_version
 from core.submission import evaluate_bypass, evaluate_competing_rules
 from tests._stub_reasoner.registry import LOW_SCORE_RULE, STUB_REGISTRATION
 
@@ -53,11 +64,21 @@ ALLOW, HOLD, BLOCK = DecisionAction.ALLOW, DecisionAction.HOLD, DecisionAction.B
 
 
 class _Row:
-    def __init__(self, reasoner_id: str, schema_version: int, bundle: str, created):
+    def __init__(
+        self,
+        reasoner_id: str,
+        schema_version: int,
+        bundle: str,
+        created,
+        entity_id: str = "",
+        action: str = "",
+    ):
         self.reasoner_id = reasoner_id
         self.schema_version = schema_version
         self.bundle = bundle
         self.created_at = created
+        self.entity_id = entity_id
+        self.action = action
 
 
 class _FakeCursor:
@@ -81,12 +102,61 @@ class _FakeCursor:
             raise RuntimeError("simulated database error")
         text = " ".join(query.split())
         if text.startswith("INSERT INTO decisionledger.decision_bundles"):
-            decision_id, reasoner_id, _entity, created, _action, version, bundle = (
-                params
-            )
+            decision_id, reasoner_id, entity, created, action, version, bundle = params
             self._conn.rows.setdefault(
-                decision_id, _Row(reasoner_id, version, bundle, created)
+                decision_id,
+                _Row(reasoner_id, version, bundle, created, str(entity), action),
             )
+        elif text.startswith("INSERT INTO decisionledger.reasoner_registrations"):
+            reasoner_id, version, registration = params
+            self._conn.registrations.setdefault(
+                (reasoner_id, version), (json.loads(registration), datetime.now(UTC))
+            )
+        elif text.startswith("SELECT registration, first_registered_at"):
+            found = self._conn.registrations.get((params[0], params[1]))
+            self._rows = [] if found is None else [found]
+        elif text.startswith("SELECT registration_version, registration"):
+            self._rows = [
+                (version, payload, first)
+                for (rid, version), (payload, first) in sorted(
+                    self._conn.registrations.items(), key=lambda kv: kv[1][1]
+                )
+                if rid == params[0]
+            ]
+        elif text.startswith("SELECT decision_id, reasoner_id, entity_id, created_at"):
+            entity_id, reasoner_id, _same, before, _b2, _b3, cursor, _c2, limit = params
+            matches = [
+                (decision_id, row)
+                for decision_id, row in self._conn.rows.items()
+                if row.entity_id == entity_id
+                and (reasoner_id is None or row.reasoner_id == reasoner_id)
+                and (
+                    before is None
+                    or row.created_at < before
+                    or (
+                        row.created_at == before
+                        and cursor is not None
+                        and decision_id < cursor
+                    )
+                )
+            ]
+            matches.sort(key=lambda item: (item[1].created_at, item[0]), reverse=True)
+            self._rows = []
+            for decision_id, row in matches[:limit]:
+                submission = json.loads(row.bundle).get("submission") or {}
+                self._rows.append(
+                    (
+                        decision_id,
+                        row.reasoner_id,
+                        row.entity_id,
+                        row.created_at,
+                        row.action,
+                        row.schema_version,
+                        submission.get("mode"),
+                        submission.get("event_id"),
+                        submission.get("entity_type"),
+                    )
+                )
         elif text.startswith("INSERT INTO decisionledger.replay_logs"):
             self._conn.replay_logs.append(params)
         elif text.startswith("SELECT reasoner_id, schema_version, bundle"):
@@ -111,6 +181,11 @@ class _FakeCursor:
         else:  # pragma: no cover - guards against an unexpected statement
             raise AssertionError(f"unexpected statement: {query!r}")
 
+    def executemany(self, query: str, params_seq: list[tuple[Any, ...]]) -> None:
+        self._conn.executemany_calls += 1
+        for params in params_seq:
+            self.execute(query, params)
+
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._rows[0] if self._rows else None
 
@@ -129,7 +204,9 @@ class _FakeConn:
         self.autocommit = autocommit
         self.rows: dict[str, _Row] = {}
         self.replay_logs: list[tuple[Any, ...]] = []
+        self.registrations: dict[tuple[str, str], tuple[Any, datetime]] = {}
         self.statements = 0
+        self.executemany_calls = 0
         self.fail_next = False
 
     def cursor(self) -> _FakeCursor:
@@ -417,12 +494,13 @@ def test_replay_needs_the_rows_tenant_registered(submission):
     assert conn.replay_logs == []
 
 
-def test_replay_reads_the_enforcement_profile_from_the_registry(
+def test_an_unversioned_bundle_replays_against_the_current_registration(
     gated_submission, gate_output
 ):
-    # A thin-history widget held by Tier 3 at decision time; replayed against
-    # a registration without the novel-entity feature it no longer holds, and
-    # the store reports the mismatch.
+    # A thin-history widget held by Tier 3 at decision time, in a bundle that
+    # records no registration version; replayed against a registration
+    # without the novel-entity feature it no longer holds, and the store
+    # reports the mismatch.
     rc = gated_submission.reasoner_context
     novel = gated_submission.model_copy(
         update={
@@ -536,3 +614,148 @@ def test_replay_bundle_detects_a_competing_rule_that_changed(submission):
     result = replay_bundle(tampered, registration=STUB_REGISTRATION)
     assert not result.competing_rules_match
     assert not result.matched
+
+
+# ---------------------------------------------------------------------------
+# Registration snapshots, bulk writes, and the subject timeline (DR-31)
+# ---------------------------------------------------------------------------
+
+
+def _novel(gated_submission: Submission) -> Submission:
+    rc = gated_submission.reasoner_context
+    return gated_submission.model_copy(
+        update={
+            "reasoner_context": rc.model_copy(
+                update={"feature_set": {**rc.feature_set, "thin_history": True}}
+            )
+        }
+    )
+
+
+def _versioned(bundle: DecisionBundle, registration: ReasonerRegistration):
+    return bundle.model_copy(
+        update={"registration_version": registration_version(registration)}
+    )
+
+
+def test_snapshots_are_written_once_per_version_and_reload_equal():
+    conn = _FakeConn()
+    store = _store(conn)
+
+    version = store.snapshots.record(STUB_REGISTRATION)
+    store.snapshots.record(STUB_REGISTRATION)
+
+    assert version == registration_version(STUB_REGISTRATION)
+    assert list(conn.registrations) == [("stub-reasoner", version)]
+    assert conn.statements == 1  # the second record is a no-op in process
+    snapshot = store.snapshots.get("stub-reasoner", version)
+    assert snapshot is not None
+    assert snapshot.registration == STUB_REGISTRATION
+    assert store.snapshots.get("stub-reasoner", "nope") is None
+    assert [s.version for s in store.snapshots.versions("stub-reasoner")] == [version]
+
+
+def test_a_versioned_bundle_replays_against_its_snapshot(gated_submission, gate_output):
+    # The decision was made under the registration with Tier 3; the reasoner
+    # now registers without it. Replay reads the snapshot and still matches.
+    conn = _FakeConn()
+    store = _store(conn)
+    store.snapshots.record(STUB_REGISTRATION)
+    bundle = _versioned(
+        _gated_bundle(_novel(gated_submission), gate_output), STUB_REGISTRATION
+    )
+    store.write(bundle)
+    no_tier3 = STUB_REGISTRATION.model_copy(update={"novel_entity_feature": None})
+
+    result = _store(conn, no_tier3).replay(_DECISION_ID)
+
+    assert result.matched
+    assert result.replayed_action == "HOLD"
+    assert result.registration_version == registration_version(STUB_REGISTRATION)
+
+
+def test_a_versioned_bundle_replays_with_the_current_registration_of_its_version(
+    submission,
+):
+    conn = _FakeConn()  # no snapshot stored
+    _store(conn).write(_versioned(_record_bundle(submission), STUB_REGISTRATION))
+    assert _store(conn).replay(_DECISION_ID).matched
+
+
+def test_a_missing_snapshot_of_another_version_is_refused(
+    gated_submission, gate_output
+):
+    conn = _FakeConn()  # no snapshot stored
+    bundle = _versioned(
+        _gated_bundle(_novel(gated_submission), gate_output), STUB_REGISTRATION
+    )
+    _store(conn).write(bundle)
+    no_tier3 = STUB_REGISTRATION.model_copy(update={"novel_entity_feature": None})
+
+    with pytest.raises(RegistrationSnapshotMissingError) as err:
+        _store(conn, no_tier3).replay(_DECISION_ID)
+    assert err.value.version == registration_version(STUB_REGISTRATION)
+    assert conn.replay_logs == []
+
+
+def test_write_many_checks_every_bundle_then_sends_one_executemany(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    bundles = [
+        _record_bundle(
+            submission.model_copy(update={"event_id": f"evt-{n}"}),
+            decision_id=f"3333333{n}-3333-3333-3333-333333333333",
+        )
+        for n in range(3)
+    ]
+
+    store.write_many(bundles)
+    store.write_many([])
+
+    assert conn.executemany_calls == 1
+    assert sorted(conn.rows) == sorted(b.decision_id for b in bundles)
+
+
+def test_write_many_refuses_the_batch_when_one_bundle_would_not_reload(submission):
+    conn = _FakeConn()
+    good = _record_bundle(submission)
+    bad = _record_bundle(submission, decision_id=_OTHER_ID).model_copy(
+        update={"latency_breakdown": {"gate_ms": float("nan")}}
+    )
+    with pytest.raises(ValueError, match="does not survive the JSON round trip"):
+        _store(conn).write_many([good, bad])
+    assert conn.rows == {}
+    assert conn.executemany_calls == 0
+
+
+def test_entity_decisions_lists_a_subjects_rows_newest_first(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    first = _record_bundle(submission)
+    second = _record_bundle(
+        submission.model_copy(update={"event_id": "evt-later"}), decision_id=_OTHER_ID
+    ).model_copy(update={"created_at": first.created_at + timedelta(seconds=1)})
+    store.write_many([first, second])
+    entity_id = str(submission.entity_id)
+
+    rows = store.entity_decisions(entity_id)
+    assert [r.decision_id for r in rows] == [_OTHER_ID, _DECISION_ID]
+    assert rows[0].event_id == "evt-later"
+    assert rows[0].mode == "record"
+    assert rows[0].entity_type == "widget"
+    assert rows[0].decision_action == "ALLOW"
+    assert [r.decision_id for r in store.entity_decisions(entity_id, limit=1)] == [
+        _OTHER_ID
+    ]
+    paged = store.entity_decisions(entity_id, before=second.created_at)
+    assert [r.decision_id for r in paged] == [_DECISION_ID]
+    assert store.entity_decisions(entity_id, reasoner_id="other-reasoner") == []
+    with pytest.raises(KeyError):
+        store.entity_decisions("not-a-uuid")
+    with pytest.raises(KeyError):
+        store.entity_decisions(entity_id, before=second.created_at, before_id="x")
+    # The cursor pair continues within an instant: the older id follows.
+    tied = store.entity_decisions(
+        entity_id, before=first.created_at, before_id=_OTHER_ID
+    )
+    assert [r.decision_id for r in tied] == [_DECISION_ID]
