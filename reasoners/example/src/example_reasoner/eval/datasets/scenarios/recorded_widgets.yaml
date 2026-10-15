@@ -1,0 +1,37 @@
+# Consistency scenarios for the example reasoner.
+#
+# The example's scorer is stateless (it scores each inspection on its own
+# measurements), so the trigger's decision cannot depend on the order the
+# precursors arrived in — these scenarios pin that the whole pipeline keeps
+# that property: same evidence, same decision, whatever the ordering. Both
+# triggers fall in a bypass band, so they are recorded (no gate, no LLM).
+#
+# Expected stable actions: ALLOW (steady widget), BLOCK (broken widget).
+
+scenarios:
+  - scenario_id: ex-steady-widget
+    description: >
+      Three inspections of one steady, aligned widget; the trigger scores in
+      the low band and is recorded ALLOW under low-score in every ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &steady_1 {event_id: evt-ex-steady-1, timestamp: "2026-09-01T09:00:00Z", widget_id: widget-ex-steady, region: REGION_A, wobble: 0.10, misalignment_mm: 0.4, prior_inspections: 20}
+          - &steady_2 {event_id: evt-ex-steady-2, timestamp: "2026-09-02T09:00:00Z", widget_id: widget-ex-steady, region: REGION_A, wobble: 0.08, misalignment_mm: 0.3, prior_inspections: 21}
+          - &steady_t {event_id: evt-ex-steady-trigger, timestamp: "2026-09-03T09:00:00Z", widget_id: widget-ex-steady, region: REGION_A, wobble: 0.05, misalignment_mm: 0.2, prior_inspections: 22}
+      - ordering_id: reversed-precursors
+        events: [*steady_2, *steady_1, *steady_t]
+
+  - scenario_id: ex-broken-widget
+    description: >
+      Three inspections of a widget that is shaking apart; the trigger scores
+      in the high band and is recorded BLOCK under high-score in every
+      ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &broken_1 {event_id: evt-ex-broken-1, timestamp: "2026-09-01T10:00:00Z", widget_id: widget-ex-broken, region: REGION_B, wobble: 0.80, misalignment_mm: 4.5, prior_inspections: 30}
+          - &broken_2 {event_id: evt-ex-broken-2, timestamp: "2026-09-02T10:00:00Z", widget_id: widget-ex-broken, region: REGION_B, wobble: 0.90, misalignment_mm: 5.0, prior_inspections: 31}
+          - &broken_t {event_id: evt-ex-broken-trigger, timestamp: "2026-09-03T10:00:00Z", widget_id: widget-ex-broken, region: REGION_B, wobble: 0.95, misalignment_mm: 6.0, prior_inspections: 32}
+      - ordering_id: reversed-precursors
+        events: [*broken_2, *broken_1, *broken_t]

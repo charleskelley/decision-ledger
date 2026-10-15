@@ -1,0 +1,16 @@
+# Member-local Ruff config: inherits everything from the root pyproject and
+# only adds the example package's first-party name and per-file ignores.
+extend = "../../pyproject.toml"
+src = ["src", "tests", "../.."]
+
+[lint.isort]
+known-first-party = ["core", "app", "eval", "example_reasoner"]
+
+[lint.extend-per-file-ignores]
+"tests/**/*.py" = [
+    "D",      # no docstring requirements in tests
+    "S101",   # assert is expected in tests
+]
+"src/example_reasoner/__main__.py" = [
+    "T201",   # the CLI prints to stdout
+]

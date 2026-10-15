@@ -1,0 +1,15 @@
+# Robustness sub-check — fallback. When the policy gate fails (any
+# fallback_kind: the example's driver swaps in a gate that raises), the
+# ledger fails it closed and the decision holds (DR-29). The trigger scores
+# between the bands, so the example asks for the gate and the gate is
+# invoked; no LLM is called. Threshold: zero tolerance.
+
+cases:
+  - case_id: ex-fallback-llm-5xx
+    event: {event_id: evt-ex-fallback-1, timestamp: "2026-09-05T09:00:00Z", widget_id: widget-ex-fallback-1, region: REGION_A, wobble: 0.50, misalignment_mm: 2.0, prior_inspections: 25}
+    fallback_kind: llm_5xx
+    expected_action: HOLD
+  - case_id: ex-fallback-retrieval-error
+    event: {event_id: evt-ex-fallback-2, timestamp: "2026-09-05T09:05:00Z", widget_id: widget-ex-fallback-2, region: REGION_B, wobble: 0.45, misalignment_mm: 2.5, prior_inspections: 40}
+    fallback_kind: retrieval_error
+    expected_action: HOLD

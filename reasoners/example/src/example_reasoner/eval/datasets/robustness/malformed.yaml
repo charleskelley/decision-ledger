@@ -1,0 +1,13 @@
+# Robustness sub-check — schema failure. When the policy gate returns no
+# usable verdict, enforcement Tier 1 must hold the decision. The driver
+# forces gate mode (a widget in a band would be recorded) and enforces a
+# policy-gate record with verdict=None; no gate and no LLM are called.
+# Threshold: zero tolerance.
+
+cases:
+  - case_id: ex-malformed-mid-band
+    event: {event_id: evt-ex-malformed-1, timestamp: "2026-09-04T09:00:00Z", widget_id: widget-ex-malformed-1, region: REGION_A, wobble: 0.50, misalignment_mm: 2.0, prior_inspections: 25}
+    expected_action: HOLD
+  - case_id: ex-malformed-low-band
+    event: {event_id: evt-ex-malformed-2, timestamp: "2026-09-04T09:05:00Z", widget_id: widget-ex-malformed-2, region: REGION_B, wobble: 0.05, misalignment_mm: 0.2, prior_inspections: 25}
+    expected_action: HOLD
