@@ -13,7 +13,7 @@ policy gate architecture.
   evaluation framework, and the DR-1–DR-26 decision record.
 - [**Reasoners**](design/reasoners/index.md) — How a domain plugs into
   the framework: a uv workspace member under `reasoners/`, discovered by
-  entry point, that hands off through `build_observation()`.
+  entry point, that hands off through `build_submission()`.
 - [**Operations**](operations/secrets.md) — Local, CI, and deployment
   secrets handling.
 - [**Development**](development/contributing.md) — Contributing guide,

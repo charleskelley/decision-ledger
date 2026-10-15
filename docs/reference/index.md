@@ -18,21 +18,22 @@ The framework owns runtime orchestration, deterministic enforcement,
 and audit-bundle persistence. Everything below lives under `core/`
 and `app/` — never imports from a reasoner package (DR-24, DR-26).
 
-- [`Observation`][core.observation.Observation] — Protocol every
-  reasoner satisfies; the single data carrier across the boundary.
+- [`Submission`][core.submission.Submission] — The concrete wire
+  contract every reasoner hands the ledger, to record a decision or to
+  ask for a gate; the single data carrier across the boundary.
 - [`DecisionBundle`][core.bundle.DecisionBundle] — Immutable audit
   record; the artifact replay reconstructs decisions from.
 - [`DecisionAction`][core.actions.DecisionAction] — The terminal
   action enum (`ALLOW`, `CHALLENGE`, `HOLD`, `BLOCK`).
-- [`execute_decision`][app.decide.execute_decision] — Framework half
-  of the handoff: intake validation → retrieval → gate → enforcement →
-  audit.
+- [`submit`][app.submit.submit] — Framework half of the handoff:
+  intake validation → the decision's gate set (mandatory, then advisory)
+  → enforcement and the combinator → audit.
 - [`ReasonerPlugin`][app.plugin.ReasonerPlugin] — What a reasoner
   publishes under the `decisionledger.reasoners` entry point;
   [`discover_plugins`][app.plugins.discover_plugins] loads them and
   [`create_app`][app.main.create_app] composes them.
 - [`ReasonerRegistration`][core.observation.ReasonerRegistration] —
-  A reasoner's identity, allowed resources, and enforcement profile.
+  A reasoner's identity, gate set, bypass rules, and enforcement profile.
 
 ## The reasoner contract
 
@@ -40,10 +41,11 @@ A reasoner owns a domain's events, features, scorer, and policy
 mapping. The reference reasoner is account takeover; everything below
 lives in the `ato_reasoner` package under `reasoners/account_takeover/src/`.
 
-- [`build_observation`][ato_reasoner.assembler.build_observation]
+- [`build_submission`][ato_reasoner.assembler.build_submission]
   — Reasoner half of the handoff. Translates the domain's
-  `ScorerOutput` into `ReasonerContext` + `GateContext` + (on the fast
-  path) `fast_path_rationale`.
+  `ScorerOutput` into a `ReasonerContext` and the policy gate's
+  `GateContext`, and records the login under a registered score band
+  (`allow-band`, `block-band`) or asks for the gate.
 - [`run_ato_decision`][ato_reasoner.pipeline.run_ato_decision]
   — Domain pipeline orchestrator: features → scorer → assembler →
   framework.
