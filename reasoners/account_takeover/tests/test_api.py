@@ -3,7 +3,8 @@
 ``LoginEvent`` is a strict model. These tests pin that the endpoint accepts
 the ordinary JSON wire format (ISO-8601 timestamps, enum values as strings)
 by validating the body in JSON mode, and that an invalid body is a 422 with
-Pydantic's error list rather than a 500.
+Pydantic's error list rather than a 500 — including every login its
+framework submission would refuse, rejected before the pipeline runs.
 
 The pipeline itself is not exercised: ``run_ato_decision`` is replaced with
 a stub that returns a minimal bundle-like object.
@@ -23,7 +24,6 @@ from fastapi.testclient import TestClient
 import ato_reasoner.api as api_module
 from ato_reasoner.registry import ATO_REGISTRATION
 from core.actions import DecisionAction
-from core.routes import GateRoute
 
 
 def _wire_body() -> dict[str, Any]:
@@ -57,8 +57,24 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
         return SimpleNamespace(
             decision_id="00000000-0000-0000-0000-000000000001",
             decision_action=DecisionAction.ALLOW,
-            enforcement_rule_applied=None,
-            raw_event=SimpleNamespace(route=GateRoute.FAST_PATH_ALLOW),
+            decision_level_rule=None,
+            submission=SimpleNamespace(
+                event_id=event.event_id,
+                mode="record",
+                bypass=SimpleNamespace(rule_id="allow-band"),
+            ),
+            bypass_rule_holds=True,
+            bypass_check=None,
+            other_bypass_checks=(),
+            gates=(
+                SimpleNamespace(
+                    gate_id="policy",
+                    mandatory=False,
+                    status="skipped",
+                    enforcement=None,
+                    enforced_action=None,
+                ),
+            ),
             latency_breakdown={"features_ms": 1.0, "scorer_ms": 2.0},
         )
 
@@ -82,7 +98,13 @@ def test_decision_endpoint_accepts_iso_timestamps_and_enum_strings(client):
     assert event.timestamp.tzinfo is not None
     body = response.json()
     assert body["decision_action"] == "ALLOW"
-    assert body["route"] == "FAST_PATH_ALLOW"
+    assert body["mode"] == "record"
+    assert body["bypass_rule_id"] == "allow-band"
+    assert body["bypass_rule_holds"] is True
+    assert body["enforcement_rule_applied"] is None
+    assert body["gates"] == [
+        {"gate_id": "policy", "mandatory": False, "status": "skipped", "action": None}
+    ]
     assert body["latency_ms"] == 3.0
 
 
@@ -101,6 +123,37 @@ def test_decision_endpoint_rejects_invalid_body_with_422_and_field_errors(client
     locs = {tuple(err["loc"]) for err in response.json()["detail"]}
     assert ("auth_method",) in locs
     assert ("account_id",) in locs
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "loc"),
+    [
+        ("timestamp", "2026-10-14T12:00:00", ("timestamp",)),
+        ("event_id", "", ("event_id",)),
+        (
+            "geolocation",
+            {**_wire_body()["geolocation"], "latitude": float("nan")},
+            ("geolocation", "latitude"),
+        ),
+        ("user_agent", "Mozilla/5.0\x00", ()),
+    ],
+    ids=["naive-timestamp", "empty-event-id", "nan-latitude", "nul"],
+)
+def test_a_login_its_submission_would_refuse_is_a_422_before_the_pipeline_runs(
+    client, field, value, loc
+):
+    # json.dumps writes the NaN literal; the pipeline (features, Redis
+    # windows) must never see the event.
+    bad = {**_wire_body(), field: value}
+    response = client.post(
+        "/api/v1/ato/decisions",
+        content=json.dumps(bad),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    assert "event" not in client.seen  # type: ignore[attr-defined]
+    if loc:
+        assert loc in {tuple(err["loc"]) for err in response.json()["detail"]}
 
 
 def test_decision_endpoint_documents_the_login_event_schema_in_openapi(client):

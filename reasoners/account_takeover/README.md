@@ -6,8 +6,9 @@ distribution: `ato-reasoner`; `reasoner_id`: `ato-reasoner`.
 
 It owns the full ATO domain: login-event types, Redis-backed feature
 windows and ingestion stream, the XGBoost scorer (artifact under
-`src/ato_reasoner/scorer/models/`), the assembler that builds the
-`Observation`, prompt templates (`prompts/ato-v*.yaml`), the policy corpus
+`src/ato_reasoner/scorer/models/`), the assembler that builds its
+`Submission` (recording a login under a score band or asking for the gate),
+prompt templates (`prompts/ato-v*.yaml`), the policy corpus
 (`corpus/`), the synthetic-scenario generator, and the eval driver and
 datasets. The framework (`decision-ledger`) never imports or depends on it.
 

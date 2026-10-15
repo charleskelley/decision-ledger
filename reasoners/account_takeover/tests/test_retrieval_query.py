@@ -19,7 +19,6 @@ from ato_reasoner.events import (
 from ato_reasoner.retrieval_query import build_ato_query
 from ato_reasoner.scorer import ScorerOutput
 from core.observation import Contribution
-from core.routes import GateRoute
 
 
 def _make_event(auth_method: AuthMethod = AuthMethod.PASSWORD) -> LoginEvent:
@@ -58,7 +57,6 @@ def _make_scorer_output(feature_names: list[str]) -> ScorerOutput:
         ],
         scorer_version="xgb-v1.0.0",
         inference_latency_ms=2.5,
-        route=GateRoute.ROUTE_TO_GATE,
     )
 
 

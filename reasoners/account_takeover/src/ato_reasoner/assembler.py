@@ -1,15 +1,15 @@
-"""ATO Observation assembler — translates domain types to framework contracts.
+"""ATO submission assembler — translates domain types to the framework contract.
 
 The assembler is the handoff boundary between the ATO Reasoner domain layer
 and the DecisionLedger framework. It translates three domain artifacts:
 
 - ``LoginEvent``       — the raw authentication event
 - ``AtoFeatureVector`` — computed sliding-window features
-- ``ScorerOutput``     — XGBoost risk score, SHAP signals, routing decision
+- ``ScorerOutput``     — XGBoost risk score and SHAP signals
 
-...into a fully-populated ``LoginEvent`` (satisfying ``Observation``) ready
-for framework submission. The three domain types are never seen by the
-framework — only the assembled observation crosses the boundary.
+...into one ``Submission`` (DR-31). The three domain types are never seen by
+the framework as types — the event crosses only as opaque ``raw_event``
+JSON, the features and score only as the ``ReasonerContext``.
 
 Translation mapping:
     ScorerOutput → ReasonerContext
@@ -31,10 +31,14 @@ Translation mapping:
                                 domain-owned query travels in its gate_config
         corpus_version        = the corpus version stamp from AtoSettings
 
-    ScorerOutput → fast_path_rationale  (fast path only)
-        Human-readable description of the confidence-band rule that fired,
-        e.g. "risk_score=0.930 > 0.85 → FAST_PATH_BLOCK". This is the
-        audit trail for why the policy gate was bypassed.
+    ReasonerContext → mode (DR-30)
+        ``matching_bypass_rule`` checks ATO's registered bypass rules
+        (``allow-band``, ``block-band``) against the reasoner context. When
+        one holds the submission *records* that rule's action and cites it
+        (pinned to its version); otherwise it asks the ledger to *gate* the
+        login, with no proposal. The policy gate's context goes on every
+        submission, recorded ones too, so any recorded login can be shadow-
+        evaluated by the gate later.
 """
 
 from __future__ import annotations
@@ -42,23 +46,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ato_reasoner.policy import Jurisdiction, RiskTier
+from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.retrieval_query import build_ato_query
 from core.observation import AttributionSummary, GateContext, LabelType, ReasonerContext
-from core.routes import GateRoute
+from core.submission import BypassCitation, Submission, matching_bypass_rule
 
 if TYPE_CHECKING:
+    from pydantic import JsonValue
+
     from ato_reasoner.events import LoginEvent
     from ato_reasoner.features import AtoFeatureVector
     from ato_reasoner.scorer import ScorerOutput
+    from core.observation import ReasonerRegistration
 
 # Reasoner registration identity — matches DecisionLedger registration record.
-_REASONER_ID = "ato-reasoner"
-_REASONER_NAME = "ATO Reasoner"
-
-# Confidence-band thresholds that drive fast-path routing. Must stay in
-# sync with FAST_PATH_*_THRESHOLD in ato_reasoner/scorer/scorer.py.
-_FAST_PATH_ALLOW_THRESHOLD = 0.20  # risk_score < 0.20 → FAST_PATH_ALLOW
-_FAST_PATH_BLOCK_THRESHOLD = 0.95  # risk_score > 0.95 → FAST_PATH_BLOCK
+_REASONER_ID = ATO_REGISTRATION.reasoner_id
+_REASONER_NAME = ATO_REGISTRATION.reasoner_name
 
 # Risk score → risk tier mapping for corpus retrieval filtering.
 _HIGH_VALUE_TIER_THRESHOLD = 0.60
@@ -125,29 +128,6 @@ def _resolve_jurisdictions(event: LoginEvent) -> list[str]:
     return [str(j) for j in jurisdictions]
 
 
-def _fast_path_rationale(route: GateRoute, risk_score: float) -> str:
-    """Build the fast_path_rationale string for a fast-path route.
-
-    Records the confidence-band rule that fired in a human-readable form.
-    This is the audit trail for why the gate was bypassed.
-
-    Args:
-        route: The fast-path gate route.
-        risk_score: The risk score that crossed the threshold.
-
-    Returns:
-        Descriptive rationale string set on the outbound Observation.
-    """
-    if route == GateRoute.FAST_PATH_ALLOW:
-        return (
-            f"risk_score={risk_score:.3f} < {_FAST_PATH_ALLOW_THRESHOLD}"
-            " → FAST_PATH_ALLOW"
-        )
-    return (
-        f"risk_score={risk_score:.3f} > {_FAST_PATH_BLOCK_THRESHOLD} → FAST_PATH_BLOCK"
-    )
-
-
 def _build_reasoner_context(
     features: AtoFeatureVector,
     scorer: ScorerOutput,
@@ -208,50 +188,49 @@ def _build_gate_context(
     ]
     top_signals_rendered = ", ".join(top_signal_strs) if top_signal_strs else "none"
 
-    return GateContext(
-        gate_id="policy",
-        gate_config={
-            "template_id": "ato-v3",
-            "template_vars": {
-                "risk_score": f"{scorer.risk_score:.3f}",
-                "risk_tier": _resolve_risk_tier(scorer.risk_score),
-                "auth_method": event.auth_method.value,
-                "outcome": event.outcome.value,
-                "jurisdiction": event.geolocation.country,
-                "top_signals": top_signals_rendered,
-                "impossible_travel": str(features.impossible_travel),
-                "velocity_1min": str(features.velocity_1min),
-                "velocity_5min": str(features.velocity_5min),
-                "velocity_60min": str(features.velocity_60min),
-                "device_novelty": f"{features.device_novelty:.2f}",
-                "ip_novelty": f"{features.ip_novelty:.2f}",
-                "geo_novelty": f"{features.geo_novelty:.2f}",
-                "sparse_history": str(features.sparse_history),
-            },
-            "jurisdictions": _resolve_jurisdictions(event),
+    gate_config: dict[str, JsonValue] = {
+        "template_id": "ato-v3",
+        "template_vars": {
+            "risk_score": f"{scorer.risk_score:.3f}",
             "risk_tier": _resolve_risk_tier(scorer.risk_score),
-            "retrieval_query": build_ato_query(event, scorer),
-            "corpus_version": corpus_version,
+            "auth_method": event.auth_method.value,
+            "outcome": event.outcome.value,
+            "jurisdiction": event.geolocation.country,
+            "top_signals": top_signals_rendered,
+            "impossible_travel": str(features.impossible_travel),
+            "velocity_1min": str(features.velocity_1min),
+            "velocity_5min": str(features.velocity_5min),
+            "velocity_60min": str(features.velocity_60min),
+            "device_novelty": f"{features.device_novelty:.2f}",
+            "ip_novelty": f"{features.ip_novelty:.2f}",
+            "geo_novelty": f"{features.geo_novelty:.2f}",
+            "sparse_history": str(features.sparse_history),
         },
-    )
+        "jurisdictions": [*_resolve_jurisdictions(event)],
+        "risk_tier": _resolve_risk_tier(scorer.risk_score),
+        "retrieval_query": build_ato_query(event, scorer),
+        "corpus_version": corpus_version,
+    }
+    return GateContext(gate_id="policy", gate_config=gate_config)
 
 
-def build_observation(
+def build_submission(
     event: LoginEvent,
     features: AtoFeatureVector,
     scorer: ScorerOutput,
     *,
     corpus_version: str,
-) -> LoginEvent:
-    """Assemble a fully-populated ATO Observation for DecisionLedger submission.
+    registration: ReasonerRegistration = ATO_REGISTRATION,
+) -> Submission:
+    """Assemble the ATO ``Submission`` for one scored login.
 
-    Translates three domain artifacts into the framework contracts and returns
-    an updated ``LoginEvent`` satisfying the ``Observation`` protocol with all
-    framework fields populated. The original ``event`` is not modified —
-    ``model_copy`` produces a new frozen instance.
+    Translates the three domain artifacts into the framework contract and
+    picks the mode with ATO's registered bypass rules: a login whose risk
+    score falls in a band is recorded with that band's action, citing the
+    rule; any other login asks the ledger to gate it.
 
     This is the only function in the ATO domain that should be called by the
-    pipeline before handing the observation to the DecisionLedger framework.
+    pipeline before handing a decision to the DecisionLedger framework.
 
     Args:
         event: Validated login event from the ingestion layer. Must have
@@ -260,28 +239,34 @@ def build_observation(
         scorer: XGBoost scorer output from the scorer layer.
         corpus_version: Version stamp of ATO's policy corpus
             (``AtoSettings.corpus_version``), recorded by the policy gate.
+        registration: The registration whose bypass rules pick the mode;
+            ATO's own by default.
 
     Returns:
-        A new ``LoginEvent`` with ``routing``, ``reasoner_context``,
-        ``fast_path_rationale``, and ``gate_context`` fully populated.
-        ``fast_path_rationale`` is ``None`` when routing to the gate.
+        A ``record`` submission (``proposed_action`` and a version-pinned
+        ``bypass`` citation) when a bypass rule holds; otherwise a ``gate``
+        submission with no proposal. Both carry the policy gate's context
+        and the event as ``raw_event``.
     """
     reasoner_context = _build_reasoner_context(features, scorer)
     gate_context = _build_gate_context(
         event, features, scorer, corpus_version=corpus_version
     )
-
-    rationale = (
-        _fast_path_rationale(scorer.route, scorer.risk_score)
-        if scorer.route != GateRoute.ROUTE_TO_GATE
-        else None
-    )
-
-    return event.model_copy(
-        update={
-            "route": scorer.route,
-            "reasoner_context": reasoner_context,
-            "fast_path_rationale": rationale,
-            "gate_context": gate_context,
-        }
+    rule = matching_bypass_rule(registration, reasoner_context)
+    return Submission(
+        reasoner_id=registration.reasoner_id,
+        event_id=event.event_id,
+        timestamp=event.timestamp,
+        entity_id=event.entity_id,
+        entity_type=event.entity_type,
+        mode="record" if rule is not None else "gate",
+        proposed_action=rule.action if rule is not None else None,
+        bypass=(
+            BypassCitation(rule_id=rule.rule_id, rule_version=rule.version)
+            if rule is not None
+            else None
+        ),
+        reasoner_context=reasoner_context,
+        gate_contexts=(gate_context,),
+        raw_event=event.model_dump(mode="json"),
     )

@@ -5,8 +5,8 @@
 # enforcement layer MUST route to HOLD regardless of the underlying event.
 #
 # The PipelineDriver.run_with_forced_schema_failure() helper bypasses the
-# gate entirely (calls app.enforcement.resolver.resolve with gate_output=None),
-# so the events themselves are intentionally valid LoginEvents. The
+# gate entirely (it forces gate mode and enforces a policy-gate output with
+# verdict=None), so the events themselves are intentionally valid LoginEvents. The
 # "violation" is on the gate-output side, not the event side — that surface
 # is exercised by integration tests of the gate's parsing logic, not here.
 #

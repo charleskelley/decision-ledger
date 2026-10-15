@@ -3,11 +3,13 @@
 The ATO route handler and the eval harness's PipelineDriver both delegate
 to ``run_ato_decision()``. These tests lock in the orchestration contract:
 which services are called, in which order, with which arguments.
-Downstream artifact construction (build_bundle, resolve, build_observation)
-is exercised by their own dedicated test files; we don't re-test that here.
+Downstream artifact construction (build_bundle, enforcement,
+build_submission) is exercised by their own dedicated test files; we don't
+re-test that here.
 
-Fast-path coverage only — the gate-path branch (``ROUTE_TO_GATE``)
-is covered end-to-end by the scenario smoke test against the real stack.
+Mostly the recorded path (a score in a bypass band): the gated path through
+the real policy gate is covered end-to-end by the scenario smoke test
+against the real stack. A mid-band score is checked to ask for the gate.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from ato_reasoner.pipeline import run_ato_decision
 from ato_reasoner.plugin import AtoServices
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
-from core.routes import GateRoute
+from core.actions import DecisionAction
 
 if TYPE_CHECKING:
     from core.bundle import DecisionBundle
@@ -92,15 +94,14 @@ def _make_features() -> AtoFeatureVector:
     )
 
 
-def _make_fast_path_scorer_output() -> ScorerOutput:
-    """Low-risk score → assembler routes to FAST_PATH_ALLOW."""
+def _make_scorer_output(risk_score: float = 0.05) -> ScorerOutput:
+    """A score; 0.05 is in the allow band, so ATO records ALLOW."""
     return ScorerOutput(
         entity_id=uuid4(),
-        risk_score=0.05,
+        risk_score=risk_score,
         top_signals=[],
         scorer_version="xgb-test",
         inference_latency_ms=1.0,
-        route=GateRoute.FAST_PATH_ALLOW,
     )
 
 
@@ -119,16 +120,16 @@ class _PolicyGatePlugin:
 class _Stack:
     """The two service objects ``run_ato_decision`` takes, built on stubs.
 
-    feature_svc and scorer return real domain objects so build_observation
+    feature_svc and scorer return real domain objects so build_submission
     can run against them. The composed policy gate and the store are
-    MagicMocks (no gate call expected on the fast path).
+    MagicMocks (no gate call expected on the recorded path).
     """
 
     def __init__(self) -> None:
         self.feature_svc = MagicMock()
         self.feature_svc.compute.return_value = _make_features()
         self.scorer = MagicMock()
-        self.scorer.score.return_value = _make_fast_path_scorer_output()
+        self.scorer.score.return_value = _make_scorer_output()
         # gate.evaluate is async (DR-23) — use AsyncMock so awaits work
         self.gate = MagicMock()
         self.gate.evaluate = AsyncMock()
@@ -177,20 +178,47 @@ async def _run(
 
 
 @pytest.mark.asyncio
-async def test_fast_path_does_not_invoke_the_gate(stack):
-    """ROUTE != ROUTE_TO_GATE → the composed gate's evaluate is untouched."""
-    await _run(stack)
+async def test_an_allow_band_score_is_recorded_without_invoking_the_gate(stack):
+    """A score in the allow band → a record; the advisory gate is skipped."""
+    bundle = await _run(stack)
 
     assert stack.gate.evaluate.call_count == 0
+    assert bundle.submission.mode == "record"
+    assert bundle.submission.bypass is not None
+    assert bundle.submission.bypass.rule_id == "allow-band"
+    assert bundle.decision_action == DecisionAction.ALLOW
+    [policy] = bundle.gates
+    assert (policy.gate_id, policy.status) == ("policy", "skipped")
+    assert policy.output is None
 
 
 @pytest.mark.asyncio
-async def test_fast_path_returns_bundle_with_no_gate_artifacts(stack):
-    """Fast-path bundle has gate_input and gate_output both None."""
+async def test_a_block_band_score_is_recorded_as_block(stack):
+    stack.scorer.score.return_value = _make_scorer_output(0.97)
     bundle = await _run(stack)
 
-    assert bundle.gate_input is None
-    assert bundle.gate_output is None
+    assert stack.gate.evaluate.call_count == 0
+    assert bundle.submission.bypass is not None
+    assert bundle.submission.bypass.rule_id == "block-band"
+    assert bundle.decision_action == DecisionAction.BLOCK
+    assert bundle.bypass_rule_holds is True
+
+
+@pytest.mark.asyncio
+async def test_a_mid_band_score_asks_the_policy_gate(stack):
+    """Between the bands → gate mode; the composed policy gate is invoked.
+
+    The gate double returns something that is not a ``GateOutput``, so the
+    framework fails it closed and holds the login (DR-29).
+    """
+    stack.scorer.score.return_value = _make_scorer_output(0.61)
+    bundle = await _run(stack)
+
+    assert bundle.submission.mode == "gate"
+    assert stack.gate.evaluate.call_count == 1
+    [policy] = bundle.gates
+    assert policy.status == "failed"
+    assert bundle.decision_action == DecisionAction.HOLD
 
 
 @pytest.mark.asyncio
@@ -241,7 +269,7 @@ async def test_uses_provided_idempotency_key(stack):
 async def test_populates_latency_breakdown_for_each_phase(stack):
     """Bundle latency_breakdown carries one entry per measurable phase.
 
-    bundle_ms is intentionally not tracked — see app/decide.py for why.
+    bundle_ms is intentionally not tracked — see app/submit.py for why.
     """
     bundle = await _run(stack)
 
@@ -252,9 +280,10 @@ async def test_populates_latency_breakdown_for_each_phase(stack):
         "enforcement_ms",
     }
     assert expected_phases.issubset(bundle.latency_breakdown.keys())
-    # Fast path: the gate phase is recorded as 0.0 (retrieval now runs
-    # inside the policy gate, so it is part of gate_ms when the gate runs).
-    assert bundle.latency_breakdown["gate_ms"] == 0.0
+    # A record with no mandatory gate spends next to nothing in the gate
+    # phase (retrieval runs inside the policy gate, so it is part of
+    # gate_ms when the gate runs).
+    assert bundle.latency_breakdown["gate_ms"] < 5.0
 
 
 @pytest.mark.asyncio
@@ -283,7 +312,9 @@ async def test_the_gate_context_carries_the_policy_gates_retrieval_inputs(stack)
     policy gate's gate_config — the gate runs retrieval itself (DR-28)."""
     bundle = await _run(stack)
 
-    gate_config = bundle.raw_event.gate_context.gate_config
+    gate_context = bundle.submission.gate_context("policy")
+    assert gate_context is not None
+    gate_config = gate_context.gate_config
     assert gate_config is not None
     assert gate_config["corpus_version"] == "corpus-test"
     assert isinstance(gate_config["retrieval_query"], str)

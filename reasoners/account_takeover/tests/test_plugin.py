@@ -17,13 +17,13 @@ import pytest
 
 from app.plugin import ReasonerPlugin
 from app.plugins import PLUGIN_GROUP, discover_plugins
-from ato_reasoner.assembler import build_observation
+from ato_reasoner.assembler import build_submission
 from ato_reasoner.eval.adapter import ADAPTER
 from ato_reasoner.events import Geolocation
 from ato_reasoner.plugin import PLUGIN
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
-from core.routes import GateRoute
+from core.submission import Submission
 from eval.adapter import EVAL_ADAPTER_GROUP
 from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
 
@@ -55,18 +55,18 @@ def test_ato_plugin_ships_its_prompts_and_corpus_inside_the_package():
 
 @pytest.mark.parametrize("country", ["US", "DE"])
 @pytest.mark.parametrize(
-    ("risk_score", "route"),
+    ("risk_score", "mode", "rule_id"),
     [
-        (0.05, GateRoute.FAST_PATH_ALLOW),
-        (0.61, GateRoute.ROUTE_TO_GATE),
-        (0.97, GateRoute.FAST_PATH_BLOCK),
+        (0.05, "record", "allow-band"),
+        (0.61, "gate", None),
+        (0.97, "record", "block-band"),
     ],
 )
 def test_every_gate_context_the_assembler_builds_is_one_the_policy_gate_accepts(
-    login_event, ato_feature_vector, country, risk_score, route
+    login_event, ato_feature_vector, country, risk_score, mode, rule_id
 ):
-    # The gate validates and authorizes ATO's gate_config at intake on every
-    # route, so every band and every geography must pass both checks.
+    # The gate validates and authorizes ATO's gate_config at intake in both
+    # modes, so every band and every geography must pass both checks.
     event = login_event.model_copy(
         update={
             "geolocation": Geolocation(
@@ -84,20 +84,32 @@ def test_every_gate_context_the_assembler_builds_is_one_the_policy_gate_accepts(
         top_signals=[],
         scorer_version="xgb-test",
         inference_latency_ms=1.0,
-        route=route,
     )
-    observation = build_observation(
+    submission = build_submission(
         event, ato_feature_vector, scorer, corpus_version="ato-v1"
     )
     profile = ReasonerProfile.from_assets(
         prompts_dir=PLUGIN.prompts_dir, corpus_dir=PLUGIN.corpus_dir
     )
 
-    config = PolicyGateConfig.model_validate(observation.gate_context.gate_config)
+    [context] = submission.gate_contexts
+    config = PolicyGateConfig.model_validate(context.gate_config)
     profile.authorize(config)
 
-    assert observation.gate_context.gate_id == "policy"
+    assert context.gate_id == "policy"
     assert config.template_id == "ato-v3"
+    assert submission.mode == mode
+    if rule_id is None:
+        assert submission.bypass is None
+        assert submission.proposed_action is None
+    else:
+        assert submission.bypass is not None
+        assert submission.bypass.rule_id == rule_id
+        # Citations pin the registered version, so registration skew is a
+        # 422 rather than a silent HOLD.
+        assert submission.bypass.rule_version == "1"
+    # The ledger stores the submission verbatim; it must round-trip.
+    assert Submission.model_validate_json(submission.model_dump_json()) == submission
 
 
 def test_installed_runtime_entry_point_resolves_to_the_plugin_singleton():

@@ -1,18 +1,17 @@
-"""ATO domain pipeline — wraps framework execute_decision with domain steps.
+"""ATO domain pipeline — wraps the framework's ``submit`` with domain steps.
 
 ``run_ato_decision()`` runs the ATO-specific portion of the pipeline against
-a single ``LoginEvent``: feature computation, scoring, and observation
-assembly (which renders the policy gate's retrieval query into the gate
-context). It then delegates to ``app.decide.execute_decision()`` (framework
-half), which dispatches to the gate the observation names (the policy gate
-runs retrieval and the LLM call itself), enforces, and assembles and
-persists the bundle.
+a single ``LoginEvent``: feature computation, scoring, and submission
+assembly (which picks the mode from ATO's bypass rules and renders the policy
+gate's retrieval query into its gate context). It then hands the
+``Submission`` to ``app.submit.submit()`` (framework half), which runs the
+decision's gate set — the advisory policy gate only when ATO asks for a gate,
+plus any gate the deployment mandates — enforces, and persists the bundle.
 
-This split keeps the framework domain-agnostic — ``app/decide.py`` does not
+This split keeps the framework domain-agnostic — ``app/submit.py`` does not
 import anything from ``ato_reasoner``.
 
-Async (DR-23): the single ``await`` point is the gate call inside
-``execute_decision``.
+Async (DR-23): the awaits are the gate calls inside ``submit``.
 """
 
 from __future__ import annotations
@@ -20,9 +19,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from app.decide import execute_decision
 from app.monitoring import duration_ms
-from ato_reasoner.assembler import build_observation
+from app.submit import submit
+from ato_reasoner.assembler import build_submission
 
 if TYPE_CHECKING:
     from app.plugin import FrameworkServices
@@ -42,8 +41,8 @@ async def run_ato_decision(
     """Run the full ATO decision pipeline for a single ``LoginEvent``.
 
     Domain steps (features → score → assemble) execute first, then the
-    framework's ``execute_decision()`` finishes the flow (gate → enforce →
-    bundle → persist).
+    framework's ``submit()`` finishes the flow (gate set → enforce → bundle
+    → persist).
 
     Args:
         event: Validated login event to evaluate.
@@ -52,7 +51,7 @@ async def run_ato_decision(
         framework: Shared framework services — the composed gates, the
             store, and the reasoner registry (which must contain
             ``ATO_REGISTRATION`` or intake validation rejects the
-            observation).
+            submission).
         decision_id: Optional explicit UUID; auto-generated when omitted.
         idempotency_key: Optional explicit key; defaults to
             ``event.event_id``.
@@ -62,7 +61,7 @@ async def run_ato_decision(
 
     Side effects:
         - Updates Redis sliding-window features for the event's entity.
-        - When routed to the gate, the policy gate reads pgvector +
+        - When ATO asks for a gate, the policy gate reads pgvector +
           Elasticsearch and calls the LLM API.
         - Writes the bundle to Postgres.
     """
@@ -78,17 +77,14 @@ async def run_ato_decision(
     scorer_output = services.scorer.score(features)
     upstream_latency["scorer_ms"] = duration_ms(t0)
 
-    # --- Assembly (includes the domain-owned retrieval query) ---
-    observation = build_observation(
+    # --- Assembly (mode, gate context, and the domain-owned retrieval query) ---
+    submission = build_submission(
         event, features, scorer_output, corpus_version=services.corpus_version
     )
 
     # --- Hand off to framework ---
-    # The ignore is for pyright: LoginEvent satisfies the Observation protocol
-    # structurally, but its computed_field entity_id and Literal entity_type
-    # confuse Pyright's invariance checks.
-    return await execute_decision(
-        observation=observation,  # type: ignore[arg-type]
+    return await submit(
+        submission=submission,
         gates=framework.gates,
         store=framework.store,
         registry=framework.registry,

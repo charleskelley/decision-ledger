@@ -13,8 +13,9 @@
 # Priming events: each case drives 2 baseline events with the same
 # account_id before the trigger event. Without priming, the trigger is a
 # first-event-of-account and the FeatureService produces neutral novelty
-# signals (=0.5) — the scorer outputs ~0.0 and the event fast-paths to
-# ALLOW, bypassing the enforcement tiers we're testing. With priming, the
+# signals (=0.5) — the scorer outputs ~0.0 and ATO records the event as
+# ALLOW under its allow-band rule, bypassing the enforcement tiers we're
+# testing. With priming, the
 # trigger introduces real novelty (new IP/device/geo against the
 # established baseline) and the score elevates into the routing band.
 
@@ -22,8 +23,8 @@ cases:
   - case_id: novel-001-sparse-account-sso-new-region
     priming_events:
       # Established US baseline — same account, two prior events from one
-      # device/IP/region. Each fast-paths to ALLOW (no LLM cost) but
-      # writes feature history to Redis.
+      # device/IP/region. Each is recorded ALLOW under the allow band (no
+      # LLM cost) but writes feature history to Redis.
       - event_id: evt-novel-001-prime-1
         timestamp: 2026-04-13T10:00:00Z
         account_id: acct-novel-001-just-created

@@ -33,10 +33,11 @@ import yaml
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.generator.factory import EventFactory
 from ato_reasoner.generator.loader import load_scenario
+from policy_rag_gate import POLICY_GATE_ID
 from policy_rag_gate.models import PolicyGateExtra, PolicyGateSnapshot
 
 # Scenarios to drive — each maps to one captured fixture. Choose scenarios
-# the scorer routes to the gate (not fast-path); ALLOW/CHALLENGE/HOLD/BLOCK
+# ATO asks the gate about (not recorded in a band); ALLOW/CHALLENGE/HOLD/BLOCK
 # triggers all produce useful rationales.
 _CAPTURE_SCENARIOS: list[str] = [
     "device_fingerprint_anomaly",
@@ -74,12 +75,14 @@ def _build_events_for_scenario(scenario_id: str, *, count: int = 5) -> list:
 def _bundle_to_case(scenario_id: str, bundle) -> dict | None:
     """Translate a DecisionBundle into a faithfulness case dict.
 
-    Returns None when the bundle has no usable verdict (fast-path bundles,
-    schema-validation failures). The caller skips those. The rationale and
+    Returns None when the bundle has no usable verdict (recorded decisions,
+    whose policy gate was skipped; schema-validation failures). The caller
+    skips those. The rationale and
     citations come from the policy gate's ``extra`` and the retrieved
     contexts from its ``evidence_snapshot`` (DR-28).
     """
-    gate_output = bundle.gate_output
+    policy = bundle.gate(POLICY_GATE_ID)
+    gate_output = policy.output if policy is not None else None
     if gate_output is None or gate_output.verdict is None:
         return None
     extra = PolicyGateExtra.model_validate(gate_output.extra, strict=False)
@@ -122,7 +125,7 @@ async def _capture() -> list[dict]:
             # handles two cases: (1) the trigger event is the last in the
             # sequence (most scenarios), and (2) the gate fires mid-sequence
             # on a borderline event but the final event decays back to
-            # fast-path. The "latest verdict-bearing bundle" captures the
+            # a recorded band. The "latest verdict-bearing bundle" captures the
             # most recent semantically valid case.
             captured_case: dict | None = None
             for event in events:
@@ -136,7 +139,7 @@ async def _capture() -> list[dict]:
                     captured_case = case
             if captured_case is None:
                 print(
-                    f"  {scenario_id}: skipped (fast-path or no verdict)",
+                    f"  {scenario_id}: skipped (recorded or no verdict)",
                     file=sys.stderr,
                 )
                 continue
@@ -161,7 +164,7 @@ def _merge_cases(existing: list[dict], captured: list[dict]) -> list[dict]:
     Captures with a new ``case_id`` are appended. This preserves any
     hand-crafted seed cases that the live capture didn't replace —
     important for dimensions like faithfulness whose dataset must stay
-    populated when only a subset of scenarios route to gate.
+    populated when only a subset of scenarios reach the gate.
     """
     by_id: dict[str, dict] = {c["case_id"]: c for c in existing}
     for c in captured:
@@ -212,7 +215,7 @@ def main() -> int:
     cases = asyncio.run(_capture())
     if not cases:
         print(
-            "error: no cases captured (every scenario hit fast-path or no verdict). "
+            "error: no cases captured (every scenario recorded or no verdict). "
             "Investigate gate-route distribution before re-running.",
             file=sys.stderr,
         )
