@@ -1,66 +1,71 @@
-"""Behavioral tests for ``app.audit.store.BundleStore`` — multi-tenant dispatch.
+"""Behavioral tests for ``app.audit.store.BundleStore`` and pure replay.
 
-The store is the one framework component that must turn a stored row back
-into a *reasoner-typed* Observation. These tests pin that contract without
-Postgres, using a hand-written fake connection that keeps rows in a dict and
-answers ``SELECT reasoner_id, bundle`` the way psycopg would:
+The store persists version-2 bundles, reads rows of any schema version, and
+replays from a bundle's own cached states. These tests pin that contract
+without Postgres, using a hand-written fake connection that keeps rows in a
+dict and answers the store's statements the way psycopg would:
 
-- ``write()`` stamps the ``reasoner_id`` column from
-  ``raw_event.reasoner_context.reasoner_id``.
-- ``load()`` dispatches on that column to the matching ``raw_event_factory``
-  and never calls another reasoner's factory.
-- A row whose ``reasoner_id`` has no factory raises
-  ``UnregisteredReasonerError`` before any factory runs.
-- ``replay()`` resolves the registration for the row's ``reasoner_id`` from
-  the registry (not from the reconstituted event), passes it to
-  ``resolve()``, and a fast-path bundle replays to a match with no diff.
-- ``replay()`` of a row whose reasoner has a factory but no registration
-  raises ``UnregisteredReasonerError`` and writes no replay log.
-- A gate-path bundle round-trips with its universal ``GateOutput`` intact —
-  verdict, ``deterministic`` flag, evidence, and the gate's opaque
-  ``evidence_snapshot`` / ``extra`` — and replays to a match from the stored
-  output alone (no gate call, no corpus), including a deterministic gate's
-  tier skips and an evidence-driven jurisdiction HOLD (DR-28).
-
-The event type is the stub reasoner's ``StubEvent`` (root ``tests/conftest.py``
-``observation`` fixture); the two fake tenants ``alpha`` and ``beta`` are the
-same shape re-attributed, which is all the store cares about.
+- the store needs an autocommit connection and never opens a transaction
+  block on it: the connection is shared across threads, and every statement
+  commits on its own.
+- ``write()`` stamps the tenant, subject, action, and ``schema_version``
+  columns from the bundle and refuses a bundle that would not reload
+  identically. A failed write leaves the store usable.
+- ``lookup()`` returns any row as stored; ``load()`` and ``replay()`` serve
+  schema version 2 and refuse older rows (``BundleSchemaUnsupportedError``).
+- ``replay()`` uses the registry's registration for the row's tenant,
+  re-checks every gate and every bypass rule from the bundle, logs a match
+  with a null diff, and a disagreement with the diff.
+- ``recent_recorded()`` samples a tenant's recorded v2 bundles, newest first,
+  scoped by ``since``, and skips unloadable rows.
+- ``replay_bundle`` is pure and reproduces records, gated decisions, failed
+  gates, and the competing-rule floor.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-import app.audit.store as store_module
-from app.audit.bundle import build_bundle
+from app.audit import build_bundle, replay_bundle
 from app.audit.store import BundleStore
-from app.enforcement.resolver import resolve
+from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from app.reasoner_registry import StaticReasonerRegistry
 from core.actions import DecisionAction
-from core.exceptions import UnregisteredReasonerError
-from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
-from core.observation import ReasonerRegistration
-from core.routes import GateRoute
-from tests._stub_reasoner.events import StubEvent
+from core.bundle import DecisionBundle, GateRecord
+from core.exceptions import BundleSchemaUnsupportedError, UnregisteredReasonerError
+from core.gate import GateInput
+from core.submission import evaluate_bypass, evaluate_competing_rules
+from tests._stub_reasoner.registry import LOW_SCORE_RULE, STUB_REGISTRATION
 
 if TYPE_CHECKING:
-    from core.bundle import DecisionBundle
+    from core.observation import ReasonerRegistration
+    from core.submission import Submission
+
+ALLOW, HOLD, BLOCK = DecisionAction.ALLOW, DecisionAction.HOLD, DecisionAction.BLOCK
 
 # ---------------------------------------------------------------------------
-# Fake psycopg connection
+# Fake connection
 # ---------------------------------------------------------------------------
+
+
+class _Row:
+    def __init__(self, reasoner_id: str, schema_version: int, bundle: str, created):
+        self.reasoner_id = reasoner_id
+        self.schema_version = schema_version
+        self.bundle = bundle
+        self.created_at = created
 
 
 class _FakeCursor:
-    """Cursor fake that understands the three statements the store issues."""
+    """Cursor fake that understands exactly the statements the store issues."""
 
     def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
-        self._row: tuple[str, str] | None = None
+        self._rows: list[tuple[Any, ...]] = []
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -70,172 +75,182 @@ class _FakeCursor:
 
     def execute(self, query: str, params: tuple[Any, ...] | None = None) -> None:
         assert params is not None
-        if "INSERT INTO decisionledger.decision_bundles" in query:
-            decision_id, reasoner_id, _entity_id, _created, _action, bundle = params
-            self._conn.rows[decision_id] = (reasoner_id, bundle)
-        elif "INSERT INTO decisionledger.replay_logs" in query:
+        self._conn.statements += 1
+        if self._conn.fail_next:
+            self._conn.fail_next = False
+            raise RuntimeError("simulated database error")
+        text = " ".join(query.split())
+        if text.startswith("INSERT INTO decisionledger.decision_bundles"):
+            decision_id, reasoner_id, _entity, created, _action, version, bundle = (
+                params
+            )
+            self._conn.rows.setdefault(
+                decision_id, _Row(reasoner_id, version, bundle, created)
+            )
+        elif text.startswith("INSERT INTO decisionledger.replay_logs"):
             self._conn.replay_logs.append(params)
-        elif query.lstrip().startswith("SELECT reasoner_id, bundle"):
-            self._row = self._conn.rows.get(params[0])
+        elif text.startswith("SELECT reasoner_id, schema_version, bundle"):
+            row = self._conn.rows.get(params[0])
+            self._rows = (
+                []
+                if row is None
+                else [(row.reasoner_id, row.schema_version, json.loads(row.bundle))]
+            )
+        elif text.startswith("SELECT decision_id, bundle FROM decisionledger"):
+            reasoner_id, version, since, _since, limit = params
+            matches = [
+                (decision_id, row)
+                for decision_id, row in self._conn.rows.items()
+                if row.reasoner_id == reasoner_id
+                and row.schema_version == version
+                and json.loads(row.bundle).get("submission", {}).get("mode") == "record"
+                and (since is None or row.created_at >= since)
+            ]
+            matches.sort(key=lambda item: item[1].created_at, reverse=True)
+            self._rows = [(d, json.loads(r.bundle)) for d, r in matches[:limit]]
         else:  # pragma: no cover - guards against an unexpected statement
             raise AssertionError(f"unexpected statement: {query!r}")
 
-    def fetchone(self) -> tuple[str, str] | None:
-        return self._row
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
 
 
 class _FakeConn:
-    """Connection fake: an in-memory ``decision_bundles`` and ``replay_logs``."""
+    """An autocommit connection fake with in-memory tables.
 
-    def __init__(self) -> None:
-        self.rows: dict[str, tuple[str, str]] = {}
+    It refuses a transaction block: the framework's connection is shared
+    across threads, where transaction blocks interleave and corrupt it.
+    """
+
+    def __init__(self, *, autocommit: bool = True) -> None:
+        self.autocommit = autocommit
+        self.rows: dict[str, _Row] = {}
         self.replay_logs: list[tuple[Any, ...]] = []
-        self.commits = 0
+        self.statements = 0
+        self.fail_next = False
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
 
-    def commit(self) -> None:
-        self.commits += 1
+    def transaction(self) -> None:
+        raise AssertionError(
+            "the store opened a transaction block on its shared connection"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Factories and registrations
+# Bundles
 # ---------------------------------------------------------------------------
 
-
-class _RecordingFactory:
-    """Raw-event factory that records every payload it is asked to rebuild."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, data: dict[str, Any]) -> StubEvent:
-        self.calls.append(data)
-        return StubEvent.model_validate(data, strict=False)
+_DECISION_ID = "11111111-1111-1111-1111-111111111111"
+_OTHER_ID = "22222222-2222-2222-2222-222222222222"
 
 
-def _forbidden_factory(data: dict[str, Any]) -> StubEvent:
-    raise AssertionError("another reasoner's factory must not be called")
-
-
-def _registration(reasoner_id: str, *, novel_feature: str) -> ReasonerRegistration:
-    return ReasonerRegistration(
-        reasoner_id=reasoner_id,
-        reasoner_name=f"{reasoner_id} (test)",
-        allowed_gate_ids=frozenset({"policy"}),
-        novel_entity_feature=novel_feature,
-        jurisdiction_conflict_groups=(
-            frozenset({"REGION_A"}),
-            frozenset({"REGION_B"}),
-        ),
-    )
-
-
-ALPHA_REG = _registration("alpha", novel_feature="thin_history")
-BETA_REG = _registration("beta", novel_feature="fresh_entity")
-
-_INGESTION_TS = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
-_DECISION_ID = "5b1e0f6a-3c2d-4e8f-9a7b-0c1d2e3f4a5b"
-
-
-def _event_for(observation: StubEvent, reasoner_id: str) -> StubEvent:
-    """Return the fixture event re-attributed to ``reasoner_id``."""
-    assert observation.reasoner_context is not None
-    ctx = observation.reasoner_context.model_copy(update={"reasoner_id": reasoner_id})
-    return observation.model_copy(update={"reasoner_context": ctx})
-
-
-def _fast_path_bundle(event: Any, registration: ReasonerRegistration) -> DecisionBundle:
-    """Build the bundle the framework would persist for a fast-path event.
-
-    ``event`` is ``Any`` because Pydantic ``computed_field`` properties keep
-    ``StubEvent`` structurally but not nominally compatible with the
-    ``Observation`` protocol (see the ``RawEventFactory`` note in
-    ``app/plugin.py``).
-    """
-    decision = resolve(
-        event,
-        None,
-        decision_id=_DECISION_ID,
-        registration=registration,
-    )
-    return build_bundle(
-        decision_id=_DECISION_ID,
-        obs=event,
-        idempotency_key="idem-store-001",
-        ingestion_timestamp=_INGESTION_TS,
-        enforcement_decision=decision,
-    )
-
-
-def _gate_path_bundle(
-    event: Any, registration: ReasonerRegistration, output: GateOutput
+def _record_bundle(
+    submission: Submission,
+    decision_id: str = _DECISION_ID,
+    registration: ReasonerRegistration = STUB_REGISTRATION,
 ) -> DecisionBundle:
-    """Build the bundle the framework would persist after a gate ran."""
-    routed = event.model_copy(
-        update={"route": GateRoute.ROUTE_TO_GATE, "fast_path_rationale": None}
+    check = evaluate_bypass(LOW_SCORE_RULE, submission.reasoner_context)
+    competing = evaluate_competing_rules(
+        registration, LOW_SCORE_RULE, submission.reasoner_context
     )
-    decision = resolve(
-        routed, output, decision_id=_DECISION_ID, registration=registration
+    records = [
+        GateRecord(gate_id="fake", mandatory=False, status="skipped", reason="r")
+    ]
+    decision = resolve_decision(
+        submission=submission,
+        records=records,
+        registration=registration,
+        bypass_check=check,
+        competing_checks=competing,
+        decision_id=decision_id,
     )
     return build_bundle(
-        decision_id=_DECISION_ID,
-        obs=routed,
-        idempotency_key="idem-store-002",
-        ingestion_timestamp=_INGESTION_TS,
-        gate_input=GateInput(gate_id=output.gate_id),
-        gate_output=output,
-        enforcement_decision=decision,
-        latency_breakdown={"gate_ms": 12.5},
+        decision_id=decision_id,
+        submission=submission,
+        idempotency_key=submission.event_id,
+        ingestion_timestamp=submission.timestamp,
+        gates=records,
+        decision=decision,
+        bypass_check=check,
+        other_bypass_checks=competing,
     )
 
 
-def _gate_output(
+def _gated_bundle(
+    submission: Submission,
+    gate_output: Any,
     *,
-    gate_id: str = "policy",
-    deterministic: bool = False,
-    actions: tuple[DecisionAction, ...] = (DecisionAction.CHALLENGE,),
-    confidence: float = 0.9,
-    jurisdictions: tuple[str, ...] = ("REGION_A",),
-) -> GateOutput:
-    return GateOutput(
-        gate_id=gate_id,
-        deterministic=deterministic,
-        verdict=GateVerdict(
-            gate_id=gate_id,
-            permitted_actions=list(actions),
-            required_controls=[],
-            confidence=confidence,
-            escalate_to_human=False,
-            escalation_reason=None,
-        ),
-        evidence=tuple(
-            EvidenceRef(
-                source_id=f"DOC-{j}", locator="2.1", jurisdictions=frozenset({j})
-            )
-            for j in jurisdictions
-        ),
-        evidence_snapshot={
-            "retrieval_query": "calibration review",
-            "retrieval_results": [{"document_id": "DOC-A", "relevance_score": 0.91}],
-            "nested": {"empty": [], "flag": True, "none": None},
-        },
-        extra={"rationale": "Thin history.", "token_cost": {"total_tokens": 1552}},
+    decision_id: str = _DECISION_ID,
+    registration: ReasonerRegistration = STUB_REGISTRATION,
+    failed: bool = False,
+) -> DecisionBundle:
+    if failed:
+        record = GateRecord(
+            gate_id="fake",
+            mandatory=False,
+            status="failed",
+            reason="raised RuntimeError: boom",
+            input=GateInput(gate_id="fake"),
+            enforcement=resolve_gate_output(
+                None,
+                registration=registration,
+                decision_id=decision_id,
+                failure="raised RuntimeError: boom",
+            ),
+        )
+    else:
+        record = GateRecord(
+            gate_id="fake",
+            mandatory=False,
+            status="ran",
+            input=GateInput(gate_id="fake"),
+            output=gate_output,
+            enforcement=resolve_gate_output(
+                gate_output, registration=registration, decision_id=decision_id
+            ),
+        )
+    decision = resolve_decision(
+        submission=submission,
+        records=[record],
+        registration=registration,
+        bypass_check=None,
+        decision_id=decision_id,
+    )
+    return build_bundle(
+        decision_id=decision_id,
+        submission=submission,
+        idempotency_key=submission.event_id,
+        ingestion_timestamp=submission.timestamp,
+        gates=[record],
+        decision=decision,
     )
 
 
-def _store(
-    conn: _FakeConn,
-    *,
-    factories: dict[str, Any],
-    registrations: list[ReasonerRegistration],
-) -> BundleStore:
-    return BundleStore(
-        conn,  # type: ignore[arg-type]
-        raw_event_factories=factories,
-        registry=StaticReasonerRegistry(registrations),
+def _store(conn: _FakeConn, *registrations: ReasonerRegistration) -> BundleStore:
+    registry = StaticReasonerRegistry(list(registrations or (STUB_REGISTRATION,)))
+    return BundleStore(conn, registry=registry)  # type: ignore[arg-type]
+
+
+def _insert_v1(conn: _FakeConn, decision_id: str = _OTHER_ID) -> dict[str, Any]:
+    payload = {
+        "decision_id": decision_id,
+        "raw_event": {"event_id": "evt-old", "route": "FAST_PATH_ALLOW"},
+        "raw_event_type": "StubEvent",
+        "gate_input": None,
+        "gate_output": None,
+        "decision_action": "ALLOW",
+        "enforcement_rule_applied": None,
+        "override_log": ["fast_path_allow: ..."],
+    }
+    conn.rows[decision_id] = _Row(
+        "stub-reasoner", 1, json.dumps(payload), datetime.now(UTC)
     )
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -243,304 +258,281 @@ def _store(
 # ---------------------------------------------------------------------------
 
 
-def test_write_stamps_reasoner_id_column_from_reasoner_context(observation):
+def test_write_stamps_the_scalar_columns_from_the_bundle(submission):
     conn = _FakeConn()
-    store = _store(conn, factories={}, registrations=[ALPHA_REG])
-
-    store.write(_fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG))
-
-    reasoner_id, _bundle_json = conn.rows[_DECISION_ID]
-    assert reasoner_id == "alpha"
-    assert conn.commits == 1
-
-
-# ---------------------------------------------------------------------------
-# load — factory dispatch on the reasoner_id column
-# ---------------------------------------------------------------------------
+    bundle = _record_bundle(submission)
+    _store(conn).write(bundle)
+    row = conn.rows[_DECISION_ID]
+    assert row.reasoner_id == "stub-reasoner"
+    assert row.schema_version == 2
+    assert DecisionBundle.model_validate_json(row.bundle) == bundle
+    assert conn.statements == 1
 
 
-def test_load_dispatches_to_the_factory_for_the_rows_reasoner_id(observation):
+def test_write_is_idempotent_on_decision_id(submission):
     conn = _FakeConn()
-    alpha_factory = _RecordingFactory()
-    store = _store(
-        conn,
-        factories={"alpha": alpha_factory, "beta": _forbidden_factory},
-        registrations=[ALPHA_REG, BETA_REG],
+    store = _store(conn)
+    store.write(_record_bundle(submission))
+    store.write(_record_bundle(submission))
+    assert len(conn.rows) == 1
+
+
+def test_write_refuses_a_bundle_that_would_not_reload(submission):
+    conn = _FakeConn()
+    good = _record_bundle(submission)
+    # Bypass validation to build what intake now rejects: a non-finite
+    # latency serializes as null and could never be reloaded.
+    broken = DecisionBundle.model_construct(
+        **{**dict(good), "latency_breakdown": {"gate_ms": float("nan")}}
     )
-    event = _event_for(observation, "alpha")
-    store.write(_fast_path_bundle(event, ALPHA_REG))
-
-    loaded = store.load(_DECISION_ID)
-
-    # _forbidden_factory would have raised if beta's factory were consulted.
-    assert len(alpha_factory.calls) == 1
-    assert loaded.decision_id == _DECISION_ID
-    assert isinstance(loaded.raw_event, StubEvent)
-    assert loaded.raw_event.model_dump(mode="json") == event.model_dump(mode="json")
+    with pytest.raises(ValueError, match="does not survive the JSON round trip"):
+        _store(conn).write(broken)
+    assert conn.rows == {}
 
 
-def test_load_raises_unregistered_reasoner_before_calling_any_factory(observation):
+def test_a_failed_write_leaves_the_store_usable(submission):
     conn = _FakeConn()
-    alpha_factory = _RecordingFactory()
-    beta_factory = _RecordingFactory()
-    store = _store(
-        conn,
-        factories={"alpha": alpha_factory, "beta": beta_factory},
-        registrations=[ALPHA_REG, BETA_REG],
-    )
-    # The write side does not consult the registry, so a bundle from a
-    # reasoner that is not composed in this process can exist in the table.
-    ghost_reg = _registration("ghost", novel_feature="thin_history")
-    store.write(_fast_path_bundle(_event_for(observation, "ghost"), ghost_reg))
-
-    with pytest.raises(UnregisteredReasonerError) as exc_info:
-        store.load(_DECISION_ID)
-
-    assert exc_info.value.reasoner_id == "ghost"
-    assert alpha_factory.calls == []
-    assert beta_factory.calls == []
-
-
-def test_load_raises_key_error_when_no_row_exists():
-    store = _store(_FakeConn(), factories={}, registrations=[])
-
-    with pytest.raises(KeyError, match="7f000000"):
-        store.load("7f000000-0000-4000-8000-000000000000")
-
-
-def test_load_treats_a_malformed_decision_id_as_missing_without_querying():
-    """A non-UUID id is a 'no such bundle', not a database error.
-
-    The column is typed uuid; letting the string reach Postgres would raise a
-    DataError and abort the connection's transaction. The store answers with
-    the same KeyError callers already handle, and never opens a cursor.
-    """
-
-    class _NoCursorConn(_FakeConn):
-        def cursor(self) -> _FakeCursor:  # pragma: no cover - must not be hit
-            raise AssertionError("malformed id must not reach the database")
-
-    store = _store(_NoCursorConn(), factories={}, registrations=[])
-
-    with pytest.raises(KeyError, match="not-a-uuid"):
-        store.load("not-a-uuid")
-    with pytest.raises(KeyError, match="not-a-uuid"):
-        store.replay("not-a-uuid")
+    store = _store(conn)
+    conn.fail_next = True
+    with pytest.raises(RuntimeError, match="simulated"):
+        store.write(_record_bundle(submission))
+    assert conn.rows == {}
+    store.write(_record_bundle(submission))
+    assert _DECISION_ID in conn.rows
 
 
 # ---------------------------------------------------------------------------
-# replay — registration comes from the registry via the reasoner_id column
+# lookup / load
 # ---------------------------------------------------------------------------
 
 
-def test_replay_passes_the_registrys_registration_for_the_row_reasoner_id(
-    observation, monkeypatch
+def test_lookup_returns_a_v2_row_as_stored(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    bundle = _record_bundle(submission)
+    store.write(bundle)
+    stored = store.lookup(_DECISION_ID)
+    assert (stored.reasoner_id, stored.schema_version) == ("stub-reasoner", 2)
+    assert stored.payload == json.loads(bundle.model_dump_json())
+    assert store.load(_DECISION_ID) == bundle
+
+
+def test_lookup_returns_a_v1_row_but_load_refuses_it():
+    conn = _FakeConn()
+    payload = _insert_v1(conn)
+    store = _store(conn)
+    stored = store.lookup(_OTHER_ID)
+    assert stored.schema_version == 1
+    assert stored.payload == payload
+    with pytest.raises(BundleSchemaUnsupportedError) as exc_info:
+        store.load(_OTHER_ID)
+    assert (exc_info.value.schema_version, exc_info.value.supported) == (1, 2)
+
+
+def test_lookup_needs_no_registration_for_the_rows_tenant(submission):
+    conn = _FakeConn()
+    _store(conn).write(_record_bundle(submission))
+    other_tenant_only = STUB_REGISTRATION.model_copy(update={"reasoner_id": "other"})
+    assert _store(conn, other_tenant_only).load(_DECISION_ID).submission == submission
+
+
+def test_lookup_raises_key_error_when_no_row_exists():
+    with pytest.raises(KeyError):
+        _store(_FakeConn()).lookup(_DECISION_ID)
+
+
+def test_lookup_treats_a_malformed_decision_id_as_missing_without_querying():
+    conn = _FakeConn()
+    conn.fail_next = True  # any query would raise
+    with pytest.raises(KeyError, match="not a UUID"):
+        _store(conn).lookup("not-a-uuid")
+
+
+def test_the_store_refuses_a_connection_that_is_not_autocommit():
+    with pytest.raises(ValueError, match="needs an autocommit connection"):
+        _store(_FakeConn(autocommit=False))
+
+
+def test_every_call_is_one_statement_and_none_opens_a_transaction_block(
+    submission,
 ):
+    # _FakeConn.transaction() raises: a block on the shared connection would
+    # interleave with another thread's.
     conn = _FakeConn()
-    store = _store(
-        conn,
-        factories={"alpha": _RecordingFactory(), "beta": _forbidden_factory},
-        registrations=[ALPHA_REG, BETA_REG],
-    )
-    store.write(_fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG))
+    store = _store(conn)
+    store.write(_record_bundle(submission))
+    store.lookup(_DECISION_ID)
+    store.load(_DECISION_ID)
+    store.recent_recorded("stub-reasoner", limit=5)
+    assert conn.statements == 4
+    store.replay(_DECISION_ID)  # its lookup, then the replay-log insert
+    assert conn.statements == 6
 
-    captured: dict[str, Any] = {}
 
-    def _recording_resolve(obs, gate_output, **kwargs):
-        captured.update(kwargs)
-        return resolve(obs, gate_output, **kwargs)
+# ---------------------------------------------------------------------------
+# replay
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(store_module, "resolve", _recording_resolve)
 
+def test_replay_of_a_record_matches_and_logs_without_diff(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    store.write(_record_bundle(submission))
     result = store.replay(_DECISION_ID)
+    assert result.matched
+    assert result.actions_match
+    assert (result.original_bypass_rule_holds, result.bypass_rule_holds) == (True, True)
+    assert result.competing_rules_match
+    [(decision_id, _at, is_matched, diff)] = conn.replay_logs
+    assert (decision_id, is_matched, diff) == (_DECISION_ID, True, None)
 
-    assert captured["registration"] is ALPHA_REG
-    assert captured["decision_id"] == _DECISION_ID
-    assert result.actions_match is True
-    assert result.original_action == result.replayed_action == "ALLOW"
 
-
-def test_replay_of_a_matching_fast_path_bundle_logs_a_match_without_diff(
-    observation,
+def test_replay_of_a_gated_bundle_matches_from_the_stored_output(
+    gated_submission, gate_output
 ):
     conn = _FakeConn()
-    store = _store(
-        conn,
-        factories={"alpha": _RecordingFactory()},
-        registrations=[ALPHA_REG],
-    )
-    store.write(_fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG))
-
-    store.replay(_DECISION_ID)
-
-    assert len(conn.replay_logs) == 1
-    decision_id, _replayed_at, is_matched, diff = conn.replay_logs[0]
-    assert decision_id == _DECISION_ID
-    assert is_matched is True
-    assert diff is None
-    assert conn.commits == 2  # one for write, one for the replay log
+    store = _store(conn)
+    store.write(_gated_bundle(gated_submission, gate_output))
+    result = store.replay(_DECISION_ID)
+    assert result.matched
+    assert [
+        (g.gate_id, g.original_action, g.replayed_action) for g in result.gates
+    ] == [("fake", "ALLOW", "ALLOW")]
 
 
-def test_replay_raises_unregistered_reasoner_when_registry_lacks_the_row_id(
-    observation,
-):
-    # The factory exists (so load() succeeds) but the registry does not know
-    # the reasoner: replay must fail on the registry lookup, not fall back to
-    # some other reasoner's enforcement profile.
+def test_replay_of_a_v1_row_is_refused_and_logs_nothing():
     conn = _FakeConn()
-    store = _store(
-        conn,
-        factories={"alpha": _RecordingFactory()},
-        registrations=[BETA_REG],
-    )
-    store.write(_fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG))
-
-    with pytest.raises(UnregisteredReasonerError) as exc_info:
-        store.replay(_DECISION_ID)
-
-    assert exc_info.value.reasoner_id == "alpha"
+    _insert_v1(conn)
+    with pytest.raises(BundleSchemaUnsupportedError):
+        _store(conn).replay(_OTHER_ID)
     assert conn.replay_logs == []
 
 
-# ---------------------------------------------------------------------------
-# Gate path — the universal GateOutput round-trips and replays on its own
-# ---------------------------------------------------------------------------
-
-
-def test_a_gate_path_bundle_round_trips_with_its_gate_output_intact(observation):
+def test_replay_needs_the_rows_tenant_registered(submission):
     conn = _FakeConn()
-    store = _store(
-        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
-    )
-    written = _gate_path_bundle(
-        _event_for(observation, "alpha"), ALPHA_REG, _gate_output()
-    )
-    store.write(written)
-
-    loaded = store.load(_DECISION_ID)
-
-    assert type(loaded.gate_output) is GateOutput
-    assert loaded.gate_output == written.gate_output
-    assert loaded.gate_input == GateInput(gate_id="policy")
-    assert loaded.decision_action == written.decision_action
-    assert loaded.override_log == written.override_log
-    assert loaded.latency_breakdown == {"gate_ms": 12.5}
+    _store(conn).write(_record_bundle(submission))
+    other_tenant_only = STUB_REGISTRATION.model_copy(update={"reasoner_id": "other"})
+    with pytest.raises(UnregisteredReasonerError):
+        _store(conn, other_tenant_only).replay(_DECISION_ID)
+    assert conn.replay_logs == []
 
 
-def test_the_stored_json_has_no_bundle_level_retrieval_layer(observation):
-    conn = _FakeConn()
-    store = _store(conn, factories={}, registrations=[ALPHA_REG])
-    store.write(
-        _gate_path_bundle(_event_for(observation, "alpha"), ALPHA_REG, _gate_output())
-    )
-
-    _, bundle_json = conn.rows[_DECISION_ID]
-    stored = json.loads(bundle_json)
-    assert not set(stored) & {
-        "retrieval_query",
-        "retrieval_results",
-        "retrieval_path",
-        "index_version",
-    }
-    # The gate's own record lives inside its opaque snapshot instead.
-    assert stored["gate_output"]["evidence_snapshot"]["retrieval_query"] == (
-        "calibration review"
-    )
-
-
-@pytest.mark.parametrize(
-    ("output", "expected_action", "expected_rule"),
-    [
-        (_gate_output(), DecisionAction.CHALLENGE, None),
-        (
-            _gate_output(jurisdictions=("REGION_A", "REGION_B")),
-            DecisionAction.HOLD,
-            "tier5_jurisdiction_conflict",
-        ),
-        (
-            _gate_output(
-                gate_id="rules",
-                deterministic=True,
-                actions=(DecisionAction.BLOCK,),
-                confidence=0.0,
-                jurisdictions=(),
-            ),
-            DecisionAction.BLOCK,
-            None,
-        ),
-        (
-            _gate_output(actions=(DecisionAction.BLOCK,), confidence=0.2),
-            DecisionAction.HOLD,
-            "tier4_low_confidence",
-        ),
-    ],
-    ids=["accepted", "evidence-conflict", "deterministic-skips", "low-confidence"],
-)
-def test_a_gate_path_bundle_replays_to_a_match_from_the_stored_output(
-    observation, output, expected_action, expected_rule
+def test_replay_reads_the_enforcement_profile_from_the_registry(
+    gated_submission, gate_output
 ):
-    conn = _FakeConn()
-    store = _store(
-        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
-    )
-    written = _gate_path_bundle(_event_for(observation, "alpha"), ALPHA_REG, output)
-    assert written.decision_action == expected_action
-    assert written.enforcement_rule_applied == expected_rule
-    store.write(written)
-
-    result = store.replay(_DECISION_ID)
-
-    assert result.actions_match is True
-    assert result.replayed_action == expected_action.value
-    assert result.enforcement_decision.override_log == written.override_log
-    _decision_id, _replayed_at, is_matched, diff = conn.replay_logs[0]
-    assert is_matched is True
-    assert diff is None
-
-
-def test_a_replay_that_disagrees_logs_a_mismatch_with_the_diff(observation):
-    # Simulate a stored decision that enforcement no longer reproduces (the
-    # stored action was CHALLENGE; re-running enforcement yields HOLD).
-    conn = _FakeConn()
-    store = _store(
-        conn, factories={"alpha": _RecordingFactory()}, registrations=[ALPHA_REG]
-    )
-    store.write(
-        _gate_path_bundle(
-            _event_for(observation, "alpha"),
-            ALPHA_REG,
-            _gate_output(actions=(DecisionAction.HOLD,)),
-        )
-    )
-    reasoner_id, bundle_json = conn.rows[_DECISION_ID]
-    tampered = json.loads(bundle_json)
-    tampered["decision_action"] = "CHALLENGE"
-    conn.rows[_DECISION_ID] = (reasoner_id, json.dumps(tampered))
-
-    result = store.replay(_DECISION_ID)
-
-    assert result.actions_match is False
-    assert (result.original_action, result.replayed_action) == ("CHALLENGE", "HOLD")
-    _decision_id, _replayed_at, is_matched, diff = conn.replay_logs[0]
-    assert is_matched is False
-    assert json.loads(diff) == {
-        "original_action": "CHALLENGE",
-        "replayed_action": "HOLD",
-        "override_log": list(result.enforcement_decision.override_log),
-    }
-
-
-def test_write_refuses_a_bundle_without_a_reasoner_context(observation):
-    conn = _FakeConn()
-    store = _store(conn, factories={}, registrations=[ALPHA_REG])
-    bundle = _fast_path_bundle(_event_for(observation, "alpha"), ALPHA_REG)
-    orphan = bundle.model_copy(
+    # A thin-history widget held by Tier 3 at decision time; replayed against
+    # a registration without the novel-entity feature it no longer holds, and
+    # the store reports the mismatch.
+    rc = gated_submission.reasoner_context
+    novel = gated_submission.model_copy(
         update={
-            "raw_event": bundle.raw_event.model_copy(update={"reasoner_context": None})
+            "reasoner_context": rc.model_copy(
+                update={"feature_set": {**rc.feature_set, "thin_history": True}}
+            )
         }
     )
+    conn = _FakeConn()
+    _store(conn).write(_gated_bundle(novel, gate_output))
+    no_tier3 = STUB_REGISTRATION.model_copy(update={"novel_entity_feature": None})
+    result = _store(conn, no_tier3).replay(_DECISION_ID)
+    assert (result.original_action, result.replayed_action) == ("HOLD", "ALLOW")
+    assert not result.matched
+    [(_id, _at, is_matched, diff)] = conn.replay_logs
+    assert is_matched is False
+    assert json.loads(diff)["replayed_action"] == "ALLOW"
 
-    with pytest.raises(ValueError, match="reasoner_context"):
-        store.write(orphan)
 
-    assert conn.rows == {}
+def test_a_tampered_row_replays_to_a_mismatch_with_the_diff(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    store.write(_record_bundle(submission))
+    row = conn.rows[_DECISION_ID]
+    payload = json.loads(row.bundle)
+    payload["decision_action"] = "BLOCK"
+    row.bundle = json.dumps(payload)
+    result = store.replay(_DECISION_ID)
+    assert (result.original_action, result.replayed_action) == ("BLOCK", "ALLOW")
+    diff = json.loads(conn.replay_logs[0][3])
+    assert diff["original_action"] == "BLOCK"
+    assert diff["override_log"][-1] == (
+        "combinator: most_restrictive(proposed=ALLOW) → ALLOW"
+    )
+
+
+# ---------------------------------------------------------------------------
+# recent_recorded
+# ---------------------------------------------------------------------------
+
+
+def test_recent_recorded_samples_a_tenants_records_newest_first(
+    submission, gated_submission, gate_output
+):
+    conn = _FakeConn()
+    store = _store(conn)
+    ids = [f"0000000{i}-0000-0000-0000-000000000000" for i in range(3)]
+    for decision_id in ids:
+        store.write(_record_bundle(submission, decision_id=decision_id))
+    store.write(_gated_bundle(gated_submission, gate_output, decision_id=_OTHER_ID))
+    _insert_v1(conn, "99999999-9999-9999-9999-999999999999")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    for offset, decision_id in enumerate(ids):
+        conn.rows[decision_id].created_at = base + timedelta(minutes=offset)
+
+    sample = store.recent_recorded("stub-reasoner", limit=2)
+    assert [b.decision_id for b in sample.bundles] == [ids[2], ids[1]]
+    assert sample.unloadable == 0
+
+    since = store.recent_recorded(
+        "stub-reasoner", limit=10, since=base + timedelta(minutes=1)
+    )
+    assert [b.decision_id for b in since.bundles] == [ids[2], ids[1]]
+    assert store.recent_recorded("other", limit=10).bundles == ()
+
+
+def test_recent_recorded_skips_and_counts_unloadable_rows(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    store.write(_record_bundle(submission))
+    store.write(_record_bundle(submission, decision_id=_OTHER_ID))
+    broken = json.loads(conn.rows[_OTHER_ID].bundle)
+    broken["gates"] = "not a list"
+    conn.rows[_OTHER_ID].bundle = json.dumps(broken)
+    sample = store.recent_recorded("stub-reasoner", limit=10)
+    assert [b.decision_id for b in sample.bundles] == [_DECISION_ID]
+    assert sample.unloadable == 1
+
+
+# ---------------------------------------------------------------------------
+# replay_bundle (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_replay_bundle_reproduces_a_failed_gate(gated_submission, gate_output):
+    bundle = _gated_bundle(gated_submission, gate_output, failed=True)
+    assert bundle.decision_action == HOLD
+    result = replay_bundle(bundle, registration=STUB_REGISTRATION)
+    assert result.matched
+    assert result.gates[0].status == "failed"
+
+
+def test_replay_bundle_skips_skipped_gates(submission):
+    result = replay_bundle(_record_bundle(submission), registration=STUB_REGISTRATION)
+    assert [(g.status, g.original_action, g.replayed_action) for g in result.gates] == [
+        ("skipped", None, None)
+    ]
+    assert result.matched
+
+
+def test_replay_bundle_detects_a_competing_rule_that_changed(submission):
+    bundle = _record_bundle(submission)
+    tampered = bundle.model_copy(
+        update={
+            "other_bypass_checks": tuple(
+                c.model_copy(update={"holds": not c.holds})
+                for c in bundle.other_bypass_checks
+            )
+        }
+    )
+    result = replay_bundle(tampered, registration=STUB_REGISTRATION)
+    assert not result.competing_rules_match
+    assert not result.matched

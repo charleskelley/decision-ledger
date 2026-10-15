@@ -14,8 +14,9 @@
 --
 -- The full DecisionBundle is stored as JSONB so every field is queryable
 -- without schema migrations as the bundle evolves. The scalar columns
--- (reasoner_id, entity_id, created_at, decision_action) are surfaced
--- top-level for indexed lookups, the replay endpoint, and tenant filtering.
+-- (reasoner_id, entity_id, created_at, decision_action, schema_version) are
+-- surfaced top-level for indexed lookups, the replay endpoint, and tenant
+-- filtering.
 --
 -- decision_action is the action this decision produced at decision time —
 -- immutable. For non-terminal actions (CHALLENGE, HOLD), the realized
@@ -27,6 +28,11 @@
 --              not as scalar columns.
 -- entity_id:   framework UUID derived deterministically from the
 --              reasoner's domain business key via UUID5.
+-- schema_version: shape of the JSONB bundle. 2 = the submission contract
+--              (the reasoner's Submission and one record per gate). 1 =
+--              rows written before it: lookup returns them as stored;
+--              typed loading and replay refuse them (HTTP 409
+--              BUNDLE_SCHEMA_UNSUPPORTED).
 -- ---------------------------------------------------------------------------
 create table if not exists decisionledger.decision_bundles (
     decision_id uuid primary key,
@@ -34,8 +40,33 @@ create table if not exists decisionledger.decision_bundles (
     entity_id uuid not null,
     created_at timestamptz not null,
     decision_action text not null,
+    schema_version integer not null,
     bundle jsonb not null
 );
+
+-- A table created before schema version 2 lacks the column: add it once,
+-- marking every existing row as version 1, then drop the default so fresh
+-- and upgraded tables end up identical (bar column order) and every write
+-- states its version. Guarded, because ALTER TABLE takes an ACCESS EXCLUSIVE
+-- lock even when it would change nothing, and this file runs on every
+-- startup: an unguarded no-op would queue behind any open reader.
+do $$
+begin
+    if not exists (
+        select 1
+        from information_schema.columns
+        where
+            table_schema = 'decisionledger'
+            and table_name = 'decision_bundles'
+            and column_name = 'schema_version'
+    ) then
+        alter table decisionledger.decision_bundles
+        add column schema_version integer not null default 1;
+        alter table decisionledger.decision_bundles
+        alter column schema_version drop default;
+    end if;
+end
+$$;
 
 create index if not exists idx_decision_bundles_reasoner_id
 on decisionledger.decision_bundles (reasoner_id);

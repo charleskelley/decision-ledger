@@ -5,7 +5,9 @@ the ``decisionledger`` schema. They ship as package data inside the
 framework wheel, and docker-compose mounts the same files into the Postgres
 init directory. They are idempotent (``create ... if not
 exists`` throughout), so applying them on every process start is safe and
-replaces the inline DDL that the store and journal used to carry.
+replaces the inline DDL that the store and journal used to carry. Statements
+that would lock a table on every run (the schema-version upgrade) are guarded
+so they run once.
 """
 
 from __future__ import annotations
@@ -51,11 +53,14 @@ def apply_canonical_schema(
             msg = f"Canonical DDL file not found: {path}"
             raise FileNotFoundError(msg)
     # psycopg types ``execute`` on ``LiteralString | bytes | sql.SQL``;
-    # ``sql.SQL`` also wants a literal, so file contents go in as bytes.
-    for path in paths:
-        with conn.cursor() as cur:
+    # ``sql.SQL`` also wants a literal, so file contents go in as bytes. One
+    # transaction, with a lock timeout scoped to it: a schema change that
+    # cannot get its lock (another session holds the table) fails startup
+    # loudly instead of hanging it.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(b"set local lock_timeout = '10s'")
+        for path in paths:
             cur.execute(path.read_bytes())
-    conn.commit()
     log.info(
         "audit.schema_applied",
         component="audit",
