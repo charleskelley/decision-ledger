@@ -2,9 +2,10 @@
 
 ScorerOutput is the ATO Reasoner's internal representation of the fast ML
 scorer's result. It is produced by the ATO scorer package and consumed by the
-domain layer when assembling the Observation (specifically FastPathRecord and
-GateContext.template_vars). It is not a framework contract and does not
-appear in DecisionBundle or any core/decision/ type.
+assembler when building the framework submission (the reasoner context and
+the policy gate's template variables). It is not a framework contract and
+does not appear in a DecisionBundle. Whether a score is recorded or gated is
+not the scorer's call: the assembler checks ATO's registered bypass rules.
 """
 
 from __future__ import annotations
@@ -14,16 +15,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.observation import Contribution
-from core.routes import GateRoute
 
 
 class ScorerOutput(BaseModel):
     """ATO fast ML scorer output including risk score and SHAP signals.
 
-    Produced by the XGBoost scorer in the ATO scorer package. The domain layer
-    consumes this to populate FastPathRecord and GateContext.template_vars
-    on the outbound Observation before submitting to the DecisionLedger
-    framework.
+    Produced by the XGBoost scorer in the ATO scorer package. The assembler
+    consumes it to populate the submission's reasoner context and the policy
+    gate's template variables.
 
     Attributes:
         entity_id: Framework UUID of the subject the score was computed for.
@@ -33,7 +32,6 @@ class ScorerOutput(BaseModel):
         scorer_artifact_sha256: SHA-256 hex digest of the model binary.
             None for API-based models with no local artifact.
         inference_latency_ms: Wall-clock inference time in milliseconds.
-        route: Gate route produced by the confidence-band threshold.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -44,4 +42,3 @@ class ScorerOutput(BaseModel):
     scorer_version: str
     scorer_artifact_sha256: str | None = None
     inference_latency_ms: float = Field(ge=0.0)
-    route: GateRoute

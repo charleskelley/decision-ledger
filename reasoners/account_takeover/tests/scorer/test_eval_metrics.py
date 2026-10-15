@@ -159,29 +159,25 @@ class TestRoutingDistribution:
         assert sum(dist.values()) == pytest.approx(1.0)
 
     def test_partition_matches_thresholds(self) -> None:
-        # 0.05 < 0.20 → ALLOW; 0.3, 0.5, 0.7 in band → GATE; 0.95 > 0.85 → BLOCK.
+        # 0.05 < 0.20 → allow band; 0.3, 0.5, 0.7 → gate; 0.95 > 0.85 → block.
         scores = np.array([0.05, 0.3, 0.5, 0.7, 0.95])
         dist = routing_distribution(scores, allow_threshold=0.20, block_threshold=0.85)
-        assert dist["FAST_PATH_ALLOW"] == pytest.approx(0.2)
-        assert dist["ROUTE_TO_GATE"] == pytest.approx(0.6)
-        assert dist["FAST_PATH_BLOCK"] == pytest.approx(0.2)
+        assert dist["allow_band"] == pytest.approx(0.2)
+        assert dist["gate"] == pytest.approx(0.6)
+        assert dist["block_band"] == pytest.approx(0.2)
 
     def test_empty_input_zeros(self) -> None:
         dist = routing_distribution(
             np.array([]), allow_threshold=0.20, block_threshold=0.85
         )
-        assert dist == {
-            "FAST_PATH_ALLOW": 0.0,
-            "ROUTE_TO_GATE": 0.0,
-            "FAST_PATH_BLOCK": 0.0,
-        }
+        assert dist == {"allow_band": 0.0, "gate": 0.0, "block_band": 0.0}
 
-    def test_boundary_values_route_to_gate(self) -> None:
-        # Score equal to a threshold: ALLOW uses strict <, BLOCK uses strict >;
-        # so threshold-exact scores fall into ROUTE_TO_GATE.
+    def test_boundary_values_go_to_the_gate(self) -> None:
+        # Score equal to a threshold: the allow band uses strict <, the block
+        # band strict >; so threshold-exact scores go to the gate.
         scores = np.array([0.20, 0.85])
         dist = routing_distribution(scores, allow_threshold=0.20, block_threshold=0.85)
-        assert dist["ROUTE_TO_GATE"] == 1.0
+        assert dist["gate"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +198,9 @@ class TestTrainingReport:
             test_recall_at_0_5=0.85,
             test_confusion_matrix=[[10, 2], [1, 7]],
             test_routing_distribution={
-                "FAST_PATH_ALLOW": 0.5,
-                "ROUTE_TO_GATE": 0.3,
-                "FAST_PATH_BLOCK": 0.2,
+                "allow_band": 0.5,
+                "gate": 0.3,
+                "block_band": 0.2,
             },
         )
         assert report.n_train == 80
@@ -236,7 +232,7 @@ class TestTrainingReport:
             test_precision_at_0_5=0.88,
             test_recall_at_0_5=0.85,
             test_confusion_matrix=[[10, 2], [1, 7]],
-            test_routing_distribution={"FAST_PATH_ALLOW": 1.0},
+            test_routing_distribution={"allow_band": 1.0},
         )
         with pytest.raises(ValidationError):
             report.test_auc = 0.0

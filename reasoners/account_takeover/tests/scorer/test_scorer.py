@@ -7,12 +7,13 @@ from datetime import UTC, datetime
 import pytest
 
 from ato_reasoner.features import AtoFeatureVector, WindowSpec
+from ato_reasoner.registry import ALLOW_BAND_THRESHOLD, BLOCK_BAND_THRESHOLD
 from ato_reasoner.scorer.scorer import (
+    FAST_PATH_ALLOW_THRESHOLD,
+    FAST_PATH_BLOCK_THRESHOLD,
     FEATURE_NAMES,
-    _route,
     _to_feature_row,
 )
-from core.routes import GateRoute
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,11 +82,11 @@ def test_score_is_in_unit_interval(scorer):
 
 
 # ---------------------------------------------------------------------------
-# Routing
+# Bands (the registration's bypass rules decide; the scorer only scores)
 # ---------------------------------------------------------------------------
 
 
-def test_route_fast_path_allow_for_low_risk(scorer):
+def test_low_risk_features_score_in_the_allow_band(scorer):
     fv = _make_fv(
         velocity_1min=0,
         velocity_5min=0,
@@ -101,10 +102,10 @@ def test_route_fast_path_allow_for_low_risk(scorer):
         sparse_history=False,
     )
     result = scorer.score(fv)
-    assert result.route == GateRoute.FAST_PATH_ALLOW
+    assert result.risk_score < ALLOW_BAND_THRESHOLD
 
 
-def test_route_fast_path_block_for_high_risk(scorer):
+def test_high_risk_features_score_high(scorer):
     fv = _make_fv(
         velocity_1min=10,
         velocity_5min=20,
@@ -118,14 +119,13 @@ def test_route_fast_path_block_for_high_risk(scorer):
     )
     result = scorer.score(fv)
     assert result.risk_score > 0.5
-    assert isinstance(result.route, GateRoute)
 
 
-def test_route_route_to_gate_for_mid_risk():
-    assert _route(0.5) == GateRoute.ROUTE_TO_GATE
-    assert _route(0.90) == GateRoute.ROUTE_TO_GATE
-    assert _route(0.15) == GateRoute.FAST_PATH_ALLOW
-    assert _route(0.97) == GateRoute.FAST_PATH_BLOCK
+def test_the_scorer_band_constants_are_the_registered_rule_thresholds():
+    # One source of truth: the model card and band metrics read the numbers
+    # ATO's bypass rules register.
+    assert FAST_PATH_ALLOW_THRESHOLD == ALLOW_BAND_THRESHOLD == 0.20
+    assert FAST_PATH_BLOCK_THRESHOLD == BLOCK_BAND_THRESHOLD == 0.95
 
 
 # ---------------------------------------------------------------------------
