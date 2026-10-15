@@ -1,15 +1,14 @@
-"""Behavioral tests for ReasonerRegistration, ReasonerRegistry, and the
-registry-extended validate_observation() contracts.
+"""Behavioral tests for ReasonerRegistration, its parts, and ReasonerRegistry.
 
-Key contracts:
-- ReasonerRegistration is immutable and carries the allowed gates and the
-  enforcement profile — nothing gate-specific (DR-28).
-- validate_observation() without registry: shape checks only (existing behavior).
-- validate_observation() with registry: also checks reasoner_id is registered
-  and the named gate is allowed. It reads no gate_config key: what a reasoner
-  may put in a gate's configuration is that gate's business.
-- UnregisteredReasonerError is raised (not ObservationContractError) when the
-  reasoner_id is unknown — these are distinct failure modes.
+Key contracts (DR-29, DR-30):
+- A registration binds a gate set (``GateBinding``: mandatory or advisory,
+  each gate once), registers bypass rules (unique ids, each justifying one
+  action), and lists the actions the reasoner may record; every rule's
+  action must be recordable. It carries nothing gate-specific (DR-28).
+- ``BypassRule`` predicates are the closed predicate language and round-trip
+  through JSON with the registration.
+- Registrations, bindings, and rules are immutable.
+- A registry satisfies ``ReasonerRegistry`` structurally.
 """
 
 from __future__ import annotations
@@ -17,15 +16,26 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from core.exceptions import ObservationContractError, UnregisteredReasonerError
+from core.actions import DecisionAction
+from core.exceptions import UnregisteredReasonerError
+from core.gate import AllOf, Compare, Not
 from core.observation import (
+    BypassRule,
+    GateBinding,
     ReasonerRegistration,
     ReasonerRegistry,
-    validate_observation,
 )
 
+ALLOW, CHALLENGE, HOLD, BLOCK = (
+    DecisionAction.ALLOW,
+    DecisionAction.CHALLENGE,
+    DecisionAction.HOLD,
+    DecisionAction.BLOCK,
+)
+
+
 # ---------------------------------------------------------------------------
-# Helpers — minimal registry that satisfies the ReasonerRegistry protocol
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -47,104 +57,229 @@ class _RegistryStub:
         return reasoner_id in self._store
 
 
-def _make_registration(
+def _rule(
+    rule_id: str = "low-score",
     *,
-    reasoner_id: str = "stub-reasoner",
-    gate_ids: frozenset[str] = frozenset({"policy"}),
-) -> ReasonerRegistration:
-    return ReasonerRegistration(
-        reasoner_id=reasoner_id,
-        reasoner_name="Test Reasoner",
-        allowed_gate_ids=gate_ids,
+    action: DecisionAction = ALLOW,
+    version: str = "1",
+) -> BypassRule:
+    return BypassRule(
+        rule_id=rule_id,
+        version=version,
+        description="score below 0.2",
+        predicate=Compare(field="label_value", op="lt", value=0.2),
+        action=action,
     )
 
 
-# ---------------------------------------------------------------------------
-# ReasonerRegistration model
-# ---------------------------------------------------------------------------
-
-
-def test_reasoner_registration_construction():
-    reg = _make_registration()
-    assert reg.reasoner_id == "stub-reasoner"
-    assert "policy" in reg.allowed_gate_ids
-
-
-def test_reasoner_registration_carries_no_gate_specific_resource_sets():
-    # Template and jurisdiction allow-lists moved into the gate that reads
-    # them (DR-28); the registration keeps only framework concepts.
-    assert set(ReasonerRegistration.model_fields) == {
-        "reasoner_id",
-        "reasoner_name",
-        "allowed_gate_ids",
-        "novel_entity_feature",
-        "jurisdiction_conflict_groups",
+def _registration(**overrides: object) -> ReasonerRegistration:
+    fields: dict[str, object] = {
+        "reasoner_id": "stub-reasoner",
+        "reasoner_name": "Test Reasoner",
+        "gates": (GateBinding(gate_id="fake"),),
     }
+    fields.update(overrides)
+    return ReasonerRegistration(**fields)  # type: ignore[arg-type]
 
 
-def test_reasoner_registration_is_immutable():
-    reg = _make_registration()
+# ---------------------------------------------------------------------------
+# GateBinding
+# ---------------------------------------------------------------------------
+
+
+def test_a_gate_binding_is_advisory_unless_marked_mandatory():
+    assert GateBinding(gate_id="fake").mandatory is False
+    assert GateBinding(gate_id="fake", mandatory=True).mandatory is True
+
+
+def test_a_gate_binding_needs_a_gate_id():
     with pytest.raises(ValidationError):
-        reg.reasoner_id = "tampered"
+        GateBinding(gate_id="")
 
 
-def test_reasoner_registration_allowed_gate_ids_is_a_frozenset():
-    reg = _make_registration()
-    assert isinstance(reg.allowed_gate_ids, frozenset)
+def test_a_gate_binding_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        GateBinding(gate_id="fake", optional=True)  # type: ignore[call-arg]
+
+
+def test_a_gate_binding_is_immutable():
+    binding = GateBinding(gate_id="fake")
+    with pytest.raises(ValidationError):
+        binding.mandatory = True
 
 
 # ---------------------------------------------------------------------------
-# ReasonerRegistration — enforcement profile (Tier 3 / Tier 5 inputs)
+# BypassRule
 # ---------------------------------------------------------------------------
+
+
+def test_a_bypass_rule_ties_a_predicate_to_one_action():
+    rule = _rule(action=BLOCK)
+    assert rule.action == BLOCK
+    assert isinstance(rule.predicate, Compare)
+
+
+def test_a_bypass_rule_needs_an_id_and_a_version():
+    with pytest.raises(ValidationError):
+        _rule(rule_id="")
+    with pytest.raises(ValidationError):
+        _rule(version="")
+
+
+def test_a_bypass_rule_predicate_must_be_a_predicate_node():
+    with pytest.raises(ValidationError):
+        BypassRule(
+            rule_id="r",
+            version="1",
+            description="",
+            predicate="label_value < 0.2",  # type: ignore[arg-type]
+            action=ALLOW,
+        )
+
+
+def test_a_bypass_rule_round_trips_through_json_with_a_nested_predicate():
+    rule = BypassRule(
+        rule_id="quiet-widget",
+        version="2",
+        description="low score and not thin history",
+        predicate=AllOf(
+            predicates=[
+                Compare(field="label_value", op="lt", value=0.2),
+                Not(
+                    predicate=Compare(
+                        field="feature_set.thin_history", op="eq", value=True
+                    )
+                ),
+            ]
+        ),
+        action=ALLOW,
+    )
+    assert BypassRule.model_validate_json(rule.model_dump_json()) == rule
+
+
+def test_a_bypass_rule_is_immutable():
+    rule = _rule()
+    with pytest.raises(ValidationError):
+        rule.action = BLOCK
+
+
+# ---------------------------------------------------------------------------
+# ReasonerRegistration
+# ---------------------------------------------------------------------------
+
+
+def test_a_registration_binds_its_gate_set_in_order():
+    reg = _registration(
+        gates=(
+            GateBinding(gate_id="fake"),
+            GateBinding(gate_id="fake-lookup", mandatory=True),
+        )
+    )
+    assert [b.gate_id for b in reg.gates] == ["fake", "fake-lookup"]
+    assert reg.gate_ids == frozenset({"fake", "fake-lookup"})
+    assert reg.binding("fake-lookup") == GateBinding(
+        gate_id="fake-lookup", mandatory=True
+    )
+    assert reg.binding("missing") is None
+
+
+def test_a_registration_needs_a_gate_set_even_an_empty_one():
+    with pytest.raises(ValidationError):
+        ReasonerRegistration(reasoner_id="r", reasoner_name="R")  # type: ignore[call-arg]
+    assert _registration(gates=()).gate_ids == frozenset()
+
+
+def test_a_registration_rejects_a_gate_bound_twice():
+    with pytest.raises(ValidationError, match="bound more than once"):
+        _registration(
+            gates=(
+                GateBinding(gate_id="fake"),
+                GateBinding(gate_id="fake", mandatory=True),
+            )
+        )
+
+
+def test_the_old_allowed_gate_ids_field_is_gone():
+    with pytest.raises(ValidationError):
+        _registration(allowed_gate_ids=frozenset({"fake"}))
+
+
+def test_a_registration_defaults_to_no_bypass_rules_and_every_recordable_action():
+    reg = _registration()
+    assert reg.bypass_rules == ()
+    assert reg.recordable_actions == frozenset(DecisionAction)
+
+
+def test_a_registration_looks_bypass_rules_up_by_id():
+    low, high = _rule("low-score"), _rule("high-score", action=BLOCK)
+    reg = _registration(bypass_rules=(low, high))
+    assert reg.bypass_rule("high-score") == high
+    assert reg.bypass_rule("missing") is None
+
+
+def test_a_registration_rejects_duplicate_bypass_rule_ids():
+    with pytest.raises(ValidationError, match="duplicate bypass rule_id"):
+        _registration(bypass_rules=(_rule("r"), _rule("r", action=BLOCK)))
+
+
+def test_every_bypass_rule_action_must_be_recordable():
+    with pytest.raises(ValidationError, match="outside recordable_actions"):
+        _registration(
+            bypass_rules=(_rule("block-it", action=BLOCK),),
+            recordable_actions=frozenset({ALLOW}),
+        )
+
+
+def test_a_registration_may_record_nothing_when_it_registers_no_rule():
+    reg = _registration(recordable_actions=frozenset())
+    assert reg.recordable_actions == frozenset()
+
+
+def test_a_registration_carries_no_gate_specific_resource_sets():
+    # DR-28: what a reasoner may put in a gate's configuration is the gate's
+    # business; the registration has no template or jurisdiction allow-list.
+    fields = set(ReasonerRegistration.model_fields)
+    assert "allowed_prompt_template_ids" not in fields
+    assert "allowed_jurisdictions" not in fields
 
 
 def test_registration_enforcement_profile_defaults_to_disabled():
-    # A registration that says nothing about enforcement disables the
-    # structural checks: no novel-entity feature, no conflict groups.
-    reg = _make_registration()
+    reg = _registration()
     assert reg.novel_entity_feature is None
     assert reg.jurisdiction_conflict_groups == ()
 
 
-def test_registration_accepts_novel_entity_feature_name():
-    reg = ReasonerRegistration(
-        reasoner_id="r",
-        reasoner_name="R",
-        allowed_gate_ids=frozenset({"policy"}),
+def test_registration_accepts_an_enforcement_profile():
+    reg = _registration(
         novel_entity_feature="thin_history",
+        jurisdiction_conflict_groups=(frozenset({"A"}), frozenset({"B"})),
     )
     assert reg.novel_entity_feature == "thin_history"
-
-
-def test_registration_accepts_jurisdiction_conflict_groups():
-    groups = (frozenset({"REGION_A"}), frozenset({"REGION_B", "REGION_C"}))
-    reg = ReasonerRegistration(
-        reasoner_id="r",
-        reasoner_name="R",
-        allowed_gate_ids=frozenset({"policy"}),
-        jurisdiction_conflict_groups=groups,
-    )
-    assert reg.jurisdiction_conflict_groups == groups
-    assert all(isinstance(g, frozenset) for g in reg.jurisdiction_conflict_groups)
+    assert reg.jurisdiction_conflict_groups == (frozenset({"A"}), frozenset({"B"}))
 
 
 def test_registration_rejects_non_frozenset_conflict_groups_in_strict_mode():
-    # strict=True: a plain set or list is not coerced into a frozenset.
     with pytest.raises(ValidationError):
-        ReasonerRegistration(
-            reasoner_id="r",
-            reasoner_name="R",
-            allowed_gate_ids=frozenset({"policy"}),
-            jurisdiction_conflict_groups=({"REGION_A"},),  # type: ignore[arg-type]
-        )
+        _registration(jurisdiction_conflict_groups=({"A"},))
 
 
-def test_registration_enforcement_profile_is_immutable():
-    reg = _make_registration()
+def test_a_registration_is_immutable():
+    reg = _registration()
     with pytest.raises(ValidationError):
-        reg.novel_entity_feature = "tampered"
+        reg.reasoner_id = "other"
     with pytest.raises(ValidationError):
-        reg.jurisdiction_conflict_groups = (frozenset({"X"}),)
+        reg.gates = ()
+
+
+def test_a_registration_round_trips_through_json():
+    reg = _registration(
+        gates=(GateBinding(gate_id="fake"), GateBinding(gate_id="lk", mandatory=True)),
+        bypass_rules=(_rule("low-score"), _rule("high-score", action=BLOCK)),
+        recordable_actions=frozenset({ALLOW, BLOCK}),
+        novel_entity_feature="thin_history",
+        jurisdiction_conflict_groups=(frozenset({"A", "B"}),),
+    )
+    assert ReasonerRegistration.model_validate_json(reg.model_dump_json()) == reg
 
 
 # ---------------------------------------------------------------------------
@@ -153,92 +288,18 @@ def test_registration_enforcement_profile_is_immutable():
 
 
 def test_registry_stub_satisfies_protocol():
-    stub = _RegistryStub([_make_registration()])
-    assert isinstance(stub, ReasonerRegistry)
+    assert isinstance(_RegistryStub([_registration()]), ReasonerRegistry)
 
 
 def test_registry_stub_is_registered_returns_true_for_known_id():
-    stub = _RegistryStub([_make_registration()])
-    assert stub.is_registered("stub-reasoner")
+    assert _RegistryStub([_registration()]).is_registered("stub-reasoner")
 
 
 def test_registry_stub_is_registered_returns_false_for_unknown_id():
-    stub = _RegistryStub([_make_registration()])
-    assert not stub.is_registered("unknown-reasoner")
+    assert not _RegistryStub([_registration()]).is_registered("unknown-reasoner")
 
 
 def test_registry_stub_get_raises_for_unknown_id():
-    stub = _RegistryStub([_make_registration()])
     with pytest.raises(UnregisteredReasonerError) as exc_info:
-        stub.get("unknown-reasoner")
+        _RegistryStub([_registration()]).get("unknown-reasoner")
     assert exc_info.value.reasoner_id == "unknown-reasoner"
-
-
-# ---------------------------------------------------------------------------
-# validate_observation — without registry (shape checks only)
-# ---------------------------------------------------------------------------
-
-
-def test_validate_observation_passes_without_registry(observation):
-    # Existing shape-only behavior must be unchanged.
-    validate_observation(observation)
-
-
-def test_validate_observation_raises_for_missing_reasoner_context(observation):
-    obs = observation.model_copy(update={"reasoner_context": None})
-    with pytest.raises(ObservationContractError):
-        validate_observation(obs)
-
-
-# ---------------------------------------------------------------------------
-# validate_observation — with registry, happy path
-# ---------------------------------------------------------------------------
-
-
-def test_validate_observation_passes_with_registered_reasoner(observation):
-    registry = _RegistryStub([_make_registration()])
-    validate_observation(observation, registry=registry)
-
-
-def test_validate_observation_reads_no_gate_config_key(observation, gate_context):
-    # Template ids and jurisdictions are the policy gate's to authorize; the
-    # framework's intake contract no longer interprets gate_config at all.
-    ctx = gate_context.model_copy(
-        update={
-            "gate_config": {
-                "template_id": "a-template-nobody-ships",
-                "jurisdictions": ["REGION_A", "REGION_C"],
-                "anything": {"else": True},
-            }
-        }
-    )
-    obs = observation.model_copy(update={"gate_context": ctx})
-    validate_observation(obs, registry=_RegistryStub([_make_registration()]))
-
-
-# ---------------------------------------------------------------------------
-# validate_observation — with registry, failure paths
-# ---------------------------------------------------------------------------
-
-
-def test_validate_observation_raises_unregistered_reasoner_error(observation):
-    registry = _RegistryStub([])  # no registrations
-    with pytest.raises(UnregisteredReasonerError) as exc_info:
-        validate_observation(observation, registry=registry)
-    assert exc_info.value.reasoner_id == "stub-reasoner"
-
-
-def test_unregistered_error_is_not_observation_contract_error(observation):
-    # These are distinct exception types — callers should handle them separately.
-    registry = _RegistryStub([])
-    with pytest.raises(UnregisteredReasonerError):
-        validate_observation(observation, registry=registry)
-
-
-def test_validate_observation_raises_for_disallowed_gate(observation):
-    registry = _RegistryStub(
-        [_make_registration(gate_ids=frozenset({"some-other-gate"}))]
-    )
-    with pytest.raises(ObservationContractError) as exc_info:
-        validate_observation(observation, registry=registry)
-    assert "gate_id 'policy'" in str(exc_info.value)

@@ -97,7 +97,7 @@ decisioning production-safe:
 </p>
 
 A **reasoner** is one domain's half of the pipeline: a package under
-`reasoners/<name>/` that owns everything up to `build_observation()` (events,
+`reasoners/<name>/` that owns everything up to `build_submission()` (events,
 ingestion, features, scoring, prompts, policy corpus) and plugs in through a
 Python entry point. The **framework** (`core/`, `app/`, `eval/`) owns
 everything after it and never imports a reasoner. Account Takeover is the
@@ -201,7 +201,7 @@ design rationale:
 | [Architecture](https://charleskelley.github.io/decision-ledger/design/architecture/)     | C4 diagrams, component dependencies, directory layout        |
 | [Pipeline](https://charleskelley.github.io/decision-ledger/design/pipeline/)             | Runtime flow, latency budget, fallback paths                 |
 | [Evaluation](https://charleskelley.github.io/decision-ledger/design/evaluation/)         | 5D framework methodology, metrics, CI thresholds             |
-| [Reasoner Handoff](https://charleskelley.github.io/decision-ledger/design/reasoners/reasoner-handoff/) | The `build_observation()` contract and the new-reasoner checklist |
+| [Reasoner Handoff](https://charleskelley.github.io/decision-ledger/design/reasoners/reasoner-handoff/) | The reasoner handoff contract and the new-reasoner checklist |
 | [ATO Data](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/data/) | ATO login-event schema, scorer output, Decision Bundle structure |
 | [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-26 — the significant choices and why         |
 | [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, `decisionledger` schema, environment   |

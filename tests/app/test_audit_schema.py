@@ -4,14 +4,18 @@ The canonical DDL under ``app/audit/sql/`` replaced two inline
 ``ensure_schema()`` methods. These tests pin how it is applied, using a
 recording fake connection so no Postgres is needed:
 
-- Both files are executed, in ``SQL_FILES`` order, with their full contents.
-- ``commit()`` is called exactly once, after the last file.
+- Both files are executed, in ``SQL_FILES`` order, with their full contents,
+  inside one transaction block that first sets a local lock timeout (a DDL
+  statement that cannot get its lock fails startup instead of hanging it).
 - A missing file raises ``FileNotFoundError`` before anything is executed.
-- The shipped files are idempotent: every ``create`` is ``if not exists``.
+- The shipped files are idempotent: every ``create`` is ``if not exists``,
+  and the one ``alter table`` (the schema-version upgrade) is guarded so a
+  current table is never locked.
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import TYPE_CHECKING
 
@@ -20,6 +24,7 @@ import pytest
 from app.audit.schema import DEFAULT_SQL_DIR, SQL_FILES, apply_canonical_schema
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -42,7 +47,7 @@ class _RecordingCursor:
 
 
 class _RecordingConn:
-    """Records every ``execute`` and ``commit`` in the order they happen."""
+    """Records every statement and transaction boundary in order."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, bytes | None]] = []
@@ -50,7 +55,10 @@ class _RecordingConn:
     def cursor(self) -> _RecordingCursor:
         return _RecordingCursor(self)
 
-    def commit(self) -> None:
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.events.append(("begin", None))
+        yield
         self.events.append(("commit", None))
 
 
@@ -76,17 +84,30 @@ def test_apply_canonical_schema_executes_both_files_in_declared_order(tmp_path):
     apply_canonical_schema(conn, sql_dir=tmp_path)  # type: ignore[arg-type]
 
     executed = [body for kind, body in conn.events if kind == "execute"]
-    assert executed == [contents[name] for name in SQL_FILES]
+    assert executed[1:] == [contents[name] for name in SQL_FILES]
 
 
-def test_apply_canonical_schema_commits_once_after_the_last_file(tmp_path):
+def test_apply_canonical_schema_runs_in_one_transaction_with_a_lock_timeout(
+    tmp_path,
+):
     _write_fake_ddl(tmp_path)
     conn = _RecordingConn()
 
     apply_canonical_schema(conn, sql_dir=tmp_path)  # type: ignore[arg-type]
 
     kinds = [kind for kind, _ in conn.events]
-    assert kinds == ["execute", "execute", "commit"]
+    assert kinds == ["begin", "execute", "execute", "execute", "commit"]
+    assert conn.events[1] == ("execute", b"set local lock_timeout = '10s'")
+
+
+def test_the_schema_version_upgrade_is_guarded():
+    tables = (DEFAULT_SQL_DIR / "02_tables.sql").read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in tables.splitlines() if not line.lstrip().startswith("--")
+    ).lower()
+    assert "alter table" in body
+    guard = body.index("if not exists (")
+    assert all(match.start() > guard for match in re.finditer("alter table", body))
 
 
 def test_apply_canonical_schema_raises_before_executing_when_a_file_is_missing(

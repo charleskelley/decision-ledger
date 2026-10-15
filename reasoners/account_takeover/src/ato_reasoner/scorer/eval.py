@@ -10,7 +10,7 @@ Public API:
     log_loss                         Binary cross-entropy.
     precision_recall_at_threshold    P/R at a fixed threshold.
     confusion_matrix_at_threshold    [[TN, FP], [FN, TP]] at a threshold.
-    routing_distribution             Fraction in each fast-path band.
+    routing_distribution             Fraction in each score band.
     TrainingReport                   Pydantic schema for a training-run summary.
 """
 
@@ -140,11 +140,13 @@ def confusion_matrix_at_threshold(
 def routing_distribution(
     y_score: np.ndarray, *, allow_threshold: float, block_threshold: float
 ) -> dict[str, float]:
-    """Fraction of scores landing in each fast-path band.
+    """Fraction of scores landing in each score band.
 
-    Bands match the scorer's ``_route`` function: ``< allow_threshold`` →
-    ``FAST_PATH_ALLOW``; ``> block_threshold`` → ``FAST_PATH_BLOCK``;
-    otherwise → ``ROUTE_TO_GATE``.
+    Bands match ATO's registered bypass rules: ``< allow_threshold`` →
+    ``allow_band`` (recorded ALLOW); ``> block_threshold`` → ``block_band``
+    (recorded BLOCK); otherwise → ``gate`` (sent to the policy gate).
+    Model cards trained before the submission contract carry the earlier
+    key names for the same three bands.
 
     Args:
         y_score: 1-D array of predicted probabilities.
@@ -152,24 +154,20 @@ def routing_distribution(
         block_threshold: Upper band cutoff.
 
     Returns:
-        Dict with keys ``FAST_PATH_ALLOW``, ``ROUTE_TO_GATE``,
-        ``FAST_PATH_BLOCK`` summing to ``1.0``. All-zeros on an empty input.
+        Dict with keys ``allow_band``, ``gate``, ``block_band`` summing to
+        ``1.0``. All-zeros on an empty input.
     """
     y_score = np.asarray(y_score, dtype=np.float64)
     n = len(y_score)
     if n == 0:
-        return {
-            "FAST_PATH_ALLOW": 0.0,
-            "ROUTE_TO_GATE": 0.0,
-            "FAST_PATH_BLOCK": 0.0,
-        }
+        return {"allow_band": 0.0, "gate": 0.0, "block_band": 0.0}
     n_allow = int((y_score < allow_threshold).sum())
     n_block = int((y_score > block_threshold).sum())
     n_gate = n - n_allow - n_block
     return {
-        "FAST_PATH_ALLOW": n_allow / n,
-        "ROUTE_TO_GATE": n_gate / n,
-        "FAST_PATH_BLOCK": n_block / n,
+        "allow_band": n_allow / n,
+        "gate": n_gate / n,
+        "block_band": n_block / n,
     }
 
 

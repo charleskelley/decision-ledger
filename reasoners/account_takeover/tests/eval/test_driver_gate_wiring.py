@@ -18,8 +18,8 @@ the run() rationale case uses a scripted gate that returns a finished
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -37,9 +37,8 @@ from ato_reasoner.plugin import PLUGIN, AtoServices
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import ScorerOutput
 from core.actions import DecisionAction
-from core.exceptions import ObservationContractError
+from core.exceptions import SubmissionContractError
 from core.gate import GateOutput, GateVerdict
-from core.routes import GateRoute
 from policy_rag_gate.config import ReasonerProfile
 from policy_rag_gate.gate import PolicyGate
 from policy_rag_gate.models import (
@@ -110,7 +109,6 @@ def _gate_routed_score() -> ScorerOutput:
         top_signals=[],
         scorer_version="xgb-test",
         inference_latency_ms=1.0,
-        route=GateRoute.ROUTE_TO_GATE,
     )
 
 
@@ -228,6 +226,19 @@ def test_swapping_in_a_policy_gate_leaves_the_driver_and_other_gates_alone():
     assert swapped.store is driver._framework.store
 
 
+def test_swapping_in_a_policy_gate_keeps_the_deployment_mandate():
+    # Under DECISIONLEDGER_MANDATORY_GATES=policy a fault-injected run must
+    # still treat the gate as mandatory (a record would otherwise skip it).
+    mandated = ComposedGate(
+        plugin=PolicyGatePlugin(), gate=_policy_gate(_StubRetriever()), mandatory=True
+    )
+    driver = _driver({"policy": mandated})
+
+    swapped = driver._framework_with_policy_gate(_policy_gate(_StubRetriever()))
+
+    assert swapped.gates["policy"].mandatory is True
+
+
 def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
     # The composed gate lets ATO use only ato-v1; the swapped-in faulty gate
     # must enforce the same profile, so the assembler's ato-v3 context is
@@ -246,7 +257,7 @@ def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
     )
     driver = _driver({"policy": _composed(gate)})
 
-    with pytest.raises(ObservationContractError, match="'ato-v3' is not a prompt"):
+    with pytest.raises(SubmissionContractError, match="'ato-v3' is not a prompt"):
         asyncio.run(driver.run_with_forced_fallback(_event(), fallback_kind="llm_5xx"))
 
     driver._framework.store.write.assert_not_called()
@@ -269,12 +280,16 @@ def test_forced_llm_5xx_runs_retrieval_then_holds_on_the_failed_call():
     (call,) = retriever.calls
     assert call["reasoner_id"] == ATO_REGISTRATION.reasoner_id
     bundle = driver._framework.store.write.call_args[0][0]
-    assert bundle.enforcement_rule_applied == "tier1_schema_failure"
-    extra = PolicyGateExtra.model_validate(bundle.gate_output.extra, strict=False)
+    policy = bundle.gate("policy")
+    assert policy.status == "ran"
+    assert policy.enforcement.enforcement_rule_applied == "tier1_schema_failure"
+    extra = PolicyGateExtra.model_validate(policy.output.extra, strict=False)
     assert extra.failure == "llm_error"
 
 
-def test_forced_retrieval_error_maps_to_hold():
+def test_a_forced_retrieval_error_fails_the_gate_closed_and_holds():
+    # The framework fails a raising gate closed (DR-29), so the decision is
+    # still written, with the policy gate's record carrying the error.
     driver = _driver({"policy": _composed(_policy_gate(_StubRetriever()))})
 
     action = asyncio.run(
@@ -282,17 +297,28 @@ def test_forced_retrieval_error_maps_to_hold():
     )
 
     assert action == DecisionAction.HOLD
-    driver._framework.store.write.assert_not_called()
+    bundle = driver._framework.store.write.call_args[0][0]
+    policy = bundle.gate("policy")
+    assert policy.status == "failed"
+    assert policy.reason.startswith("raised _RetrievalForcedError: ")
 
 
-def test_forced_schema_failure_holds_without_calling_the_gate():
+@pytest.mark.parametrize("risk_score", [0.61, 0.05, 0.97])
+def test_forced_schema_failure_holds_without_calling_the_gate(risk_score):
+    # Every band, the recorded ones included: the path forces gate mode, or a
+    # login in a band would be recorded and never reach the schema-failure
+    # tier (the robustness check is zero-tolerance).
     retriever = _StubRetriever()
     driver = _driver({"policy": _composed(_policy_gate(retriever))})
+    driver._services.scorer.score.return_value = _gate_routed_score().model_copy(
+        update={"risk_score": risk_score}
+    )
 
     action = asyncio.run(driver.run_with_forced_schema_failure(_event()))
 
     assert action == DecisionAction.HOLD
     assert retriever.calls == []
+    driver._framework.store.write.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -371,15 +397,23 @@ def _gate_path_bundle(*, verdict: bool = True) -> Any:
             citations=[citation] if verdict else [],
         ).model_dump(mode="json"),
     )
-    return MagicMock(gate_output=output)
+    return _bundle_with_policy_output(output)
+
+
+def _bundle_with_policy_output(output: GateOutput | None) -> Any:
+    """A bundle-shaped stand-in whose policy gate record carries ``output``."""
+    record = SimpleNamespace(output=output)
+    return SimpleNamespace(gate=lambda gate_id: record if gate_id == "policy" else None)
 
 
 @pytest.mark.parametrize("round_trip", [False, True], ids=["in-memory", "stored"])
 def test_capture_reads_rationale_citations_and_contexts_from_the_gate(round_trip):
     bundle = _gate_path_bundle()
     if round_trip:
-        stored = json.loads(json.dumps(bundle.gate_output.model_dump(mode="json")))
-        bundle = MagicMock(gate_output=GateOutput.model_validate(stored, strict=False))
+        output = bundle.gate("policy").output
+        bundle = _bundle_with_policy_output(
+            GateOutput.model_validate_json(output.model_dump_json())
+        )
 
     case = _bundle_to_case("device_fingerprint_anomaly", bundle)
 
@@ -394,6 +428,6 @@ def test_capture_reads_rationale_citations_and_contexts_from_the_gate(round_trip
     }
 
 
-def test_capture_skips_fast_path_and_verdictless_bundles():
-    assert _bundle_to_case("x", MagicMock(gate_output=None)) is None
+def test_capture_skips_recorded_and_verdictless_bundles():
+    assert _bundle_to_case("x", _bundle_with_policy_output(None)) is None
     assert _bundle_to_case("x", _gate_path_bundle(verdict=False)) is None

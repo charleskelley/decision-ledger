@@ -299,7 +299,7 @@ class PolicyGate:
         Args:
             request: Framework-built request. ``gate_context.gate_config``
                 is a ``PolicyGateConfig``;
-                ``observation.reasoner_context.reasoner_id`` scopes
+                ``submission.reasoner_context.reasoner_id`` scopes
                 retrieval to the submitting reasoner's corpus.
 
         Returns:
@@ -315,11 +315,11 @@ class PolicyGate:
                 propagates to the caller unchanged).
         """
         t0 = time.perf_counter()
-        observation = request.observation
+        submission = request.submission
         log_ctx = {
             "component": "policy_gate",
             "decision_id": request.decision_id,
-            "event_id": observation.event_id,
+            "event_id": submission.event_id,
             "model": self._model_version_label,
         }
 
@@ -385,14 +385,11 @@ class PolicyGate:
                 snippets=[],
                 retrieval_ms=0.0,
             )
-        reasoner_context = observation.reasoner_context
         t_retrieval = time.perf_counter()
         snippets, retrieval_path = self._retriever.retrieve(
             query=query,
             k=self._top_k,
-            reasoner_id=(
-                reasoner_context.reasoner_id if reasoner_context is not None else None
-            ),
+            reasoner_id=submission.reasoner_context.reasoner_id,
             jurisdictions=list(config.jurisdictions) or None,
             risk_tier=config.risk_tier,
         )

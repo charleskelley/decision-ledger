@@ -6,7 +6,7 @@ uv workspace member under `reasoners/account_takeover/` (import package
 policy corpus, generator, and eval adapter. It reaches the framework only
 through its `PLUGIN` ([`AtoPlugin`][ato_reasoner.plugin.AtoPlugin]) (entry point group
 `decisionledger.reasoners`), the
-[`build_observation`][ato_reasoner.assembler.build_observation]
+[`build_submission`][ato_reasoner.assembler.build_submission]
 handoff, and its [`ReasonerRegistration`][core.observation.ReasonerRegistration]
 record.
 

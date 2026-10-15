@@ -131,7 +131,7 @@ class FallbackCase(BaseModel, Generic[EventT]):
             so the trigger lands in the gate-routing band. Required for
             llm_5xx and retrieval_error: those fault paths fire only when
             the gate (or retriever) is actually invoked, which requires
-            the scorer to route to gate rather than fast-path.
+            the reasoner to ask for a gate rather than record its decision.
         fallback_kind: Which fallback to force (``"retrieval_error"``,
             ``"llm_5xx"``). The driver interprets the kind.
         expected_action: Conservative action expected after fallback.
@@ -235,7 +235,7 @@ class RobustnessDriver(Protocol):
     """SDK-agnostic driver for the robustness sub-checks.
 
     A reasoner's eval driver goes through its live pipeline (the same path
-    as its decision endpoint → ``app/decide.py:execute_decision``) with
+    as its decision endpoint → ``app/submit.py:submit``) with
     controlled overrides for schema violation, fallback simulation, etc.
     Events are instances of the reasoner's event type. Test stubs satisfy
     this protocol for unit tests.

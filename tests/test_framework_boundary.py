@@ -41,6 +41,20 @@ Scans and build-metadata checks codify those rules:
   internals (retriever, prompt registry, retrieval record, LLM adapters),
   with no exemptions, and none of the gate's former homes inside the
   framework trees still holds a file.
+- **Submission contract** (DR-29, DR-30, DR-31): the in-process
+  ``Observation`` handoff is gone. No framework file names the protocol, its
+  validator and error, the gate route and its members, the fast-path
+  rationale, the per-reasoner raw-event deserializer, or the old
+  orchestrator, the old assembler entry point, or the registration's old
+  gate allow-list, and none says "fast path" in any spelling, inside an
+  identifier included (a reasoner either records or asks for a gate). No
+  member's source (code, YAML, SQL, JSON) names the removed identifiers
+  either, and the handoff's former homes (``core/routes.py``,
+  ``core/observation/observation.py``, ``app/decide.py``) hold no file. One
+  committed training artifact (a model card's band metrics) keeps the old
+  band names, as a listed exception that must stay needed. Member Markdown
+  is not scanned: the reference policy corpus is indexed content, and its
+  documents may name the bands of their time.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -104,7 +118,7 @@ ATO_TOKENS = re.compile(
     r"\b(LoginEvent|AtoFeatureVector|AtoScorer|AtoSettings|FeatureService|"
     r"run_ato_decision|AuthOutcome|AuthMethod|account_takeover|ato_reasoner|"
     r"ato-reasoner|ato-v\w*|sparse_history|US_FEDERAL|US_STATE|EU_GDPR|"
-    r"login[_ ]event)\b"
+    r"login[_ ]event|allow-band|block-band)\b"
 )
 ATO_WORD = re.compile(r"\bATO\b", re.IGNORECASE)
 
@@ -170,9 +184,48 @@ POLICY_GATE_FORMER_HOMES = (
     "eval/prompts/",
 )
 
+# The in-process handoff Phase 2 replaced with the wire ``Submission``
+# (DR-31): the structural ``Observation`` protocol, its validator and error,
+# the gate route and its three members, the fast-path rationale, the
+# per-reasoner raw-event deserializer replay needed, the orchestrator that
+# consumed them, the assembler entry point that built them, and the
+# registration's gate allow-list (now its ``GateBinding`` gate set). Matched
+# case-sensitively as whole identifiers, so the ``core.observation`` package
+# (lower case) is untouched.
+FORMER_HANDOFF_TOKENS = re.compile(
+    r"\b(Observation|ObservationContractError|validate_observation|GateRoute|"
+    r"FAST_PATH_ALLOW|FAST_PATH_BLOCK|ROUTE_TO_GATE|fast_path_rationale|"
+    r"raw_event_factory|raw_event_factories|RawEventFactory|execute_decision|"
+    r"build_observation|allowed_gate_ids)\b"
+)
+
+#: Committed training artifacts that record the band names of their time.
+#: A model card is evidence of how a model was trained and evaluated, so it is
+#: not rewritten; its band metrics keep the old keys. Each entry names the
+#: exact tokens it may hold and must stay needed.
+MEMBER_HANDOFF_TOKEN_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "reasoners/account_takeover/src/ato_reasoner/scorer/models/ato-v1.json": frozenset(
+        {"FAST_PATH_ALLOW", "FAST_PATH_BLOCK", "ROUTE_TO_GATE"}
+    ),
+}
+
+#: "Fast path" in any spelling, inside identifiers too (``fast_path_ms``,
+#: ``FastPathRecord``, ``is_fast_path``), but not inside a longer word
+#: ("breakfast path"). DR-30 repositions it: a reasoner records a decision it
+#: made (citing a registered bypass rule) or asks for a gate.
+FAST_PATH_PROSE = re.compile(r"(?<![a-z])fast[-_ ]?paths?", re.IGNORECASE)
+
+#: Where the in-process handoff lived. None of them may hold a file again.
+FORMER_HANDOFF_HOMES = (
+    "core/routes.py",
+    "core/observation/observation.py",
+    "app/decide.py",
+)
+
 # Gate contracts whose subclasses the framework must never define or import:
-# the bundle stores the universal base of each, and ``app/decide.py`` rejects
-# a gate output, verdict, or evidence reference that is a subclass.
+# the bundle stores the universal base of each, and ``app/submit.py`` fails
+# a gate closed when its output, verdict, or evidence reference is a
+# subclass.
 CLOSED_GATE_BASES = frozenset({"GateOutput", "GateInput", "GateVerdict"})
 
 #: ``create extension`` in any form — the framework's DDL needs none.
@@ -475,6 +528,87 @@ def test_the_policy_gate_left_the_framework_trees():
         elif target.exists():
             leftovers.append(home)
     assert not leftovers, f"policy gate files left in the framework: {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# Submission contract — the in-process handoff is gone (DR-29..DR-31)
+# ---------------------------------------------------------------------------
+
+
+def _member_src_files() -> list[Path]:
+    """Every .py, .yaml, .sql, and .json under each member's ``src/``."""
+    files: list[Path] = []
+    for src in sorted([*REASONERS_DIR.glob("*/src"), *GATES_DIR.glob("*/src")]):
+        files.extend(_files(src, ".py", ".yaml", ".yml", ".sql", ".json"))
+    return sorted(files)
+
+
+def test_framework_names_no_part_of_the_former_observation_handoff():
+    """No framework file names the handoff the wire ``Submission`` replaced.
+
+    A reasoner hands the ledger a concrete ``Submission`` (DR-31): no
+    structural ``Observation`` protocol, no gate route chosen by the
+    reasoner, no free-text fast-path rationale, and no per-reasoner
+    deserializer for replay, which needs no reasoner code.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in FORMER_HANDOFF_TOKENS.finditer(text)})
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, (
+        f"framework files name the removed Observation handoff: {offenders}"
+    )
+
+
+def test_framework_never_says_fast_path():
+    """DR-30: a decision is recorded or gated; the framework has no fast path."""
+    offenders = [
+        _rel(path)
+        for path in _scan_files()
+        if FAST_PATH_PROSE.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"framework files still say 'fast path': {offenders}"
+
+
+def test_no_member_names_the_former_observation_handoff():
+    """Reasoner and gate members build and read ``Submission``s only.
+
+    A member that still names the protocol, the route, the rationale, or the
+    deserializer is either dead code or a docstring describing a contract
+    that no longer exists.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _member_src_files():
+        text = path.read_text(encoding="utf-8")
+        allowed = MEMBER_HANDOFF_TOKEN_EXCEPTIONS.get(_rel(path), frozenset())
+        hits = sorted(
+            {m.group(0) for m in FORMER_HANDOFF_TOKENS.finditer(text)} - allowed
+        )
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, (
+        f"member sources name the removed Observation handoff: {offenders}"
+    )
+
+
+def test_every_member_handoff_token_exception_is_still_needed():
+    """An exception whose file or tokens are gone is stale and must go."""
+    stale = [
+        f"{token} in {rel}"
+        for rel, tokens in MEMBER_HANDOFF_TOKEN_EXCEPTIONS.items()
+        for token in sorted(tokens)
+        if not (REPO_ROOT / rel).is_file()
+        or not re.search(rf"\b{token}\b", (REPO_ROOT / rel).read_text(encoding="utf-8"))
+    ]
+    assert not stale, f"stale member handoff-token exceptions: {stale}"
+
+
+def test_the_observation_handoff_left_its_former_homes():
+    """The gate route, the protocol module, and the old orchestrator are gone."""
+    leftovers = [home for home in FORMER_HANDOFF_HOMES if (REPO_ROOT / home).exists()]
+    assert not leftovers, f"former handoff modules still exist: {leftovers}"
 
 
 def test_framework_ddl_creates_no_extension():

@@ -4,7 +4,7 @@ Framework runtime: orchestration, gate dispatch, enforcement, audit
 storage. Imports from `core/` only; reasoners are discovered at runtime
 through the `decisionledger.reasoners` entry point group and gates through
 `decisionledger.gates`. The framework half of the reasoner ↔ framework handoff
-lives in [`app.decide.execute_decision`][app.decide.execute_decision].
+lives in [`app.submit.submit`][app.submit.submit].
 
 The framework imports no LLM SDK: the RAG policy gate's `llm/` adapters
 (`gates/policy_rag`) are the only place one (`openai`, `anthropic`) may be

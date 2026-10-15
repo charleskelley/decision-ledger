@@ -1,8 +1,11 @@
 """ATO XGBoost fast scorer — risk score and TreeSHAP attribution.
 
 AtoScorer wraps a trained XGBoost binary:logistic model and produces a
-ScorerOutput including the risk probability, top-k SHAP signals, and
-routing decision. Target inference latency: < 10 ms P95.
+ScorerOutput including the risk probability and the top-k SHAP signals.
+Target inference latency: < 10 ms P95. Whether a score is recorded or gated
+is decided by ATO's registered bypass rules (``ato_reasoner.registry``), not
+here; the band thresholds below are those rules' numbers, kept under their
+model-card names for the training and evaluation band metrics.
 
 SHAP values are computed via XGBoost's native TreeSHAP (pred_contribs=True),
 which returns shape (n_samples, n_features + 1); the last column is the bias
@@ -36,10 +39,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import xgboost as xgb
 
+from ato_reasoner.registry import ALLOW_BAND_THRESHOLD, BLOCK_BAND_THRESHOLD
 from ato_reasoner.scorer.model_card import ModelCard
 from ato_reasoner.scorer.output import ScorerOutput
 from core.observation import Contribution
-from core.routes import GateRoute
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,16 +66,20 @@ FEATURE_NAMES: list[str] = [
     "sparse_history",
 ]
 
-FAST_PATH_ALLOW_THRESHOLD: float = 0.20
-"""Risk-score threshold below which an event routes FAST_PATH_ALLOW."""
+FAST_PATH_ALLOW_THRESHOLD: float = ALLOW_BAND_THRESHOLD
+"""Upper bound of the allow band: the ``allow-band`` bypass rule's threshold.
 
-FAST_PATH_BLOCK_THRESHOLD: float = 0.95
-"""Risk-score threshold above which an event routes FAST_PATH_BLOCK.
+Named for the model card's ``fast_path_allow_threshold`` field, which every
+committed card carries; the number lives in ``ato_reasoner.registry``."""
+
+FAST_PATH_BLOCK_THRESHOLD: float = BLOCK_BAND_THRESHOLD
+"""Lower bound of the block band: the ``block-band`` bypass rule's threshold.
 
 The XGBoost classifier outputs cluster near 0 or 1 (binary objective), so
-moderately-confident attacks (~0.85-0.95) are surfaced to the LLM gate
-for adjudication rather than auto-blocked. Polish §6 (the calibration
-notebook) will validate this against the RBA dataset and may re-tune."""
+moderately-confident attacks (~0.85-0.95) go to the LLM gate for
+adjudication rather than being blocked outright. Named for the model card's
+``fast_path_block_threshold`` field; the number lives in
+``ato_reasoner.registry``."""
 
 _TOP_K_SIGNALS: int = 5
 
@@ -106,24 +113,6 @@ def _to_feature_row(fv: AtoFeatureVector) -> np.ndarray:
         ],
         dtype=np.float32,
     )
-
-
-def _route(risk_score: float) -> GateRoute:
-    """Map a risk score to a GateRoute using confidence-band thresholds.
-
-    Args:
-        risk_score: Risk probability in [0.0, 1.0].
-
-    Returns:
-        FAST_PATH_ALLOW if below the allow threshold,
-        FAST_PATH_BLOCK if above the block threshold,
-        ROUTE_TO_GATE otherwise.
-    """
-    if risk_score < FAST_PATH_ALLOW_THRESHOLD:
-        return GateRoute.FAST_PATH_ALLOW
-    if risk_score > FAST_PATH_BLOCK_THRESHOLD:
-        return GateRoute.FAST_PATH_BLOCK
-    return GateRoute.ROUTE_TO_GATE
 
 
 def _top_signals(
@@ -251,8 +240,8 @@ class AtoScorer:
             features: The ATO feature vector to score.
 
         Returns:
-            A ScorerOutput containing the risk score, top SHAP signals, routing
-            decision, and wall-clock inference latency.
+            A ScorerOutput containing the risk score, top SHAP signals, and
+            wall-clock inference latency.
         """
         t0 = time.perf_counter()
 
@@ -277,5 +266,4 @@ class AtoScorer:
             scorer_version=self._version,
             scorer_artifact_sha256=self._artifact_sha256,
             inference_latency_ms=latency_ms,
-            route=_route(risk_score),
         )

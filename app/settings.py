@@ -3,7 +3,8 @@
 ``FrameworkSettings`` holds configuration for resources that are shared
 across the framework runtime and every plugin it composes — Postgres (the
 audit ledger, the framework's only infrastructure), process-wide logging,
-and the reasoner allowlist. Tenant separation is logical (the
+the reasoner allowlist, and the gates the deployment mandates for every
+reasoner. Tenant separation is logical (the
 ``reasoner_id`` column), not connection-level — multiple reasoners share
 one deployment.
 
@@ -32,9 +33,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class FrameworkSettings(BaseSettings):
     """Shared-infrastructure configuration with docker-compose defaults.
 
-    Owns the Postgres connection params, logging knobs, and the reasoner
-    allowlist — ``app/bootstrap.py`` opens the framework's Postgres
-    connection from them.
+    Owns the Postgres connection params, logging knobs, the reasoner
+    allowlist, and the deployment's mandatory gates — ``app/bootstrap.py``
+    opens the framework's Postgres connection and composes the gates from
+    them.
 
     Reasoner- or gate-specific configuration must NOT be added here; create
     a Settings class with that plugin's own env-var prefix in its package.
@@ -62,6 +64,21 @@ class FrameworkSettings(BaseSettings):
     #: Comma-separated allowlist of ``reasoner_id`` values to compose from the
     #: installed plugins. Blank (the default) composes every installed plugin.
     decisionledger_reasoners: str = ""
+
+    #: Comma-separated ``gate_id`` values the deployment runs on every
+    #: decision of every reasoner, recorded or gated, in addition to each
+    #: registration's own gate set (DR-29). Each must be composed, or startup
+    #: fails. Blank (the default) mandates none.
+    decisionledger_mandatory_gates: str = ""
+
+    @property
+    def mandatory_gate_ids(self) -> frozenset[str]:
+        """The parsed ``DECISIONLEDGER_MANDATORY_GATES`` set (empty when blank)."""
+        return frozenset(
+            part.strip()
+            for part in self.decisionledger_mandatory_gates.split(",")
+            if part.strip()
+        )
 
     @property
     def postgres_dsn(self) -> str:

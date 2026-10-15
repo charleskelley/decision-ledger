@@ -7,6 +7,7 @@ this same protocol.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -17,9 +18,11 @@ from core.eval.metrics import (
     ConsistencyMetrics,
     DimensionResult,
     EvalDimension,
+    EvalReport,
     FaithfulnessMetrics,
     RetrievalMetrics,
     RobustnessMetrics,
+    ShadowMetrics,
 )
 from eval.dimensions import Dimension, DimensionRun
 from eval.runners.harness import assemble_report, run_eval
@@ -250,3 +253,57 @@ class TestRunEval:
         violations = {d.dimension: d.threshold_violations for d in report.dimensions}
         assert violations[EvalDimension.RETRIEVAL] == ["mrr below threshold"]
         assert violations[EvalDimension.FAITHFULNESS] == []
+
+    @pytest.mark.asyncio
+    async def test_dimensions_that_sample_the_ledger_run_after_the_rest(
+        self, tmp_path: Path
+    ) -> None:
+        order: list[str] = []
+
+        class _Ordered:
+            def __init__(self, name: str, kind: EvalDimension, *, after: bool):
+                self.name = name
+                self.kind = kind
+                self.runs_after_others = after
+                self._inner = _StubRetrievalDimension(passed=True)
+
+            async def evaluate(self) -> DimensionRun:
+                order.append(self.name)
+                await asyncio.sleep(0)
+                return await self._inner.evaluate()
+
+        dimensions: list[Dimension] = [
+            _Ordered("late", EvalDimension.SHADOW, after=True),
+            _Ordered("early-a", EvalDimension.RETRIEVAL, after=False),
+            _Ordered("early-b", EvalDimension.RETRIEVAL, after=False),
+        ]
+        report = await run_eval(dimensions=dimensions, output_path=tmp_path / "r.json")
+
+        assert order[-1] == "late"
+        assert set(order[:2]) == {"early-a", "early-b"}
+        assert len(report.dimensions) == 3
+
+    def test_assemble_report_stores_shadow_metrics(self) -> None:
+        metrics = ShadowMetrics(
+            num_decisions=2,
+            num_compared=2,
+            agreement_rate=0.5,
+            escalation_rate=0.5,
+            relaxation_rate=0.0,
+            gate_failure_rate=0.0,
+            unloadable=0,
+        )
+        run = DimensionRun(
+            result=DimensionResult(
+                dimension=EvalDimension.SHADOW,
+                passed=True,
+                metrics={"agreement_rate": 0.5},
+                threshold_violations=[],
+                evaluated_at=datetime.now(UTC),
+                num_samples=2,
+            ),
+            metrics=metrics,
+        )
+        report = assemble_report(run_id="run-shadow", runs=[run])
+        assert report.shadow == metrics
+        assert EvalReport.model_validate_json(report.model_dump_json()) == report

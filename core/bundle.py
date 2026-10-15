@@ -1,108 +1,219 @@
-"""DecisionBundle — complete replayable audit record for every decision."""
+"""DecisionBundle (schema version 2) — the complete, replayable decision record.
+
+One bundle per decision, immutable once written. Version 2 (DR-29 to DR-31)
+stores the reasoner's ``Submission`` verbatim instead of a reasoner-typed
+event, and one ``GateRecord`` per gate in the decision's gate set instead of
+a single gate's input and output, so no reasoner code, no gate, and no
+corpus is needed to audit or replay a decision. Replay still reads one thing
+outside the bundle: the reasoner's registration, for its enforcement profile
+(the novel-entity feature and the jurisdiction conflict groups), until the
+registration is snapshotted (``registration_version``, DR-31 Phase 3).
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.actions import DecisionAction
-from core.gate import GateInput, GateOutput
-from core.observation import Observation
+from core.enforcement import EnforcementDecision
+from core.gate import GateInput, GateOutput, GateStatus
+from core.submission import BypassCheck, Submission
+
+#: The bundle schema version this module defines (the
+#: ``decision_bundles.schema_version`` column of every row written).
+BUNDLE_SCHEMA_VERSION = 2
+
+
+class GateRecord(BaseModel):
+    """What happened at one gate of a decision's gate set.
+
+    Field semantics by ``status``:
+
+    * ``ran`` — the framework invoked the gate (``input``) and it returned a
+      valid universal output (``output``); ``enforcement`` holds the
+      gate-level tiers applied to it.
+    * ``failed`` — the gate produced no usable output: it raised, timed out,
+      returned something other than a plain ``GateOutput`` for itself, or no
+      gate is composed under its id. ``output`` is ``None``, ``reason`` says
+      why, ``input`` is set when the framework did invoke it, and
+      ``enforcement`` holds the fail-closed result (the schema-failure tier:
+      HOLD).
+    * ``skipped`` — the framework did not invoke the gate: an advisory gate
+      on a recorded decision, or any advisory gate once the decision was
+      already BLOCK. ``reason`` says which; nothing else is set.
+
+    Attributes:
+        gate_id: The gate.
+        mandatory: Whether the gate was mandatory for this decision (bound
+            mandatory by the registration or mandated by the deployment).
+        status: ``ran`` | ``skipped`` | ``failed``.
+        reason: Why the gate was skipped or failed; ``None`` when it ran.
+        input: The framework's record that it invoked the gate.
+        output: The gate's universal output (opaque extension included).
+        enforcement: Gate-level enforcement of this gate's output.
+        duration_ms: Wall-clock time of the gate call, or ``None`` when the
+            gate was not invoked.
+    """
+
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
+
+    gate_id: str
+    mandatory: bool
+    status: GateStatus
+    reason: str | None = None
+    input: GateInput | None = None
+    output: GateOutput | None = None
+    enforcement: EnforcementDecision | None = None
+    duration_ms: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def _fields_match_status(self) -> GateRecord:
+        """Each status carries exactly the fields its semantics define."""
+        problem: str | None = None
+        if self.status == "ran":
+            if self.input is None or self.output is None or self.enforcement is None:
+                problem = "a gate that ran records its input, output, and enforcement"
+            elif {self.output.gate_id, self.input.gate_id} != {self.gate_id}:
+                problem = "the input and output of a gate record belong to its gate"
+        elif self.status == "failed":
+            if self.output is not None or self.enforcement is None or not self.reason:
+                problem = (
+                    "a failed gate records no output, a reason, and its "
+                    "fail-closed enforcement"
+                )
+        elif (
+            self.input is not None
+            or self.output is not None
+            or self.enforcement is not None
+            or not self.reason
+        ):
+            problem = "a skipped gate records only why it was skipped"
+        if problem is not None:
+            msg = f"gate record {self.gate_id!r} ({self.status}): {problem}"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def enforced_action(self) -> DecisionAction | None:
+        """The gate-level enforced action, or ``None`` for a skipped gate."""
+        return self.enforcement.decision_action if self.enforcement else None
 
 
 class DecisionBundle(BaseModel):
-    """Complete, replayable audit record for every decision.
+    """Complete, replayable audit record for every decision (schema version 2).
 
-    Stored in PostgreSQL, indexed by ``decision_id``. Every field is logged at
-    decision time — nothing is computed on read, and the row is never updated
-    once written. Append-only ledger semantics.
+    Stored in PostgreSQL (``decisionledger.decision_bundles``), indexed by
+    ``decision_id``. Every field is logged at decision time — nothing is
+    computed on read, and the row is never updated once written.
 
-    Domain-specific artifacts (feature snapshot, reasoner output, model
-    versions for the domain reasoner) are carried in ``raw_event``: the
-    Observation stores a ``fast_path_rationale`` on the fast path and a
-    fully rendered ``GateContext`` on all paths. Gate artifacts are carried
-    in ``gate_output``: the universal base enforcement reads (verdict,
-    ``deterministic``, ``evidence``) plus the gate's opaque extension
-    (``evidence_snapshot``, ``extra``) stored verbatim (DR-28). A retrieving
-    gate records its retrieval inside its own ``evidence_snapshot``; the
-    bundle has no retrieval layer of its own.
-
-    Replay guarantee: given a ``DecisionBundle``, re-executing enforcement
-    against ``raw_event`` and ``gate_output`` produces the same
-    ``decision_action``. Replay does **not** re-invoke the gate and reads no
-    corpus. This holds regardless of whether the gate was an LLM, a rule
-    engine, or any other implementation.
+    Replay guarantee: given a bundle and its reasoner's enforcement profile
+    (the registration's novel-entity feature and jurisdiction conflict
+    groups), re-running the gate-level tiers on each stored gate output,
+    re-evaluating the stored bypass rules against the stored submission's
+    evidence, and re-running the decision-level rules and the combinator
+    produce the same ``decision_action``. Replay does **not** re-invoke any
+    gate, reads no corpus, and needs no reasoner code.
 
     Action vocabulary:
         * ``decision_action`` — the action this bundle produced at decision
-          time. Immutable. Lives on the bundle.
-        * ``resolution_action`` — for non-terminal decisions (CHALLENGE, HOLD),
-          the action a resolver later produced. Lives on
+          time. Immutable.
+        * ``resolution_action`` — for non-terminal decisions (CHALLENGE,
+          HOLD), the action a resolver later produced. Lives on
           ``core.resolution.ResolutionAttempt`` rows; never on the bundle.
-        * ``realized_action`` — the action ultimately taken on the entity.
-          Computed from the bundle plus the resolution attempt log; never
-          stored. For terminal ``decision_action`` values it equals
-          ``decision_action``; otherwise it is the first terminal
-          ``resolution_action`` in the attempt chain (or ``None`` if pending).
-
-    Gate-layer field semantics by case:
-        * Fast path (gate not invoked): ``gate_input is None and
-          gate_output is None``.
-        * Gate ran, verdict valid: both populated; ``gate_output.verdict``
-          is the typed verdict enforcement consumes.
-        * Gate ran, no valid verdict: both populated; ``gate_output.verdict
-          is None`` and the gate's ``extra`` may carry forensic evidence.
-          Enforcement routes to HOLD via the schema-failure tier.
+        * ``realized_action`` — the action ultimately taken on the entity,
+          computed from the bundle plus the resolution attempt log; never
+          stored.
 
     Attributes:
+        schema_version: Always ``2``.
         decision_id: UUID of this decision record.
         created_at: When the bundle was constructed (UTC).
-        raw_event: The validated domain Observation. Carries ``gate_context``
-            (always) and ``fast_path_rationale`` (fast path only), which
-            together contain all domain-specific provenance for replay and
-            audit.
-        idempotency_key: SHA-256 deduplication key computed at ingestion.
-        ingestion_timestamp: When the event was acknowledged from the queue.
-        queue_position: Stream sequence number, if available.
-        gate_input: The framework's record that it invoked a gate (the
-            gate's identity). ``None`` on the fast path.
-        gate_output: The universal ``GateOutput`` the gate returned, with
-            its opaque extension. ``None`` on the fast path. Populated even
-            when the gate produced no valid verdict — in that case
-            ``gate_output.verdict is None``.
-        decision_action: The action this decision produced. Immutable. For
-            terminal actions (ALLOW, BLOCK) this is the realized action; for
-            non-terminal actions (CHALLENGE, HOLD) the realized action is
-            computed from the resolution attempt log.
-        enforcement_rule_applied: Override rule that fired, if any.
-        override_log: Ordered rule evaluation log from enforcement.
-        latency_breakdown: Per-component duration in milliseconds, keyed by
-            component name (e.g., ``"features_ms"``, ``"gate_ms"``,
-            ``"enforcement_ms"``).
+        submission: The reasoner's submission, verbatim — identity, mode,
+            proposal and citation, evidence, gate contexts, and its opaque
+            ``raw_event``.
+        idempotency_key: Deduplication key (the event id unless the caller
+            supplied one).
+        ingestion_timestamp: When the event entered the reasoner's
+            pipeline.
+        gates: One record per gate in the decision's gate set, mandatory
+            gates first, each in gate-set order.
+        decision_action: The action this decision produced.
+        decision_level_rule: The decision-level rule that fired, if any
+            (not necessarily the one that set the final action — a mandatory
+            gate may still be stricter; the combinator line says what did):
+            ``tier3_novel_entity`` (a gated decision about a novel entity,
+            its advisory verdicts held for review, unless an advisory gate's
+            own Tier 1 or 2 outranked it), ``bypass_rule_not_satisfied`` (a
+            record whose cited rule did not hold: HOLD floor), or
+            ``bypass_rule_superseded`` (a record citing a rule while another
+            registered rule that also holds justifies a stricter action:
+            floor at that action).
+        override_log: The decision-level trail — the bypass check or the
+            novel-entity tier, then the combinator line. Each gate's own
+            tier log is in its ``GateRecord.enforcement``.
+        bypass_rule_holds: For a record, whether the cited rule held
+            against the submission's evidence; ``None`` for a gated
+            decision. Equals ``bypass_check.holds``.
+        bypass_check: For a record, the cited rule as evaluated (snapshot)
+            and the values it read; ``None`` for a gated decision.
+        other_bypass_checks: For a record, every other rule the reasoner
+            registers, as evaluated (snapshots), so replay can re-check that
+            no stricter rule also held; empty for a gated decision.
+        registration_version: Reserved for the registration snapshot
+            (DR-31): the version of the reasoner's registration in effect at
+            decision time. ``None`` until registrations become versioned
+            resources.
+        latency_breakdown: Per-component duration in milliseconds: the
+            reasoner's upstream steps, ``gate_ms`` (wall-clock time of the
+            whole gate phase; each gate's own time is in its record), and
+            ``enforcement_ms``.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
-    # Identity
+    schema_version: Literal[2] = 2
     decision_id: str
     created_at: datetime
-
-    # Input layer — domain provenance is in raw_event.gate_context
-    # and raw_event.fast_path_rationale (fast path only)
-    raw_event: Observation
+    submission: Submission
     idempotency_key: str
     ingestion_timestamp: datetime
-    queue_position: int | None
-
-    # Gate layer — universal contracts, both None on the fast path
-    gate_input: GateInput | None
-    gate_output: GateOutput | None
-
-    # Decision layer
+    gates: tuple[GateRecord, ...]
     decision_action: DecisionAction
-    enforcement_rule_applied: str | None
-    override_log: list[str]
-
-    # Telemetry
+    decision_level_rule: str | None
+    override_log: tuple[str, ...]
+    bypass_rule_holds: bool | None
+    bypass_check: BypassCheck | None
+    other_bypass_checks: tuple[BypassCheck, ...] = ()
+    registration_version: str | None = None
     latency_breakdown: dict[str, float]
+
+    @model_validator(mode="after")
+    def _record_layer_matches_mode(self) -> DecisionBundle:
+        """A record carries its bypass check; a gated decision carries none."""
+        recorded = self.submission.mode == "record"
+        if recorded != (self.bypass_check is not None):
+            msg = "bypass_check is set exactly when the submission is a record"
+            raise ValueError(msg)
+        expected = self.bypass_check.holds if self.bypass_check is not None else None
+        if self.bypass_rule_holds != expected:
+            msg = "bypass_rule_holds must equal bypass_check.holds (None when gated)"
+            raise ValueError(msg)
+        if self.other_bypass_checks and not recorded:
+            msg = "other_bypass_checks are recorded for a record only"
+            raise ValueError(msg)
+        gate_ids = [record.gate_id for record in self.gates]
+        if len(gate_ids) != len(set(gate_ids)):
+            msg = f"a gate appears more than once in the gate records: {gate_ids}"
+            raise ValueError(msg)
+        return self
+
+    def gate(self, gate_id: str) -> GateRecord | None:
+        """Return the record of ``gate_id``, or ``None`` if it was not in the set."""
+        return next((r for r in self.gates if r.gate_id == gate_id), None)

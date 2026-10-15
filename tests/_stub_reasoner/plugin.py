@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from tests._stub_reasoner.api import router
-from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 if TYPE_CHECKING:
@@ -39,11 +38,6 @@ class StubServices:
         self.closed = True
 
 
-def _raw_event_factory(data: dict[str, Any]) -> StubEvent:
-    """Reconstitute a ``StubEvent`` from its stored ``raw_event`` JSON dict."""
-    return StubEvent.model_validate(data, strict=False)
-
-
 class StubPlugin:
     """``ReasonerPlugin`` implementation for the stub reasoner.
 
@@ -52,7 +46,6 @@ class StubPlugin:
         router: The ``/api/v1/stub`` router.
         prompts_dir: ``tests/_stub_reasoner/prompts`` (holds ``stub-v1.yaml``).
         corpus_dir: ``tests/_stub_reasoner/corpus`` (two Markdown policies).
-        raw_event_factory: ``StubEvent`` deserializer used by replay.
         services: The most recently built ``StubServices`` (``None`` until
             ``build_services`` runs); lets tests assert on lifecycle.
     """
@@ -63,7 +56,6 @@ class StubPlugin:
         self.router = router
         self.prompts_dir = _PACKAGE_DIR / "prompts"
         self.corpus_dir = _PACKAGE_DIR / "corpus"
-        self.raw_event_factory = _raw_event_factory
         self.services: StubServices | None = None
 
     def build_services(self, framework: FrameworkServices) -> StubServices:

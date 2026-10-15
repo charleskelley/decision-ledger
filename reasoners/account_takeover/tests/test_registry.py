@@ -1,8 +1,12 @@
 """Behavioral tests for the ATO Reasoner registration and its policy-gate profile.
 
 Key contracts:
-- ATO_REGISTRATION pins reasoner_id = "ato-reasoner" and routes only to the
-  RAG policy gate.
+- ATO_REGISTRATION pins reasoner_id = "ato-reasoner" and binds only the
+  RAG policy gate, as advisory.
+- Its two bypass rules are the scorer's bands (DR-30): ``allow-band``
+  (``risk_score < 0.20`` → ALLOW) and ``block-band`` (``> 0.95`` → BLOCK),
+  disjoint, so no login can cite one while the other holds; everything
+  between the bands asks for the gate.
 - The enforcement profile names ``sparse_history`` for Tier 3 and splits
   US vs EU jurisdictions into two conflict groups for Tier 5.
 - Which templates and jurisdictions ATO may name in its gate context is the
@@ -14,9 +18,27 @@ Key contracts:
 
 from __future__ import annotations
 
+import pytest
+
 from ato_reasoner.plugin import PLUGIN
-from ato_reasoner.registry import ATO_REGISTRATION
+from ato_reasoner.registry import ALLOW_BAND, ATO_REGISTRATION, BLOCK_BAND
+from core.actions import DecisionAction
+from core.gate import evaluate_predicate
+from core.observation import GateBinding, LabelType, ReasonerContext
+from core.submission import matching_bypass_rule
 from policy_rag_gate.config import ReasonerProfile
+
+
+def _context(risk_score: float) -> ReasonerContext:
+    return ReasonerContext(
+        reasoner_id="ato-reasoner",
+        reasoner_name="ATO Reasoner",
+        model_version="xgb-test",
+        label_type=LabelType.NUMERICAL,
+        label_name="risk_score",
+        label_value=risk_score,
+        feature_set={"sparse_history": True},
+    )
 
 
 def _gate_profile() -> ReasonerProfile:
@@ -30,8 +52,51 @@ def test_ato_registration_has_correct_reasoner_id():
     assert ATO_REGISTRATION.reasoner_id == "ato-reasoner"
 
 
-def test_ato_registration_routes_only_to_the_policy_gate():
-    assert frozenset({"policy"}) == ATO_REGISTRATION.allowed_gate_ids
+def test_ato_registration_binds_only_the_policy_gate_as_advisory():
+    assert ATO_REGISTRATION.gates == (GateBinding(gate_id="policy", mandatory=False),)
+
+
+def test_ato_registers_the_two_score_bands_as_bypass_rules():
+    assert ATO_REGISTRATION.bypass_rules == (ALLOW_BAND, BLOCK_BAND)
+    assert (ALLOW_BAND.rule_id, ALLOW_BAND.action) == (
+        "allow-band",
+        DecisionAction.ALLOW,
+    )
+    assert (BLOCK_BAND.rule_id, BLOCK_BAND.action) == (
+        "block-band",
+        DecisionAction.BLOCK,
+    )
+    assert ATO_REGISTRATION.recordable_actions == {
+        DecisionAction.ALLOW,
+        DecisionAction.BLOCK,
+    }
+
+
+@pytest.mark.parametrize(
+    ("risk_score", "rule_id"),
+    [
+        (0.0, "allow-band"),
+        (0.199, "allow-band"),
+        (0.20, None),
+        (0.61, None),
+        (0.95, None),
+        (0.951, "block-band"),
+        (1.0, "block-band"),
+    ],
+)
+def test_the_bands_cover_the_score_range_with_the_gate_between(risk_score, rule_id):
+    # Strict inequalities: a score exactly at a threshold goes to the gate.
+    rule = matching_bypass_rule(ATO_REGISTRATION, _context(risk_score))
+    assert (rule.rule_id if rule else None) == rule_id
+
+
+def test_the_bands_never_overlap():
+    for score in (i / 1000 for i in range(1001)):
+        context = _context(score)
+        assert not (
+            evaluate_predicate(ALLOW_BAND.predicate, context)
+            and evaluate_predicate(BLOCK_BAND.predicate, context)
+        )
 
 
 def test_the_policy_gate_lets_ato_use_every_shipped_template_version():

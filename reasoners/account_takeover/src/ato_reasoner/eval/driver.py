@@ -15,10 +15,10 @@ The robustness ``run_with_forced_*`` paths use private fault-injection
 wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
 the production failure surfaces without polluting production code. Both
 build a policy gate (``policy_rag_gate.PolicyGate``, the RAG policy gate ATO
-routes to) around the wrapper and swap it into the framework's composed
-gates for one decision; the retriever, prompt registry, and per-reasoner
-profiles they reuse come from the composed policy gate itself (DR-28: the
-gate owns them).
+binds) around the wrapper and swap it into the framework's composed gates
+for one decision; the retriever, prompt registry, and per-reasoner profiles
+they reuse come from the composed policy gate itself (DR-28: the gate owns
+them).
 """
 
 from __future__ import annotations
@@ -30,16 +30,15 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from app.bootstrap import build_framework_services
-from app.enforcement.resolver import resolve as resolve_enforcement
-from app.gates import ComposedGate, discover_gates
+from app.enforcement.resolver import resolve_decision, resolve_gate_output
+from app.gates import discover_gates
 from app.settings import FrameworkSettings
-from ato_reasoner.assembler import build_observation
+from ato_reasoner.assembler import build_submission
 from ato_reasoner.pipeline import run_ato_decision
 from ato_reasoner.plugin import PLUGIN, AtoPlugin, resolve_model_path
 from ato_reasoner.registry import ATO_REGISTRATION
-from core.actions import DecisionAction
-from core.gate import GateOutput
-from core.routes import GateRoute
+from core.bundle import GateRecord
+from core.gate import GateInput, GateOutput
 from eval.dimensions.consistency import PipelineRunResult
 from policy_rag_gate import POLICY_GATE_ID, PolicyGate
 from policy_rag_gate.models import PolicyGateExtra
@@ -53,6 +52,7 @@ if TYPE_CHECKING:
     from ato_reasoner.events import LoginEvent
     from ato_reasoner.plugin import AtoServices
     from ato_reasoner.settings import AtoSettings
+    from core.actions import DecisionAction
     from core.llm.client import CompletionResult
     from policy_rag_gate.models.snippet import RetrievedSnippet
     from policy_rag_gate.retriever import PolicyRetriever
@@ -187,11 +187,16 @@ class PipelineDriver:
         return composed.gate
 
     def _framework_with_policy_gate(self, gate: PolicyGate) -> FrameworkServices:
-        """Return the framework services with ``gate`` swapped in as the policy gate."""
+        """Return the framework services with ``gate`` swapped in as the policy gate.
+
+        Only the runtime gate changes: the plugin and whether the deployment
+        mandates the gate carry over, so a fault-injected run is gated the
+        way the deployment gates.
+        """
         composed = self._framework.gates[POLICY_GATE_ID]
         gates = {
             **self._framework.gates,
-            POLICY_GATE_ID: ComposedGate(plugin=composed.plugin, gate=gate),
+            POLICY_GATE_ID: dataclasses.replace(composed, gate=gate),
         }
         return dataclasses.replace(self._framework, gates=gates)
 
@@ -227,7 +232,8 @@ class PipelineDriver:
             msg = "PipelineDriver.run() requires at least one event"
             raise ValueError(msg)
 
-        gate_output = last_bundle.gate_output
+        policy = last_bundle.gate(POLICY_GATE_ID)
+        gate_output = policy.output if policy is not None else None
         verdict = gate_output.verdict if gate_output is not None else None
         # The rationale is the policy gate's own output (its PolicyGateExtra
         # in ``gate_output.extra``), not a field of the universal verdict.
@@ -262,33 +268,45 @@ class PipelineDriver:
         """Force a schema-failure verdict and return enforcement's action.
 
         Tests the DR-19 Tier 1 contract directly: when the gate produces no
-        valid verdict, ``app.enforcement.resolver.resolve`` must route to
-        ``HOLD``. Bypasses the gate entirely — deterministic, free, and
-        decoupled from ``LLMClient`` internals.
+        valid verdict, enforcement must route to ``HOLD``. Bypasses the gate
+        entirely — deterministic, free, and decoupled from ``LLMClient``
+        internals.
 
         The path runs the full domain pipeline up to (but not including) the
-        gate call: feature compute → score → assemble observation. The
-        resulting ``Observation`` is forced onto the gate route so the
-        schema-failure tier is reachable; ``resolve`` is then invoked with a
-        policy-gate ``GateOutput`` whose ``verdict`` is ``None``.
+        gate call: feature compute → score → assemble the submission. The
+        submission is forced into gate mode — a login in a score band would
+        otherwise be recorded and never reach the gate — and enforcement then
+        runs on a policy-gate record whose output has ``verdict=None``.
         """
         features = self._services.feature_svc.compute(event)
         scorer_output = self._services.scorer.score(features)
-        obs = build_observation(
+        submission = build_submission(
             event, features, scorer_output, corpus_version=self._services.corpus_version
         )
-        # Force gate-path so Tier 1 (schema failure) is reachable; fast-path
-        # observations short-circuit before tier evaluation.
-        if obs.route != GateRoute.ROUTE_TO_GATE:
-            obs = obs.model_copy(update={"route": GateRoute.ROUTE_TO_GATE})
-
-        enforcement = resolve_enforcement(
-            obs,  # type: ignore[arg-type]
-            GateOutput(gate_id=POLICY_GATE_ID, deterministic=False, verdict=None),
-            decision_id=str(uuid.uuid4()),
-            registration=self._framework.registry.get(ATO_REGISTRATION.reasoner_id),
+        gated = submission.model_copy(
+            update={"mode": "gate", "proposed_action": None, "bypass": None}
         )
-        return enforcement.decision_action
+        registration = self._framework.registry.get(ATO_REGISTRATION.reasoner_id)
+        decision_id = str(uuid.uuid4())
+        output = GateOutput(gate_id=POLICY_GATE_ID, deterministic=False, verdict=None)
+        record = GateRecord(
+            gate_id=POLICY_GATE_ID,
+            mandatory=False,
+            status="ran",
+            input=GateInput(gate_id=POLICY_GATE_ID),
+            output=output,
+            enforcement=resolve_gate_output(
+                output, registration=registration, decision_id=decision_id
+            ),
+        )
+        decision = resolve_decision(
+            submission=gated,
+            records=[record],
+            registration=registration,
+            bypass_check=None,
+            decision_id=decision_id,
+        )
+        return decision.decision_action
 
     async def run_with_forced_fallback(
         self,
@@ -305,10 +323,9 @@ class PipelineDriver:
           exception and emits ``verdict=None``; enforcement Tier 1 routes
           to ``HOLD``. Exercises the full production failure path.
         - ``"retrieval_error"`` — swaps in a policy gate whose retriever
-          raises from ``retrieve()``. Neither the gate nor
-          ``run_ato_decision`` catches retrieval exceptions yet; the driver
-          translates the raised error into the contract's expected action
-          (``HOLD``) so the test reflects what the system *should* do.
+          raises from ``retrieve()``. The framework fails the gate closed
+          (DR-29): the policy gate's record is ``failed`` with the error,
+          and enforcement Tier 1 routes to ``HOLD``.
         - ``"corpus_mismatch"`` — runs the pipeline with a deliberately
           stale ``corpus_version`` label. Currently a labeling-only
           mismatch (does not alter pipeline behavior); the driver returns
@@ -349,19 +366,12 @@ class PipelineDriver:
                 retriever=_RaisingRetriever(policy_gate.retriever),  # type: ignore[arg-type]
                 profiles=policy_gate.profiles,
             )
-            try:
-                bundle = await run_ato_decision(
-                    event=event,
-                    services=self._services,
-                    framework=self._framework_with_policy_gate(faulty_gate),
-                )
-                return bundle.decision_action
-            except _RetrievalForcedError:
-                # run_ato_decision doesn't yet catch retrieval errors. The
-                # contract this case tests is "retrieval failure → HOLD";
-                # surface it deterministically until production grows the
-                # explicit catch.
-                return DecisionAction.HOLD
+            bundle = await run_ato_decision(
+                event=event,
+                services=self._services,
+                framework=self._framework_with_policy_gate(faulty_gate),
+            )
+            return bundle.decision_action
 
         if fallback_kind == "corpus_mismatch":
             bundle = await run_ato_decision(
@@ -386,7 +396,7 @@ class PipelineDriver:
 
 
 class _RetrievalForcedError(RuntimeError):
-    """Internal sentinel raised by ``_RaisingRetriever`` and caught by the driver."""
+    """Raised by ``_RaisingRetriever``; the framework fails the gate closed on it."""
 
 
 class _RaisingRetriever:

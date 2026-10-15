@@ -5,7 +5,8 @@ Key contracts:
 - risk_score is bounded to [0.0, 1.0].
 - inference_latency_ms is non-negative.
 - ScorerOutput is immutable once constructed.
-- route accepts all GateRoute values.
+- ScorerOutput carries no routing decision: recording or gating is decided
+  by ATO's registered bypass rules, not by the scorer.
 """
 
 from typing import Any
@@ -15,7 +16,6 @@ import pytest
 from pydantic import ValidationError
 
 from ato_reasoner.scorer import ScorerOutput
-from core.routes import GateRoute
 
 
 def _make_scorer_output(**overrides: Any) -> ScorerOutput:
@@ -26,7 +26,6 @@ def _make_scorer_output(**overrides: Any) -> ScorerOutput:
         "top_signals": [],
         "scorer_version": "xgb-v1.0.0",
         "inference_latency_ms": 1.0,
-        "route": GateRoute.ROUTE_TO_GATE,
     }
     return ScorerOutput(**{**defaults, **overrides})
 
@@ -66,6 +65,5 @@ def test_scorer_output_accepts_empty_signals():
     assert output.top_signals == []
 
 
-def test_scorer_output_routing_accepts_all_gate_routing_values():
-    for route in GateRoute:
-        assert _make_scorer_output(route=route).route == route
+def test_scorer_output_carries_no_routing_decision():
+    assert "route" not in ScorerOutput.model_fields

@@ -51,14 +51,19 @@ uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 1
   | tail -1 > /tmp/ato-event.json
 curl -s -X POST localhost:8000/api/v1/ato/decisions \
   -H 'content-type: application/json' --data @/tmp/ato-event.json
-# Expected: {"decision_id": "...", "decision_action": "...", "route": "...", ...}
+# Expected: {"decision_id": "...", "decision_action": "...", "mode": "record" | "gate",
+#            "bypass_rule_id": "allow-band" | "block-band" | null, "gates": [...], ...}
+# A login in a score band is recorded under that band's bypass rule (the policy
+# gate is "skipped"); one between the bands goes to the policy gate (mode "gate").
 
 # Fetch the bundle and replay it (framework routes, work for any reasoner)
 curl -s localhost:8000/api/v1/decisions/<decision_id> | python3 -m json.tool | head -40
 curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
-# Expected: "actions_match": true
-# 404 DECISION_NOT_FOUND for an unknown or malformed id; 409 REASONER_NOT_COMPOSED
-# for a bundle whose reasoner is not installed in this deployment
+# Expected: "matched": true (action, every gate's action, and the bypass check)
+# 404 DECISION_NOT_FOUND for an unknown or malformed id; 409 BUNDLE_SCHEMA_UNSUPPORTED
+# for a bundle written before the submission contract (lookup still returns it,
+# with "schema_version": 1); 409 REASONER_NOT_COMPOSED when replaying a bundle
+# whose reasoner is not installed in this deployment
 
 # Publish 10 baseline_normal events to the ATO Redis stream
 make scenario-account_takeover
@@ -409,7 +414,7 @@ for s in results:
 ```
 
 ```python
-# Hybrid retrieval (dense + BM25 → RRF → rerank), as execute_decision calls it.
+# Hybrid retrieval (dense + BM25 → RRF → rerank), as the policy gate calls it.
 # In the pipeline the query string comes from ato_reasoner.retrieval_query.build_ato_query.
 snippets, path = retriever.retrieve(
     "impossible travel new device failed password login from Paris",

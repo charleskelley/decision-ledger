@@ -7,9 +7,9 @@ class DecisionAction(StrEnum):
     """Final action the enforcement layer produces for a governed decision.
 
     Members are declared in ascending severity: ALLOW, CHALLENGE, HOLD, BLOCK.
-    Severity ordering is an enforcement concern, not a property of this enum.
-    The enforcement resolver (``app.enforcement.resolver``) defines and owns
-    the authoritative severity ranking via ``_SEVERITY_ORDER``.
+    Severity ordering is not a property of this enum: the conjunction
+    combinator (``core.gate.combinator``) owns the authoritative ranking,
+    ``SEVERITY_ORDER``, which enforcement and the combinator both read.
 
     .. warning::
         ``StrEnum`` comparison is lexicographic — ``BLOCK < CHALLENGE``

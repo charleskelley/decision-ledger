@@ -24,7 +24,7 @@ import pytest
 from fastapi import APIRouter
 
 from core.exceptions import ReasonerPluginError
-from core.observation import ReasonerRegistration
+from core.observation import GateBinding, ReasonerRegistration
 from policy_rag_gate import corpus_loader
 from policy_rag_gate.corpus_loader import (
     _ensure_es_index,
@@ -49,12 +49,11 @@ class _FakePlugin:
         self.registration = ReasonerRegistration(
             reasoner_id=reasoner_id,
             reasoner_name=f"{reasoner_id} (fake)",
-            allowed_gate_ids=frozenset({"policy"}),
+            gates=(GateBinding(gate_id="policy"),),
         )
         self.router = APIRouter(prefix=f"/api/v1/{reasoner_id}")
         self.prompts_dir = corpus_dir.parent / "prompts"
         self.corpus_dir = corpus_dir
-        self.raw_event_factory = dict
 
     def build_services(self, framework: FrameworkServices) -> Any:
         del framework

@@ -37,16 +37,16 @@ if TYPE_CHECKING:
 # expected_actions; the smoke test exercises that contract per scenario.
 #
 # Seven of eight scenarios are hard-asserted after the calibration slice:
-#   * baseline_normal, high_velocity_legitimate — fast-path-ALLOW; verify
-#     the pipeline plumbing for low-risk events.
+#   * baseline_normal, high_velocity_legitimate — recorded ALLOW under the
+#     allow-band rule; verify the pipeline plumbing for low-risk events.
 #   * device_fingerprint_anomaly — routes to the LLM gate; this is the
 #     MVP's committed end-to-end proof that the hybrid scorer + gate
 #     architecture works against the live stack. The dedicated
 #     ``GATE_ROUTING_SCENARIOS`` set below adds a non-null-rationale
 #     assertion for it.
 #   * geo_impossible, credential_stuffing_burst, post_breach_ato,
-#     adversarial_probe — fast-path-BLOCK; high-confidence attacks the
-#     scorer correctly auto-blocks without LLM adjudication.
+#     adversarial_probe — recorded BLOCK under the block-band rule;
+#     high-confidence attacks blocked without LLM adjudication.
 #
 # `novel_entity` stays xfail. The scorer treats first-event-of-account
 # scenarios as neutral (new_account=True → all novelty=0.5, consistency=
@@ -68,11 +68,11 @@ SCENARIO_IDS: tuple = (
     pytest.param("novel_entity", marks=_CALIBRATION_GAP),
 )
 
-# Scenarios whose trigger event must route through the LLM gate (not
-# fast-path). The smoke test asserts ``result.rationale is not None`` for
-# these, which is only true when ``PipelineDriver`` extracted a verdict
-# from a populated ``bundle.gate_output``. This is the single committed
-# end-to-end proof that the gate path runs against the live stack.
+# Scenarios whose trigger event must go through the LLM gate (not be
+# recorded in a score band). The smoke test asserts ``result.rationale is
+# not None`` for these, which is only true when ``PipelineDriver`` extracted
+# a verdict from the policy gate's record in the bundle. This is the single
+# committed end-to-end proof that the gate path runs against the live stack.
 GATE_ROUTING_SCENARIOS: frozenset[str] = frozenset({"device_fingerprint_anomaly"})
 
 
@@ -97,8 +97,8 @@ async def test_scenario_lands_on_expected_action(
 
     Generates 5 events deterministically (fixed seed=42 + fixed start
     timestamp) so reruns are bit-identical: the only source of variance
-    is the gate's LLM call, which the scorer's fast-path may bypass for
-    extreme-confidence routes.
+    is the gate's LLM call, which a recorded decision (a score in one of the
+    bypass bands) never makes.
     """
     # Gate-routing scenarios use a setup deliberately calibrated against
     # the capture script (``ato_reasoner.eval.
@@ -107,7 +107,7 @@ async def test_scenario_lands_on_expected_action(
     # held constant, EventFactory's seed=42 RNG produces an event sequence
     # whose first event consistently routes to the LLM gate. Drive only
     # one event since the cold-start novelty is what triggers routing —
-    # warmup events dilute the signal back to fast-path-allow.
+    # warmup events dilute the signal back into the allow band.
     is_gate_routing = scenario_id in GATE_ROUTING_SCENARIOS
     if is_gate_routing:
         driver.reset_state()

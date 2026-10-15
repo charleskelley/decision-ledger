@@ -132,14 +132,16 @@ Prompt changes are treated as code changes with extra scrutiny:
 ```
 decision-ledger/
 ├── core/                    # Framework contracts — no infrastructure dependencies
-│   ├── observation/         # Observation protocol, ReasonerContext, GateContext, registration
-│   ├── gate/                # Universal gate contracts (GateOutput, GateVerdict, EvidenceRef, predicates)
+│   ├── submission.py        # Submission — the wire contract a reasoner hands the ledger
+│   ├── bundle.py            # DecisionBundle (schema version 2), GateRecord
+│   ├── observation/         # ReasonerContext, GateContext, registration (GateBinding, BypassRule)
+│   ├── gate/                # Universal gate contracts (GateOutput, GateVerdict, EvidenceRef, predicates, combinator)
 │   ├── resolution/          # Resolution attempt log
 │   ├── llm/                 # LLMClient protocol
 │   └── eval/                # Eval metric contracts
 ├── app/                     # Framework runtime — imports from core/, never from a reasoner
 │   ├── main.py, plugin.py, plugins.py, bootstrap.py   # create_app factory + plugin seam
-│   ├── decide.py            # execute_decision (framework half of the handoff)
+│   ├── submit.py            # submit (framework half of the handoff: gate set, enforcement, bundle)
 │   ├── gates.py             # GatePlugin / Gate / ConfigAuthorizer seam, gate discovery
 │   ├── enforcement/         # Deterministic rule-based action resolution
 │   ├── audit/               # Decision Bundle construction + replay, canonical DDL (sql/)

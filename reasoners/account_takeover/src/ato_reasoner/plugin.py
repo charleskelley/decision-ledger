@@ -2,10 +2,11 @@
 
 ``PLUGIN`` is the object published under the ``decisionledger.reasoners``
 entry point (name ``ato-reasoner``). It carries the registration record,
-the FastAPI router, the prompt and corpus directories, the raw-event
-deserializer replay uses, and ``build_services`` — which opens the
-reasoner's own Redis connection and loads the XGBoost scorer against the
-shared ``FrameworkServices``.
+the FastAPI router, the prompt and corpus directories, and
+``build_services`` — which opens the reasoner's own Redis connection and
+loads the XGBoost scorer against the shared ``FrameworkServices``. Replay
+needs no ATO code (each bundle stores ATO's ``Submission``), only ATO's
+registration composed, for its enforcement profile.
 
 Redis is ATO infrastructure: only the feature service, the ingestion
 consumer, and the scenario generator touch it, so its URL lives in
@@ -16,12 +17,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import redis
 
 from ato_reasoner.api import router
-from ato_reasoner.events import LoginEvent
 from ato_reasoner.feature_service import FeatureService
 from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.scorer import AtoScorer
@@ -80,11 +80,6 @@ def resolve_model_path(settings: AtoSettings) -> Path:
     return model_path
 
 
-def _raw_event_factory(data: dict[str, Any]) -> LoginEvent:
-    """Reconstitute a ``LoginEvent`` from its stored ``raw_event`` JSON dict."""
-    return LoginEvent.model_validate(data, strict=False)
-
-
 class AtoPlugin:
     """``ReasonerPlugin`` implementation for the Account Takeover reasoner.
 
@@ -100,7 +95,6 @@ class AtoPlugin:
         self.router = router
         self.prompts_dir = _PACKAGE_DIR / "prompts"
         self.corpus_dir = _PACKAGE_DIR / "corpus"
-        self.raw_event_factory = _raw_event_factory
         self._settings = settings
 
     @property
@@ -115,8 +109,8 @@ class AtoPlugin:
 
         Args:
             framework: Shared services. Unused today — ATO keeps no state in
-                the framework's stores beyond what ``execute_decision``
-                writes — but every plugin receives it.
+                the framework's stores beyond what ``submit`` writes — but
+                every plugin receives it.
 
         Returns:
             ``AtoServices`` ready for ``run_ato_decision``.

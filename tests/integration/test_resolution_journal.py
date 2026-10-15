@@ -68,7 +68,9 @@ def fresh_decision_id(pg_conn) -> str:
     Inserts a stub ``decision_bundles`` parent row so the FK constraint on
     ``decision_resolution_attempts.decision_id`` is satisfied. Without this
     parent row, ``record_attempt`` raises ``ForeignKeyViolation`` against
-    the canonical schema in ``app/audit/sql/02_tables.sql``.
+    the canonical schema in ``app/audit/sql/02_tables.sql``. Its payload is a
+    placeholder (``{}``), so the row is marked schema version 1: lookup
+    returns it as stored and nothing loads it as a version-2 bundle.
     """
     decision_id = str(uuid.uuid4())
     with pg_conn.cursor() as cur:
@@ -76,8 +78,8 @@ def fresh_decision_id(pg_conn) -> str:
             """
             INSERT INTO decisionledger.decision_bundles
                 (decision_id, reasoner_id, entity_id, created_at,
-                 decision_action, bundle)
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                 decision_action, schema_version, bundle)
+            VALUES (%s, %s, %s, %s, %s, 1, %s::jsonb)
             """,
             (
                 decision_id,

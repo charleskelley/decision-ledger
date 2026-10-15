@@ -2,8 +2,8 @@
 
 ``PolicyGateConfig`` is the gate's ``config_model``. The framework validates
 every ``GateContext.gate_config`` that names ``gate_id="policy"`` against it
-at intake — fast path included, so a recorded decision always carries a
-context the gate could evaluate for shadow evaluation. Its typed fields
+at intake — recorded decisions included, so a recorded decision always
+carries a context the gate could evaluate for shadow evaluation. Its typed fields
 replace the convention keys the framework used to check by name.
 
 ``ReasonerProfile`` is what one reasoner may submit to the gate: the prompt

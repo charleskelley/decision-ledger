@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-28.** The next record is DR-29.
+**Current head: DR-31.** The next record is DR-32.
 
 ### Status values
 
@@ -1927,6 +1927,10 @@ catches this and the leak stays "almost generic."
 
 ## DR-25: MVP eval calibration — bimodal scorer thresholds, top-k version resolution, realistic faithfulness floor
 
+**Status:** Accepted (the score bands now live in the ATO reasoner's
+registration as bypass rules, which supersedes the framework fast path: see
+DR-30)
+
 **Decision.** Four calibration choices land together as the MVP's
 behavioral baseline:
 
@@ -2500,3 +2504,352 @@ configurable combinators; a shared `decisionledger` schema for gate tables.
   old `ELASTICSEARCH_URL` / `ELASTICSEARCH_PORT` names are ignored in favor
   of the gate's `POLICY_RAG_GATE_` ones. `.env.example` and the local
   runbook say so; there is no production data to migrate.
+
+---
+
+## DR-29: Gate sets and the conjunction combinator
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Closes the question DR-28 Phase 1a left open: how the decision-level
+> novel-entity tier composes with several gates, and whether it may hold a
+> mandatory gate's BLOCK for review (it may not). Rationale and
+> cross-references land with the documentation pass that closes this plan.
+
+**Decision.**
+
+- A reasoner registration binds a tuple of `GateBinding(gate_id, mandatory:
+  bool)`. The deployment may add mandatory gates for every reasoner via
+  `DECISIONLEDGER_MANDATORY_GATES`.
+- The final action is the most restrictive of the proposal and the gates'
+  enforced actions over ALLOW < CHALLENGE < HOLD < BLOCK. The combinator is
+  associative and commutative, so evaluation order and parallelism cannot
+  change the result. The decision-level rules apply on top of it
+  (Implementation, below), with one exception settled in Phase 2: on a
+  gated decision about a novel entity, Tier 3 holds the advisory gates'
+  verdicts for review (DR-6), so their side counts as HOLD, or BLOCK when an
+  advisory gate's own Tier 2 fired, whatever they returned.
+- Fail closed: a gate error or timeout is a non-pass and flows through the
+  fallback tier (Tier 1) for that gate. Short-circuit: once the decision is
+  BLOCK, the remaining advisory gates are skipped, and the bundle records
+  each gate as `ran`, `skipped`, or `failed` with the reason. Mandatory gates
+  always run.
+- Gates in a set are independent: gate B never sees gate A's output.
+- The submission carries one `GateContext` per bound gate, each validated
+  against that gate's declared `config_model`.
+
+**Alternatives rejected.** Gate pipelines with data flow between gates;
+configurable combinators; a configurable short-circuit policy.
+
+**Implementation (Phase 2).**
+
+- **Registration.** `ReasonerRegistration.gates: tuple[GateBinding, ...]`
+  replaces `allowed_gate_ids`; each gate is bound at most once. The
+  registration now forbids unknown fields, so an old `allowed_gate_ids`
+  registration fails loudly.
+- **Gate set.** `core.submission.effective_gate_set` is the registration's
+  bindings, upgraded to mandatory where the deployment mandates them, plus
+  every other mandated gate. `app.gates.build_gates(mandatory=...)` flags
+  mandated gates on `ComposedGate.mandatory` and checks at startup that a
+  mandated gate is composed, that every gate a registration binds as
+  mandatory is composed (an uncomposed advisory binding is logged), and
+  that a mandated gate accepts the empty configuration it will run with
+  from every composed reasoner that does not bind it.
+- **Combinator.** `core/gate/combinator.py` holds `SEVERITY_ORDER` (moved
+  from the enforcement resolver), `severity`, `most_restrictive`, and
+  `GateStatus`.
+- **Orchestration.** `app/submit.py` (`git mv` of `app/decide.py`): intake,
+  then the mandatory gates concurrently, then — on a gated decision and
+  only when no mandatory gate blocks — the advisory gates concurrently.
+  `app.gates.invoke_gate` runs one gate with its budget and fails it closed
+  when it is not composed, raises, is still awaiting at the deadline, returns
+  after it, or returns anything other than a plain `GateOutput` for itself
+  with its declared `deterministic` flag that the ledger can store and
+  reload as returned. The bundle stores one `GateRecord` per gate (`status`,
+  `reason`, `input`, `output`, gate-level `enforcement`, `duration_ms`).
+- **Enforcement.** `resolve_gate_output` applies the gate-level tiers to each
+  gate that ran or failed (a failed gate fires Tier 1 with its reason).
+  `resolve_decision` applies the decision-level rules and the combinator:
+
+      final = most_restrictive(proposed, M ∪ {A} ∪ bypass floors)
+
+  `M` is every mandatory gate's enforced action. On a gated decision `A` is
+  the advisory side: the most restrictive advisory action, or — when the
+  registration's novel-entity feature is set (Tier 3) — HOLD, raised to
+  BLOCK if an advisory gate's own Tier 2 fired. Tier 3 is not applied when a
+  mandatory gate already blocks. Records have no advisory side (DR-30).
+  `app.enforcement.resolver.credited_rule(bundle)` derives the one rule a
+  single-rule summary credits, which is the old bundle's
+  `enforcement_rule_applied`.
+
+**Judgment calls (Phase 2).**
+
+- **Tier 3 holds the advisory side only.** It holds the advisory gates'
+  verdicts for review (DR-6), but it never lowers a mandatory gate's action
+  or the proposal, and gate Tiers 1 and 2 still outrank it. A mandatory gate
+  is a deployment or registration constraint, not the reasoner's
+  uncertainty to waive. With one advisory gate, no proposal, and no
+  mandatory gate this is the DR-28 single-gate resolver exactly: action,
+  credited rule, and log. `tests/app/test_enforcement.py` pins it against the
+  transcription of the pre-split resolver and checks the credited rule
+  across every verdict shape. Two consequences are deliberate. On a gated
+  decision with no advisory gate, Tier 3 is a HOLD floor. A deterministic
+  advisory gate's BLOCK is held for review on a novel entity, as a single
+  gate's always was.
+- **The short-circuit counts gates, not the proposal.** A gate-mode proposal
+  of BLOCK still runs the advisory gates. Otherwise a reasoner could block
+  without gating and without a bypass rule, sidestepping its
+  `recordable_actions`. BLOCK absorbs in the combinator and the final
+  action is monotone in the gates that ran, so skipping after a mandatory
+  BLOCK cannot change the result.
+- **Phases are sequential, gates within a phase concurrent.** Mandatory
+  gates are cheap by construction, and running them first is what makes the
+  short-circuit possible.
+- **Gate faults fail closed at decision time; composition faults fail at
+  startup.** A malformed gate output was a `GatePluginError` in Phase 1a;
+  it now becomes a `failed` record and a HOLD, so the decision is still
+  written. So does an output the ledger could not store as returned: a NUL
+  (which Postgres `jsonb` cannot hold), a non-finite number, invalid
+  Unicode, or a constructed value that is not JSON. A failure reason that
+  quotes the gate's own text has those characters escaped. Startup still
+  raises `GatePluginError` for a broken deployment.
+- **Budgets are cooperative.** Each gate runs inline in its own task under
+  `asyncio.timeout`, which can cancel it only at an await point. A gate that
+  blocks the event loop past its budget, or ignores its cancellation, is
+  failed when it returns. The clock covers this gate's own evaluation only,
+  so a sibling that blocked the loop before it started or after it answered
+  is not charged to it. A sibling that blocks while this gate is awaiting
+  still delays it, and one event loop cannot tell that apart. A
+  `TimeoutError` or `CancelledError` the gate raises itself is its error,
+  not the budget's; only the caller's own cancellation propagates. The
+  `Gate` protocol says `evaluate` must not block; the reference RAG gate
+  retrieves synchronously, a gate-owned follow-up. The default budget,
+  45 s, bounds a hung gate and outlasts one 30 s attempt of the RAG gate's
+  model call. A call its provider SDK retries can outlast it, and the gate
+  then fails closed without its own forensics; sizing its retries to
+  `request.budget_ms` is a gate-owned follow-up.
+- **A deployment mandate is the deployment's.** A reasoner that does not
+  bind a mandated gate cannot address it (`GATE_NOT_BOUND`), so it cannot
+  steer the control. The gate runs with an empty configuration, which
+  startup checks it accepts. Neither reference gate accepts one today: the
+  rules gate needs a `ruleset_id` and the RAG gate a `template_id`, so a
+  reasoner must bind either to have it run.
+
+---
+
+## DR-30: `record` and `gate`: the two submission modes
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Supersedes the framework's fast path and DR-25's place for the score
+> thresholds: the thresholds are now the ATO reasoner's registered bypass
+> rules. Rationale and cross-references land with the documentation pass.
+
+**Decision.**
+
+- `mode: record` means the reasoner decided. The submission carries
+  `proposed_action` and a citation of one of its registered bypass rules.
+  The ledger validates the citation against the registration, runs the
+  mandatory gates, applies the combinator, and writes the bundle.
+  `mode: gate` means the reasoner proposes (the proposal is optional); the
+  ledger runs the mandatory and the advisory gates.
+- A `BypassRule(rule_id, version, description, predicate, action)` is
+  registered per reasoner. Its predicate is a pure, replayable expression
+  over `label_value` / `feature_set` in the rules gate's predicate language.
+  A citation of an unregistered rule is rejected
+  (`BYPASS_RULE_UNREGISTERED`). Replay re-evaluates the cited predicate
+  against the bundle's evidence and reports `bypass_rule_holds`.
+- `recordable_actions` on the registration (default: every action).
+- Gate contexts stay required on recorded submissions, for shadow
+  evaluation. The eval harness gains a shadow dimension: sample recorded
+  bundles, run the advisory gates offline, compare.
+- `GateRoute` is deleted. ATO's bands become two registered bypass rules,
+  `allow-band` (`label_value < 0.20` → ALLOW) and `block-band`
+  (`label_value > 0.95` → BLOCK). The numbers live in ATO's registration
+  and nowhere in the framework.
+
+**Alternatives rejected.** A free-text fast-path rationale (not checkable,
+not replayable); thresholds in the framework; a separate audit-only mode
+(record mode is that mode, with mandatory gates still applied).
+
+**Implementation (Phase 2).**
+
+- **Contracts.** `Submission.mode`, `proposed_action`, and `bypass:
+  BypassCitation(rule_id, rule_version)`; a record needs both. `BypassRule`
+  and `recordable_actions` are on the registration, which requires every
+  rule's action to be recordable and rule ids to be unique.
+  `core.submission.validate_submission` checks a citation in this order:
+  `BYPASS_RULE_UNREGISTERED`, `ACTION_NOT_RECORDABLE`,
+  `BYPASS_ACTION_MISMATCH`, then `BYPASS_RULE_VERSION_MISMATCH` when the
+  citation pins a version.
+- **The check.** `submit` evaluates the cited rule against the submission's
+  evidence (`evaluate_bypass` → `BypassCheck`: the rule, the values its
+  predicate read, `holds`, any evaluation error) and every other registered
+  rule (`evaluate_competing_rules`). It snapshots all of them in the bundle
+  (`bypass_check`, `other_bypass_checks`, `bypass_rule_holds`).
+  Decision-level rules: `bypass_rule_not_satisfied` puts a HOLD floor under
+  a cited rule that does not hold; `bypass_rule_superseded` floors the
+  decision at the action of a stricter registered rule that also holds.
+  Records skip the advisory gates and Tier 3.
+- **Replay** re-evaluates the snapshotted rules, not the current
+  registration's.
+- **Choosing the mode.** `core.submission.matching_bypass_rule` returns the
+  strictest registered rule that holds. ATO's `assembler.build_submission`
+  records under it (citing its version) or asks for the gate. Its scorer no
+  longer routes: `ScorerOutput.route`, `_route`, and the assembler's own
+  threshold copy are gone. The scorer's band constants alias the registry's
+  thresholds under their model-card names.
+- **Shadow dimension** (`eval/dimensions/shadow.py`, `EvalDimension.SHADOW`,
+  `ShadowMetrics`, `EvalReport.shadow`). For each sampled recorded bundle,
+  the advisory gates run offline on the stored submission and contexts
+  through the same fail-closed runner. The stored mandatory outcomes are
+  kept, the decision-level rules apply in gate mode, and the hypothetical
+  action is compared with the recorded one (agreement, escalation,
+  relaxation, gate failures). It runs after the other dimensions
+  (`runs_after_others`) over this run's records (`since` = harness start),
+  ten at most by default.
+
+**Judgment calls and deviations (Phase 2).**
+
+- **`BypassRule` has an `action` (not in the plan's sketch).** Without one,
+  a rule only says when it applies, not what it justifies. A reasoner could
+  then cite `block-band` (score above 0.95) to record ALLOW and skip every
+  advisory gate. The rule now names the one action it justifies (like the
+  rules gate's `Rule(when, action)`), and the record's proposed action must
+  equal it.
+- **The ledger derives the observed values.** The plan has the record carry
+  "the observed values the rule used". Those values are already in the
+  submission's `reasoner_context`, so a second copy could only disagree
+  with it. The ledger records the values each predicate read in
+  `BypassCheck.observed`; the citation is the rule id and an optional
+  version pin.
+- **A rule that does not hold fails closed; it is not rejected.** The
+  ledger stores the record with `bypass_rule_holds=false` under a HOLD
+  floor, which keeps the evidence of an unjustified bypass. A BLOCK record
+  stays BLOCK, since the floor never relaxes. Static faults (an
+  unregistered rule, a wrong action or version, an unrecordable action) are
+  still rejected. A predicate that cannot be evaluated (a missing feature)
+  does not hold.
+- **Competing rules floor the record (not in the plan).** A reasoner cannot
+  cite the lenient one of two rules its own evidence satisfies. This is
+  latent for ATO, whose bands are disjoint.
+- **`recordable_actions` is enforced when the registration is built.**
+  Because a record's action must equal its rule's action and every rule's
+  action must be recordable, the intake check `ACTION_NOT_RECORDABLE` only
+  catches a registration that skipped validation. It stays as a defensive
+  check.
+- **Tier 3 does not apply to records.** The fast path never ran tiers.
+  Applying Tier 3 would hold every first login of an account (most of ATO's
+  allow-band records are sparse-history). A rule that should exclude novel
+  entities says so in its predicate.
+- **The shadow dimension is report-only.** It passes whenever it runs, until
+  a baseline calibrates a threshold. Escalations are expected for ATO,
+  whose novel-account records Tier 3 would hold if gated. Each sample costs
+  one model call per advisory gate in a paid eval run.
+- **ATO's committed model card keeps its band keys.** The scorer's band
+  metrics now report `allow_band`, `gate`, and `block_band`. The committed
+  card `ato-v1.json` keeps the old names as a training record, under a
+  listed, self-expiring boundary-test exception.
+
+---
+
+## DR-31: Wire submission schema, HTTP surface, registration as data
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Phase 2 implements the wire schema (below). The HTTP surface, registration
+> as a resource, auth, clients, contract artifacts, conformance, and MCP
+> land in Phase 3, with the rationale in the documentation pass.
+
+**Decision.**
+
+- `core/submission.py: Submission` is a concrete, strict, frozen Pydantic
+  model: `schema_version=2`, identity (`entity_id`, `entity_type`, and the
+  reserved `native_subject: NativeSubject | None` for the identity DR, so
+  the wire schema changes once), `event_id`, `timestamp`, `reasoner_id`,
+  `mode`, `proposed_action`, `bypass`, `reasoner_context`, `gate_contexts`,
+  and `raw_event: dict` (opaque, stored verbatim). The `Observation`
+  protocol and `raw_event_factory` are removed.
+- Registration becomes a resource (`GET /api/v1/reasoners`,
+  `PUT /api/v1/reasoners/{id}` or a mounted file, `GET /api/v1/gates`), and
+  every bundle snapshots `registration_version`.
+- Auth: a per-reasoner API key; a write naming another reasoner is a 403;
+  human resolution needs an operator key.
+- Routes: `POST /api/v1/decisions`, `POST /api/v1/decisions:batch`, lookup,
+  replay, resolutions, `GET /api/v1/entities/{entity_id}/decisions`, with
+  problem-style errors and stable codes. The framework stops mounting
+  reasoner routers; reasoners run as services or in process through
+  `LocalClient`.
+- Contract artifacts: `schemas/submission-v2.json` and
+  `schemas/bundle-v2.json` diffed in CI, a conformance suite, and an MCP
+  integration over the same client.
+
+**Implementation (Phase 2, the wire schema).**
+
+- **The submission.** `Submission` forbids unknown fields at every level.
+  Its validators require a record's citation and proposal and reject a
+  citation on a gate request. They also tie `reasoner_context.reasoner_id`
+  to `reasoner_id`, allow each gate one context, and require a
+  timezone-aware timestamp. `NativeSubject(native_namespace,
+  native_subject_id)` is accepted and stored, and otherwise ignored. Every
+  value must survive the bundle's JSON round trip, so the submission
+  rejects non-finite numbers, NUL characters, and invalid Unicode anywhere
+  in it (`core.submission.storage_problem`), the JSON-valued `raw_event` and
+  `gate_config` included, where JSON input could otherwise carry `NaN`.
+  `GateContext.gate_config` is JSON (`dict[str, JsonValue]`). Wire input
+  parses with `Submission.model_validate_json`, because strict models
+  accept JSON representations only in JSON mode. ATO's `LoginEvent` rejects
+  at parse what its submission would refuse (a naive timestamp, an empty
+  event id, a non-finite coordinate, an unstorable string), so a bad login
+  is an HTTP 422 before its features are written.
+- **Removed.** `core/routes.py` (`GateRoute`),
+  `core/observation/observation.py` (`Observation`, `validate_observation`),
+  `ObservationContractError` (now `SubmissionContractError`, which carries a
+  stable `code`), `RawEventFactory`, and `ReasonerPlugin.raw_event_factory`.
+  `GateRequest.observation` is now `GateRequest.submission`, which both gate
+  members read.
+- **Bundle schema version 2.** `DecisionBundle` stores the submission
+  verbatim, one `GateRecord` per gate, the decision-level rule and log, and
+  the bypass checks. It reserves `registration_version: str | None`
+  (always `None` until Phase 3).
+- **Store and DDL.** `decision_bundles.schema_version` is `not null` with no
+  default. A guarded `DO` block adds it once to older tables, marking their
+  rows 1, so the upgrade never takes a table lock on later startups.
+  `BundleStore(conn, registry)`: `lookup` returns a row of any version as
+  stored and needs no reasoner; `load` and `replay` serve version 2 and
+  raise `BundleSchemaUnsupportedError` (HTTP 409 `BUNDLE_SCHEMA_UNSUPPORTED`)
+  for older rows; a version-2 row that no longer validates is an HTTP 500
+  `BUNDLE_UNREADABLE`, on lookup and on replay. `write` refuses a bundle
+  that would not reload identically. The store needs an autocommit
+  connection and every statement it issues commits on its own: it opens no
+  transaction block, because the framework connection is shared across
+  threads (the sync routes run in the server's threadpool while decisions
+  are written from the event loop), and transaction blocks interleave there.
+  So a failed write cannot leave the connection aborted, and no read leaves
+  a transaction open. The DDL applies at startup, before the connection is
+  shared, in one transaction under a lock timeout. `recent_recorded` samples version-2 records for the
+  shadow dimension and skips rows that do not load.
+- **Boundary.** `tests/test_framework_boundary.py` (extended first) forbids
+  every removed handoff identifier in the framework trees and in members'
+  sources (code, YAML, SQL, JSON; the policy corpus is Markdown and is not
+  scanned). It forbids "fast path" in framework files in any spelling,
+  inside identifiers too, adds ATO's two rule ids to its token scan, and
+  checks that the handoff's former homes stay empty.
+
+**Judgment calls (Phase 2).**
+
+- **Replay still reads the enforcement profile from the registry.** The
+  novel-entity feature and the jurisdiction conflict groups come from the
+  current registration, as in schema version 1. Everything else replay
+  needs is in the bundle, the bypass rules included. Phase 3's registration
+  snapshot closes the gap, and `registration_version` is reserved now, so
+  that is not a second schema change.
+- **Lookup no longer answers 409 `REASONER_NOT_COMPOSED`.** It needs nothing
+  from the reasoner that wrote the row. Replay still answers it, since it
+  needs the registration.
+- **Schema-version-1 rows are refused, not converted.** Their reasoner-typed
+  event cannot be rebuilt without reasoner code, and no production data
+  exists. A local volume keeps its old rows readable (`lookup`, `GET`).

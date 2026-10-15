@@ -10,8 +10,8 @@
 - ``PolicyGate.authorize_config`` accepts only templates the submitting
   reasoner ships and jurisdictions its corpus covers — replacing the
   registration's former allow-lists (DR-28) — and the framework enforces it
-  at intake through its ``ConfigAuthorizer`` seam, on the gate route and the
-  fast path alike, before the gate is ever called.
+  at intake through its ``ConfigAuthorizer`` seam, for gated and recorded
+  submissions alike, before the gate is ever called.
 
 No infrastructure, model, or LLM is touched.
 """
@@ -25,13 +25,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
-from app.decide import execute_decision
 from app.gates import ComposedGate, ConfigAuthorizer
 from app.reasoner_registry import StaticReasonerRegistry
+from app.submit import submit
 from core.actions import DecisionAction
-from core.exceptions import ObservationContractError
+from core.exceptions import SubmissionContractError
 from core.observation import GateContext
-from core.routes import GateRoute
+from core.submission import BypassCitation
 from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
 from policy_rag_gate.gate import PolicyGate
 from policy_rag_gate.plugin import PLUGIN
@@ -273,19 +273,23 @@ def _composed(fixture_reasoner: Any) -> dict[str, ComposedGate]:
     return {"policy": ComposedGate(plugin=PLUGIN, gate=gate)}
 
 
-def _fast_path(observation: Any, **config: Any) -> Any:
-    return observation.model_copy(
+def _recorded(submission: Any, **config: Any) -> Any:
+    """A record (low score, citing ``low-score``) whose gate context is ``config``."""
+    context = submission.reasoner_context.model_copy(update={"label_value": 0.1})
+    return submission.model_copy(
         update={
-            "route": GateRoute.FAST_PATH_ALLOW,
-            "fast_path_rationale": "widget_score=0.10 < 0.20 -> FAST_PATH_ALLOW",
-            "gate_context": GateContext(gate_id="policy", gate_config=config),
+            "mode": "record",
+            "proposed_action": DecisionAction.ALLOW,
+            "bypass": BypassCitation(rule_id="low-score"),
+            "reasoner_context": context,
+            "gate_contexts": (GateContext(gate_id="policy", gate_config=config),),
         }
     )
 
 
-async def _decide(observation: Any, fixture_reasoner: Any, store: _RecordingStore):
-    return await execute_decision(
-        observation=observation,
+async def _decide(submission: Any, fixture_reasoner: Any, store: _RecordingStore):
+    return await submit(
+        submission=submission,
         gates=_composed(fixture_reasoner),
         store=store,  # type: ignore[arg-type]
         registry=StaticReasonerRegistry([fixture_reasoner.registration]),
@@ -293,13 +297,13 @@ async def _decide(observation: Any, fixture_reasoner: Any, store: _RecordingStor
     )
 
 
-async def test_intake_records_a_fast_path_decision_whose_context_the_gate_accepts(
-    observation, fixture_reasoner
+async def test_intake_records_a_decision_whose_context_the_gate_accepts(
+    submission, fixture_reasoner
 ):
     store = _RecordingStore()
 
     bundle = await _decide(
-        _fast_path(observation, template_id="stub-v1", jurisdictions=["REGION_A"]),
+        _recorded(submission, template_id="stub-v1", jurisdictions=["REGION_A"]),
         fixture_reasoner,
         store,
     )
@@ -316,14 +320,15 @@ async def test_intake_records_a_fast_path_decision_whose_context_the_gate_accept
     ],
     ids=["foreign-template", "foreign-jurisdiction"],
 )
-async def test_intake_rejects_a_fast_path_context_the_gate_refuses(
-    observation, fixture_reasoner, config, reason
+async def test_intake_rejects_a_recorded_context_the_gate_refuses(
+    submission, fixture_reasoner, config, reason
 ):
     store = _RecordingStore()
 
-    with pytest.raises(ObservationContractError) as exc_info:
-        await _decide(_fast_path(observation, **config), fixture_reasoner, store)
+    with pytest.raises(SubmissionContractError) as exc_info:
+        await _decide(_recorded(submission, **config), fixture_reasoner, store)
 
+    assert exc_info.value.code == "GATE_CONFIG_UNAUTHORIZED"
     message = str(exc_info.value)
     assert "gate_config for gate 'policy' is not authorized" in message
     assert reason in message
@@ -331,33 +336,35 @@ async def test_intake_rejects_a_fast_path_context_the_gate_refuses(
 
 
 async def test_intake_rejects_a_routed_context_the_gate_refuses_before_evaluating(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     # _UnusedRetriever / _UnusedClient fail the test if the gate runs.
     store = _RecordingStore()
-    routed = observation.model_copy(
+    routed = submission.model_copy(
         update={
-            "gate_context": GateContext(
-                gate_id="policy",
-                gate_config={"template_id": "other-v9", "retrieval_query": "q"},
+            "gate_contexts": (
+                GateContext(
+                    gate_id="policy",
+                    gate_config={"template_id": "other-v9", "retrieval_query": "q"},
+                ),
             )
         }
     )
 
-    with pytest.raises(ObservationContractError, match="not authorized"):
+    with pytest.raises(SubmissionContractError, match="not authorized"):
         await _decide(routed, fixture_reasoner, store)
 
     assert store.written == []
 
 
 async def test_intake_rejects_a_malformed_context_with_the_config_models_name(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     store = _RecordingStore()
 
-    with pytest.raises(ObservationContractError, match="PolicyGateConfig"):
+    with pytest.raises(SubmissionContractError, match="PolicyGateConfig"):
         await _decide(
-            _fast_path(observation, template_id="stub-v1", jurisdiction=["X"]),
+            _recorded(submission, template_id="stub-v1", jurisdiction=["X"]),
             fixture_reasoner,
             store,
         )

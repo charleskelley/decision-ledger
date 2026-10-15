@@ -37,8 +37,7 @@ from app.settings import FrameworkSettings
 from core.actions import DecisionAction
 from core.gate import GateOutput, GateVerdict
 from core.gate_request import GateRequest
-from core.observation import GateContext
-from core.routes import GateRoute
+from core.submission import GateContext
 from policy_rag_gate import plugin as policy_plugin
 from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
 from policy_rag_gate.gate import PolicyGate, _policy_gate_output
@@ -326,29 +325,23 @@ def _gate(retriever: _RecordingRetriever, prompts_dir: Any) -> PolicyGate:
     )
 
 
-def _request(observation: Any, **config: Any) -> GateRequest:
-    routed = observation.model_copy(
-        update={
-            "route": GateRoute.ROUTE_TO_GATE,
-            "fast_path_rationale": None,
-            "gate_context": GateContext(gate_id="policy", gate_config=config),
-        }
-    )
+def _request(submission: Any, **config: Any) -> GateRequest:
+    context = GateContext(gate_id="policy", gate_config=config)
     return GateRequest(
         decision_id="dec-policy-001",
-        observation=routed,
-        gate_context=routed.gate_context,
+        submission=submission.model_copy(update={"gate_contexts": (context,)}),
+        gate_context=context,
         budget_ms=1_000,
     )
 
 
 async def test_a_missing_retrieval_query_fails_closed_before_retrieving(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     retriever = _RecordingRetriever()
 
     output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
-        _request(observation, template_id="stub-v1", template_vars={})
+        _request(submission, template_id="stub-v1", template_vars={})
     )
 
     assert type(output) is GateOutput
@@ -365,12 +358,12 @@ async def test_a_missing_retrieval_query_fails_closed_before_retrieving(
 
 
 async def test_a_blank_retrieval_query_fails_closed_before_retrieving(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     retriever = _RecordingRetriever()
 
     output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
-        _request(observation, template_id="stub-v1", retrieval_query="   ")
+        _request(submission, template_id="stub-v1", retrieval_query="   ")
     )
 
     assert output.verdict is None
@@ -380,13 +373,13 @@ async def test_a_blank_retrieval_query_fails_closed_before_retrieving(
 
 
 async def test_a_render_error_fails_closed_after_a_tenant_scoped_retrieval(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     retriever = _RecordingRetriever()
 
     output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
         _request(
-            observation,
+            submission,
             template_id="stub-v1",
             # The fixture template needs widget_score, thin_history, and region.
             template_vars={"widget_score": "0.5"},
@@ -422,12 +415,12 @@ async def test_a_render_error_fails_closed_after_a_tenant_scoped_retrieval(
 
 
 async def test_absent_filters_reach_the_retriever_as_no_filter(
-    observation, fixture_reasoner
+    submission, fixture_reasoner
 ):
     retriever = _RecordingRetriever()
 
     await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
-        _request(observation, template_id="stub-v1", retrieval_query="q")
+        _request(submission, template_id="stub-v1", retrieval_query="q")
     )
 
     (call,) = retriever.calls
@@ -435,10 +428,10 @@ async def test_absent_filters_reach_the_retriever_as_no_filter(
     assert call["risk_tier"] is None
 
 
-async def test_an_unknown_template_propagates(observation, fixture_reasoner):
+async def test_an_unknown_template_propagates(submission, fixture_reasoner):
     with pytest.raises(KeyError):
         await _gate(_RecordingRetriever(), fixture_reasoner.prompts_dir).evaluate(
-            _request(observation, template_id="no-such-template", retrieval_query="q")
+            _request(submission, template_id="no-such-template", retrieval_query="q")
         )
 
 

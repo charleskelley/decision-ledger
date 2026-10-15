@@ -17,13 +17,13 @@
 #                          to grow an explicit catch over time).
 #
 # Both fault paths fire only when the gate (or retriever) is actually
-# invoked, which requires the scorer to ROUTE_TO_GATE rather than
-# fast-path. Each case primes 10 baseline events for the same account
-# (sparse_history threshold is 10 — exactly 10 priming events makes
-# total_events == 10 which clears the sparse flag) so the trigger can
-# carry just enough novelty (new IP + new device, SAME geo) to score
-# in the 0.20–0.95 routing band without overshooting into fast-path
-# block.
+# invoked, which requires the score to fall between ATO's two bypass
+# bands (so ATO asks for the gate instead of recording the login). Each
+# case primes 10 baseline events for the same account (sparse_history
+# threshold is 10 — exactly 10 priming events makes total_events == 10
+# which clears the sparse flag) so the trigger can carry just enough
+# novelty (new IP + new device, SAME geo) to score in the 0.20–0.95 gate
+# band without overshooting into the block band.
 #
 # corpus_mismatch was dropped from this dataset: it ran the pipeline
 # with a stale corpus_version label but never altered behavior, so the

@@ -53,7 +53,7 @@ from app.plugins import (
 )
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
-from core.observation import ReasonerRegistration
+from core.observation import GateBinding, ReasonerRegistration
 from tests._fake_gate.plugin import FakeGatePlugin
 from tests._stub_reasoner.plugin import PLUGIN, StubServices
 from tests._stub_reasoner.registry import STUB_REGISTRATION
@@ -102,7 +102,7 @@ def _registration(reasoner_id: str) -> ReasonerRegistration:
     return ReasonerRegistration(
         reasoner_id=reasoner_id,
         reasoner_name=f"{reasoner_id} (fake)",
-        allowed_gate_ids=frozenset({"policy"}),
+        gates=(GateBinding(gate_id="policy"),),
     )
 
 
@@ -112,7 +112,6 @@ class _FakePlugin:
         self.router = APIRouter(prefix=prefix, tags=[reasoner_id])
         self.prompts_dir = _HERE / "prompts"
         self.corpus_dir = _HERE / "corpus"
-        self.raw_event_factory = _FakeEvent.model_validate
         self.built_with: FrameworkServices | None = None
         self.services: _FakeServices | None = None
         self.journal: list[str] | None = None

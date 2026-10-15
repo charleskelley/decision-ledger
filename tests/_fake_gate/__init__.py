@@ -6,7 +6,9 @@ satisfies every contract the framework asks of a gate — a ``GatePlugin``
 ``build`` returns a ``Gate`` that answers ``evaluate(GateRequest)`` with the
 universal ``GateOutput``. Its behavior is scripted by ``gate_config``
 (``FakeGateConfig``): the actions it permits, its confidence and controls,
-the jurisdictions its evidence carries, a schema failure, or a raised error.
+the jurisdictions its evidence carries, a schema failure, a raised error, or
+a delay. ``LOOKUP_PLUGIN`` adds a deterministic lookup-style gate that answers
+from a subject list — the shape of a mandatory gate (DR-29).
 
 Framework tests compose it exactly the way a deployment composes a real gate
 — ``create_app(gate_plugins=[...])``, ``build_framework_services(...,

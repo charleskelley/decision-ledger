@@ -1,30 +1,38 @@
 """ATO Reasoner login event schema and authentication domain enums.
 
-LoginEvent satisfies the framework Observation protocol via the computed
-entity_id field, entity_type, event_id, and timestamp. entity_id is derived
-deterministically from account_id using UUID5 so that any caller can
-reproduce the framework identity from the domain business key without a
-registry lookup.
+``LoginEvent`` is ATO's own domain event: what the ingestion layer validates
+and the feature layer and scorer consume. It is not a framework type. The
+assembler (``assembler.build_submission``) turns an event, its features, and
+its score into the framework's ``Submission``, which carries the event
+itself as opaque ``raw_event`` JSON (DR-31).
 
-Framework fields (route, reasoner_context, fast_path_rationale, gate_context)
-default to unassembled values. The domain assembler (assembler.py) populates
-them from scorer output and computed features before framework submission.
-Submitting an event with default framework fields to the DecisionLedger
-framework is a contract violation — use assembler.build_observation() instead.
+``entity_id`` is derived deterministically from ``account_id`` using UUID5,
+so any caller can reproduce the framework identity of an account from the
+domain business key without a registry lookup.
+
+An event accepts nothing its submission would refuse — a naive timestamp, an
+empty ``event_id``, a non-finite coordinate, or a string the ledger cannot
+store — so a bad login is rejected when it is parsed (HTTP 422, or dead
+letter for the stream consumer), before its features are written.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    model_validator,
+)
 
-from core.observation import GateContext, ReasonerContext
-from core.routes import GateRoute
+from core.submission import storage_problem
 
 # Stable UUID5 namespace for ATO Reasoner account entity identifiers.
 # UUID5(_ATO_ACCOUNT_NS, account_id) produces a reproducible, opaque
@@ -90,7 +98,7 @@ class Geolocation(BaseModel):
         asn: Autonomous System Number (e.g., "AS15169").
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(strict=True, frozen=True, allow_inf_nan=False)
 
     latitude: float
     longitude: float
@@ -102,16 +110,15 @@ class Geolocation(BaseModel):
 class LoginEvent(BaseModel):
     """Validated login event entering the ATO Reasoner pipeline.
 
-    Satisfies the framework Observation protocol. entity_id is derived
-    deterministically from account_id via UUID5 — no registry required.
-    account_id is retained as a domain attribute for application-layer use
-    (Redis keys, log labels, query filters).
+    ``entity_id`` is derived deterministically from ``account_id`` via UUID5
+    — no registry required. ``account_id`` is retained as a domain attribute
+    for application-layer use (Redis keys, log labels, query filters).
 
     Attributes:
-        event_id: Unique identifier for this event instance.
+        event_id: Unique, non-empty identifier for this event instance.
         entity_type: Framework subject classification. Always "account" for
             ATO Reasoner login events.
-        timestamp: When the login attempt occurred (UTC).
+        timestamp: When the login attempt occurred (timezone-aware).
         account_id: Stable ATO domain business key for the account.
         session_id: Identifier for the current session.
         ip_address: Source IP address (IPv4 or IPv6).
@@ -120,33 +127,16 @@ class LoginEvent(BaseModel):
         user_agent: HTTP User-Agent string.
         auth_method: Authentication method used.
         outcome: Result of the authentication attempt.
-        route: Routing decision produced by the ATO domain pipeline after
-            feature computation and scoring. Set by the domain assembler
-            before the event is submitted to the DecisionLedger framework.
-        reasoner_context: Generic reasoner evidence record populated by the
-            domain assembler from ScorerOutput and AtoFeatureVector. None
-            in intermediate pipeline stages before assembly. The framework
-            raises if None at submission time.
-        fast_path_rationale: Required when ``route`` is ``FAST_PATH_ALLOW``
-            or ``FAST_PATH_BLOCK``. Human-readable explanation of the
-            confidence-band rule that fired (e.g., ``"risk_score=0.93 >
-            0.85 → FAST_PATH_BLOCK"``). ``None`` when routing to the policy
-            gate. The framework raises ``ObservationContractError`` if this
-            is absent on a fast-path observation.
-        gate_context: Domain-assembled policy gate context. Required on every
-            event — including fast-path ones — to enable shadow evaluation.
-            Populated by the domain assembler from the event, computed
-            features, and scorer output.
         scenario_tag: Generator-only label. Stripped before scoring — never
             reaches the feature layer or scorer.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(strict=True, frozen=True, allow_inf_nan=False)
 
-    # Framework identity fields (satisfy Observation protocol)
-    event_id: str
+    # Identity the framework submission is built from
+    event_id: str = Field(min_length=1)
     entity_type: Literal["account"] = "account"
-    timestamp: datetime
+    timestamp: AwareDatetime
 
     # Domain identity
     account_id: str
@@ -164,15 +154,17 @@ class LoginEvent(BaseModel):
     auth_method: AuthMethod
     outcome: AuthOutcome
 
-    # Framework Observation fields — set by domain assembler after
-    # feature computation and scoring, before framework submission.
-    route: GateRoute = GateRoute.ROUTE_TO_GATE
-    reasoner_context: ReasonerContext | None = None
-    fast_path_rationale: str | None = None
-    gate_context: GateContext = GateContext(gate_id="policy")
-
     # Generator only — stripped before scoring
     scenario_tag: str | None = None
+
+    @model_validator(mode="after")
+    def _storable(self) -> LoginEvent:
+        """Every value is one the ledger can store (the submission carries it)."""
+        problem = storage_problem(self.model_dump(mode="json"))
+        if problem is not None:
+            msg = f"the event holds {problem}, which the ledger cannot store"
+            raise ValueError(msg)
+        return self
 
     @computed_field
     @property

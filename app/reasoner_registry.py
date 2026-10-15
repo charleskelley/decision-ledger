@@ -10,7 +10,7 @@ This module is reasoner-agnostic. Each reasoner ships its own
 ``<PREFIX>_REGISTRATION`` constant in its ``registry`` module) and exposes it
 on its plugin; ``app/plugins.py:build_registry`` collects the discovered
 plugins' registrations into a ``StaticReasonerRegistry`` that the bootstrap
-hands to the bundle store and to ``validate_observation()``.
+hands to the bundle store (for replay) and to ``app/submit.py`` (for intake).
 """
 
 from __future__ import annotations

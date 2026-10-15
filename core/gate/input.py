@@ -1,9 +1,9 @@
 """GateInput — the framework's record that it invoked a gate.
 
-The framework writes a ``GateInput`` into the bundle whenever it dispatches
-to a gate (``DecisionBundle.gate_input``); it is ``None`` exactly when no
-gate ran. The base carries only what is truly universal: the identity of the
-gate that was invoked.
+The framework writes a ``GateInput`` into a gate's ``GateRecord`` whenever it
+dispatches to that gate; it is ``None`` exactly when the gate was not
+invoked (skipped, or no gate composed under its id). The base carries only
+what is truly universal: the identity of the gate that was invoked.
 
 Everything a gate consulted or constructed while evaluating — a rendered
 prompt and its template snapshot, retrieved passages, a model version, a
@@ -22,10 +22,11 @@ class GateInput(BaseModel):
 
     Attributes:
         gate_id: Identifier of the gate the framework dispatched to. Mirrors
-            ``raw_event.gate_context.gate_id`` (denormalized so the gate
-            layer of a bundle is self-describing for audit reading).
+            the ``GateContext.gate_id`` it dispatched on.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     gate_id: str

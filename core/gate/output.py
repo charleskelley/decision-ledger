@@ -31,9 +31,9 @@ these fields with ``model_dump(mode="json")``; readers that know the gate
 re-validate them. The framework never defines, imports, or deserializes a
 ``GateOutput`` subclass — it persists and replays this base only.
 
-The bundle-level *gate not invoked* state (``DecisionBundle.gate_output is
-None``, e.g. on the fast path) is a bundle concern, not a ``GateOutput``
-state.
+A gate the framework did not invoke, or that produced no usable output, has
+no ``GateOutput``: that is the bundle's ``GateRecord`` status (``skipped``
+or ``failed``), not a ``GateOutput`` state.
 """
 
 from __future__ import annotations
@@ -57,7 +57,9 @@ class EvidenceRef(BaseModel):
             evidence and checks it against the reasoner's conflict groups.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     source_id: str
     locator: str | None = None
@@ -88,7 +90,9 @@ class GateOutput(BaseModel):
             framework stores them without interpretation.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     gate_id: str
     deterministic: bool
