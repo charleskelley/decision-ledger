@@ -1,6 +1,6 @@
 """Dimension contract — the Protocol every concrete dimension implements.
 
-Every dimension — the framework's (consistency, robustness) and a gate's
+Every dimension — the framework's (consistency, robustness, shadow) and a gate's
 own (a retrieving gate's retrieval, faithfulness, and citation dimensions) —
 implements ``Dimension`` and returns a ``DimensionRun`` carrying both a
 generic ``DimensionResult`` (dimension/passed/metrics-dict/violations) and
@@ -25,6 +25,7 @@ from core.eval.metrics import (
     FaithfulnessMetrics,
     RetrievalMetrics,
     RobustnessMetrics,
+    ShadowMetrics,
 )
 
 DimensionMetrics = (
@@ -33,6 +34,7 @@ DimensionMetrics = (
     | ConsistencyMetrics
     | CitationMetrics
     | RobustnessMetrics
+    | ShadowMetrics
 )
 
 

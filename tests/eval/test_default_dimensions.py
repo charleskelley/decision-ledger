@@ -1,9 +1,11 @@
 """Tests for ``_build_default_dimensions()`` — the harness wiring layer.
 
 Coverage scope:
-- The framework harness builds its two reasoner-facing dimensions
-  (consistency, robustness); all datasets missing → two ``SkippedDimension``
-  entries that name the missing paths.
+- The framework harness builds its three reasoner-facing dimensions
+  (consistency, robustness, shadow); all datasets missing → consistency and
+  robustness become ``SkippedDimension`` entries that name the missing
+  paths, while shadow (which needs no dataset) is built from the driver's
+  framework services and runs after the others.
 - Gate-owned dimensions are never built here, even when a reasoner ships
   datasets for them: each gate runs its own harness (DR-28).
 - Dataset root defaults to the adapter's ``datasets_dir``; the driver comes
@@ -30,6 +32,7 @@ from core.actions import DecisionAction
 from core.eval.metrics import EvalDimension
 from eval.adapter import EvalAdapter
 from eval.dimensions.consistency import ConsistencyDimension, PipelineRunResult
+from eval.dimensions.shadow import ShadowDimension
 from eval.dimensions.skipped import SkippedDimension
 from eval.runners import harness
 from tests._stub_reasoner.events import StubEvent
@@ -69,7 +72,9 @@ def test_fake_adapter_satisfies_the_eval_adapter_protocol(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_all_datasets_missing_returns_two_skipped_dimensions(tmp_path: Path) -> None:
+def test_all_datasets_missing_skips_consistency_and_robustness(
+    tmp_path: Path,
+) -> None:
     """Empty dataset_root → consistency and robustness become SkippedDimension."""
     dimensions = harness._build_default_dimensions(
         adapter=_adapter(tmp_path),
@@ -77,12 +82,29 @@ def test_all_datasets_missing_returns_two_skipped_dimensions(tmp_path: Path) -> 
         dataset_root=tmp_path,
     )
 
-    assert len(dimensions) == 2
-    assert all(isinstance(d, SkippedDimension) for d in dimensions)
     assert [d.kind for d in dimensions] == [
         EvalDimension.CONSISTENCY,
         EvalDimension.ROBUSTNESS,
+        EvalDimension.SHADOW,
     ]
+    assert all(isinstance(d, SkippedDimension) for d in dimensions[:2])
+    assert isinstance(dimensions[2], ShadowDimension)
+
+
+def test_the_shadow_dimension_samples_through_the_drivers_framework(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    dimensions = harness._build_default_dimensions(
+        adapter=adapter, settings=FrameworkSettings(), dataset_root=tmp_path
+    )
+    shadow = dimensions[-1]
+    assert isinstance(shadow, ShadowDimension)
+    assert shadow.runs_after_others is True
+    assert shadow._source is adapter.driver.framework.store
+    assert shadow._gates is adapter.driver.framework.gates
+    assert shadow._reasoner_id == "stub-reasoner"
+    assert shadow._since is not None
 
 
 def test_skipped_dimensions_carry_dataset_path_in_reason(tmp_path: Path) -> None:
@@ -123,6 +145,7 @@ def test_gate_owned_dimensions_are_never_built_by_the_framework_harness(
     assert {d.kind for d in dimensions} == {
         EvalDimension.CONSISTENCY,
         EvalDimension.ROBUSTNESS,
+        EvalDimension.SHADOW,
     }
 
 

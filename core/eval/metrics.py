@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class EvalDimension(StrEnum):
-    """The five evaluation dimensions run against every release candidate.
+    """The evaluation dimensions run against every release candidate.
 
     Each dimension maps to a metric container with defined CI thresholds.
     A PR that causes any dimension to fall below its threshold is blocked
@@ -32,6 +32,10 @@ class EvalDimension(StrEnum):
         ROBUSTNESS: Resistance to adversarial inputs — prompt injection
             attempts, novel attack patterns, and schema violations
             (injection resistance rate, novel pattern accuracy).
+        SHADOW: How recorded decisions compare with what the ledger would
+            have decided had the reasoner asked for a gate: a sample of
+            recorded bundles is re-decided offline with the reasoner's
+            advisory gates (agreement, escalation, relaxation rates).
     """
 
     RETRIEVAL = "retrieval"
@@ -39,6 +43,7 @@ class EvalDimension(StrEnum):
     CONSISTENCY = "consistency"
     CITATION = "citation"
     ROBUSTNESS = "robustness"
+    SHADOW = "shadow"
 
 
 class RetrievalMetrics(BaseModel):
@@ -188,11 +193,49 @@ class RobustnessMetrics(BaseModel):
     fallback_behavior_correctness: float = Field(ge=0.0, le=1.0)
 
 
+class ShadowMetrics(BaseModel):
+    """Shadow evaluation metric container (DR-30).
+
+    A sample of a reasoner's recorded decisions is re-decided offline as if
+    the reasoner had asked for a gate: its advisory gates run on the stored
+    submission and gate contexts, the stored mandatory gate outcomes are
+    kept, and the decision-level rules and combinator apply as in gate mode
+    (no proposal). Each hypothetical action is compared with the recorded
+    one. Report-only until a baseline calibrates a threshold: the dimension
+    passes whenever it runs.
+
+    Attributes:
+        num_decisions: Recorded decisions sampled (that loaded).
+        num_compared: Sampled decisions that had at least one advisory gate
+            to shadow.
+        agreement_rate: Fraction of compared decisions whose hypothetical
+            gated action equals the recorded action.
+        escalation_rate: Fraction where the gated action is more
+            restrictive than the recorded one — what a bypass rule let
+            through that the gates would have held or blocked.
+        relaxation_rate: Fraction where the gated action is less
+            restrictive than the recorded one.
+        gate_failure_rate: Fraction of shadow gate invocations that failed
+            closed (error, timeout, malformed output, not composed).
+        unloadable: Sampled rows skipped because they no longer validate.
+    """
+
+    model_config = ConfigDict(strict=True, frozen=True)
+
+    num_decisions: int = Field(ge=0)
+    num_compared: int = Field(ge=0)
+    agreement_rate: float = Field(ge=0.0, le=1.0)
+    escalation_rate: float = Field(ge=0.0, le=1.0)
+    relaxation_rate: float = Field(ge=0.0, le=1.0)
+    gate_failure_rate: float = Field(ge=0.0, le=1.0)
+    unloadable: int = Field(ge=0)
+
+
 class DimensionResult(BaseModel):
     """Outcome of a single evaluation dimension run.
 
     Attributes:
-        dimension: Which of the five evaluation dimensions this result covers.
+        dimension: Which evaluation dimension this result covers.
         passed: True if all CI gate thresholds for this dimension were met.
         metrics: Raw metric values keyed by metric name.
         threshold_violations: Human-readable descriptions of any metrics that
@@ -212,7 +255,7 @@ class DimensionResult(BaseModel):
 
 
 class EvalReport(BaseModel):
-    """Aggregated evaluation report across all five dimensions.
+    """Aggregated evaluation report across the dimensions that ran.
 
     Produced by ``make eval``. A report with ``overall_passed = False`` blocks
     the CI merge gate. Metric containers for each dimension are populated only
@@ -229,6 +272,8 @@ class EvalReport(BaseModel):
         consistency: Dimension 03 metrics. None if dimension was skipped.
         citation: Dimension 04 metrics. None if dimension was skipped.
         robustness: Dimension 05 metrics. None if dimension was skipped.
+        shadow: Shadow evaluation metrics. None if the dimension did not run
+            (reports written before it existed have none).
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -242,3 +287,4 @@ class EvalReport(BaseModel):
     consistency: ConsistencyMetrics | None = None
     citation: CitationMetrics | None = None
     robustness: RobustnessMetrics | None = None
+    shadow: ShadowMetrics | None = None

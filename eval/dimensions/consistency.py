@@ -185,10 +185,10 @@ class PipelineDriver(Protocol):
     """SDK-agnostic driver into the live decision pipeline.
 
     A reasoner's eval driver feeds events through the same path as its
-    live decision endpoint (domain pipeline → ``app/decide.py:
-    execute_decision``: retrieval → gate → enforcement → audit) and returns
-    the trigger's decision. Test stubs satisfy this same protocol so the
-    dimension's wire-up is testable without infrastructure.
+    live decision endpoint (domain pipeline → ``app/submit.py:submit``:
+    the gate set → enforcement → audit) and returns the trigger's
+    decision. Test stubs satisfy this same protocol so the dimension's
+    wire-up is testable without infrastructure.
     """
 
     async def run(self, events: Sequence[Any]) -> PipelineRunResult:

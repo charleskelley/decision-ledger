@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
+    from app.plugin import FrameworkServices
     from app.settings import FrameworkSettings
     from core.actions import DecisionAction
     from eval.dimensions.consistency import PipelineRunResult
@@ -45,8 +46,15 @@ class EvalDriver(Protocol):
     One driver backs the consistency and robustness dimensions, so it
     satisfies the consistency ``PipelineDriver`` and robustness
     ``RobustnessDriver`` protocols structurally. Events are instances of the
-    adapter's ``event_type``; the harness never inspects them.
+    adapter's ``event_type``; the harness never inspects them. Its
+    ``framework`` services (the store, the composed gates, the registry)
+    back the shadow dimension.
     """
+
+    @property
+    def framework(self) -> FrameworkServices:
+        """The framework services the driver's pipeline runs on."""
+        ...
 
     async def run(self, events: Sequence[Any]) -> PipelineRunResult:
         """Run an ordered event sequence; return the trigger's result."""

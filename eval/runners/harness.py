@@ -16,10 +16,12 @@ pipeline driver. The harness itself carries no reasoner vocabulary.
 
 The framework's dimensions are the reasoner-facing ones: decision
 consistency and adversarial robustness, driven through the reasoner's own
-pipeline. Dimensions that measure what one gate does (a retrieving gate's
-retrieval quality, an LLM gate's faithfulness and citations) belong to that
-gate and run in its own harness, which reuses ``run_eval`` and the
-``EvalReport`` schema (DR-28).
+pipeline, and shadow evaluation, which re-decides a sample of the decisions
+the run recorded with the reasoner's advisory gates (report-only; it runs
+after the others because it samples what they record). Dimensions that
+measure what one gate does (a retrieving gate's retrieval quality, an LLM
+gate's faithfulness and citations) belong to that gate and run in its own
+harness, which reuses ``run_eval`` and the ``EvalReport`` schema (DR-28).
 
 Reports are staged per reasoner at
 ``outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json``; promote a
@@ -58,6 +60,7 @@ from core.eval.metrics import (
     FaithfulnessMetrics,
     RetrievalMetrics,
     RobustnessMetrics,
+    ShadowMetrics,
 )
 from core.exceptions import ReasonerPluginError
 from eval.adapter import load_eval_adapter
@@ -69,6 +72,7 @@ from eval.dimensions.robustness import (
     load_novel_pattern_cases,
     load_schema_violation_cases,
 )
+from eval.dimensions.shadow import ShadowDimension
 from eval.dimensions.skipped import SkippedDimension
 
 if TYPE_CHECKING:
@@ -99,6 +103,7 @@ def assemble_report(*, run_id: str, runs: Sequence[DimensionRun]) -> EvalReport:
     consistency: ConsistencyMetrics | None = None
     citation: CitationMetrics | None = None
     robustness: RobustnessMetrics | None = None
+    shadow: ShadowMetrics | None = None
 
     for run in runs:
         match run.metrics:
@@ -112,6 +117,8 @@ def assemble_report(*, run_id: str, runs: Sequence[DimensionRun]) -> EvalReport:
                 citation = run.metrics
             case RobustnessMetrics():
                 robustness = run.metrics
+            case ShadowMetrics():
+                shadow = run.metrics
             case None:
                 pass
 
@@ -127,6 +134,7 @@ def assemble_report(*, run_id: str, runs: Sequence[DimensionRun]) -> EvalReport:
         consistency=consistency,
         citation=citation,
         robustness=robustness,
+        shadow=shadow,
     )
 
 
@@ -137,9 +145,14 @@ async def run_eval(
 ) -> EvalReport:
     """Run all dimensions concurrently and write the report JSON.
 
+    Dimensions that sample what the others record (a ``runs_after_others``
+    attribute set true, like the shadow dimension) run in a second wave,
+    once the first has finished.
+
     Args:
-        dimensions: Concrete ``Dimension`` instances to evaluate. Order does
-            not affect the report; runs are gathered concurrently.
+        dimensions: Concrete ``Dimension`` instances to evaluate. Within a
+            wave, order does not affect the report; runs are gathered
+            concurrently.
         output_path: Destination for the JSON-serialized ``EvalReport``.
             Parent directory must exist.
 
@@ -153,8 +166,11 @@ async def run_eval(
         dimensions=[d.kind.value for d in dimensions],
     )
 
-    runs = await asyncio.gather(*(d.evaluate() for d in dimensions))
-    report = assemble_report(run_id=str(uuid.uuid4()), runs=list(runs))
+    first = [d for d in dimensions if not getattr(d, "runs_after_others", False)]
+    later = [d for d in dimensions if getattr(d, "runs_after_others", False)]
+    runs = list(await asyncio.gather(*(d.evaluate() for d in first)))
+    runs += await asyncio.gather(*(d.evaluate() for d in later))
+    report = assemble_report(run_id=str(uuid.uuid4()), runs=runs)
 
     output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 
@@ -191,7 +207,9 @@ def _build_default_dimensions(
     of disappearing silently.
 
     Gate-owned dimensions are not built here: each gate's own harness runs
-    them against the datasets a reasoner ships for that gate.
+    them against the datasets a reasoner ships for that gate. The shadow
+    dimension needs no dataset: it samples the decisions this run records
+    (``since`` = now) through the driver's framework services.
 
     Args:
         adapter: The reasoner's ``EvalAdapter``. Supplies the event type the
@@ -204,9 +222,9 @@ def _build_default_dimensions(
             Defaults to ``adapter.datasets_dir``.
 
     Returns:
-        Two dimensions in canonical order: consistency, robustness. Each is
-        either a real dimension (dataset present) or a ``SkippedDimension``
-        (dataset missing).
+        Three dimensions in canonical order: consistency, robustness, shadow.
+        The first two are each either a real dimension (dataset present) or
+        a ``SkippedDimension`` (dataset missing).
 
     Raises:
         ValueError: The adapter's driver rejects its configuration (for
@@ -215,6 +233,7 @@ def _build_default_dimensions(
     settings = settings if settings is not None else FrameworkSettings()
     dataset_root = dataset_root if dataset_root is not None else adapter.datasets_dir
     event_type = adapter.event_type
+    started = datetime.now(UTC)
 
     # Opened once, shared by both dimensions.
     driver = adapter.build_driver(settings)
@@ -283,6 +302,18 @@ def _build_default_dimensions(
             )
         )
 
+    # --- Shadow (report-only; samples what the dimensions above record) ---
+    framework = driver.framework
+    dimensions.append(
+        ShadowDimension(
+            source=framework.store,
+            gates=framework.gates,
+            registry=framework.registry,
+            reasoner_id=adapter.reasoner_id,
+            since=started,
+        )
+    )
+
     log.info(
         "eval.harness.dimensions_built",
         component="eval_harness",
@@ -329,8 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="eval.runners.harness",
         description=(
-            "Run the framework's evaluation harness (consistency, robustness) "
-            "for one reasoner."
+            "Run the framework's evaluation harness (consistency, robustness, "
+            "shadow) for one reasoner."
         ),
     )
     parser.add_argument(
