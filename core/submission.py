@@ -10,10 +10,11 @@ profile).
 
 A submission carries:
 
-- identity: ``reasoner_id``, ``event_id``, ``timestamp``, and the subject
-  (``entity_id``, ``entity_type``). ``native_subject`` is reserved for the
-  identity contract (DR-32): the field exists so the wire schema changes
-  once, and the ledger ignores it until then;
+- identity: ``reasoner_id``, ``event_id``, ``timestamp``, the reasoner's
+  own id for the subject (``entity_id``, ``entity_type``), and, optionally,
+  the subject in the reasoner's own terms (``native_subject``, a
+  ``core.identity.NativeSubject``), which the ledger resolves to the
+  decision's subject through the deployment's identity resolver (DR-32);
 - ``mode`` — ``record`` (the reasoner decided: ``proposed_action`` plus a
   ``bypass`` citation of one of its registered bypass rules) or ``gate``
   (the reasoner proposes, optionally, and the ledger runs its gates);
@@ -25,9 +26,11 @@ A submission carries:
 - ``raw_event`` — the reasoner's own event, opaque JSON stored verbatim.
 
 Field-level rules are model validators; rules that need the reasoner's
-registration live in ``validate_submission``. ``matching_bypass_rule``,
-``evaluate_bypass``, and ``evaluate_competing_rules`` are the pure helpers a
-reasoner and the ledger share to pick and to check bypass rules.
+registration live in ``validate_submission`` (a native subject in a namespace
+the registration declares must match the reasoner's ``entity_id``, for one).
+``matching_bypass_rule``, ``evaluate_bypass``, and
+``evaluate_competing_rules`` are the pure helpers a reasoner and the ledger
+share to pick and to check bypass rules.
 
 Every value must survive the ledger's JSON round trip, because the bundle
 stores the submission verbatim and replay reloads it: non-finite numbers, NUL
@@ -59,6 +62,7 @@ from core.actions import DecisionAction
 from core.exceptions import PredicateError, SubmissionContractError
 from core.gate import evaluate_predicate, referenced_fields, severity
 from core.gate.predicate import Scalar, resolve_field
+from core.identity import NativeSubject
 from core.observation import (
     BypassRule,
     GateBinding,
@@ -80,27 +84,6 @@ SUBMISSION_SCHEMA_VERSION = 2
 #: ``record`` — the reasoner decided and cites a bypass rule; ``gate`` — the
 #: reasoner asks the ledger to run its gates.
 SubmissionMode = Literal["record", "gate"]
-
-
-class NativeSubject(BaseModel):
-    """The subject as the reasoner knows it — reserved for DR-32.
-
-    The identity contract (DR-32) lets a reasoner name its subject in its
-    own namespace and has the ledger resolve it to ``entity_id``. Until
-    then the field is accepted, validated, stored, and otherwise ignored.
-
-    Attributes:
-        native_namespace: The reasoner's identifier namespace (for example
-            the system the key comes from).
-        native_subject_id: The subject's key in that namespace.
-    """
-
-    model_config = ConfigDict(
-        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
-    )
-
-    native_namespace: str = Field(min_length=1)
-    native_subject_id: str = Field(min_length=1)
 
 
 class BypassCitation(BaseModel):
@@ -131,12 +114,21 @@ class Submission(BaseModel):
         event_id: Reasoner-assigned unique id of the event the decision is
             about. The default idempotency key and the log correlation id.
         timestamp: When the event occurred (timezone-aware).
-        entity_id: Framework UUID of the decision subject (typically UUID5
-            of the reasoner's business key).
-        entity_type: Classification of the subject (``"account"``,
+        entity_id: The reasoner's own UUID for the subject it scored
+            (UUID5 of its native key under its namespace). The decision's
+            subject is the identity the ledger resolves
+            (``DecisionBundle.identity``, DR-32): the same id when no
+            resolver matches the subject, an enterprise subject's when one
+            does.
+        entity_type: Classification of that subject (``"account"``,
             ``"customer"``, ...).
-        native_subject: Reserved for the identity contract (DR-32); ignored
-            by the ledger until then.
+        native_subject: The subject in the reasoner's own terms (a native
+            namespace and key), which the ledger resolves through the
+            deployment's identity resolver; ``None`` when the reasoner names
+            none (its ``entity_id`` is then recorded as the subject,
+            unresolved). In a namespace the reasoner's registration
+            declares, ``entity_id`` and ``entity_type`` must be the ones the
+            declaration derives.
         mode: ``"record"`` or ``"gate"``.
         proposed_action: The reasoner's action. Required to record (it is
             the decision); optional to gate (a floor: the ledger's result is
@@ -344,9 +336,10 @@ def validate_submission(
         SubmissionContractError: With ``code``
             ``BYPASS_RULE_UNREGISTERED``, ``ACTION_NOT_RECORDABLE``,
             ``BYPASS_ACTION_MISMATCH``, ``BYPASS_RULE_VERSION_MISMATCH``,
-            ``GATE_NOT_BOUND``, ``GATE_CONTEXT_MISSING``, or ``NO_GATES``
-            (see ``SubmissionContractError``), or ``SUBMISSION_INVALID``
-            when the registration is for another reasoner.
+            ``NATIVE_SUBJECT_MISMATCH``, ``GATE_NOT_BOUND``,
+            ``GATE_CONTEXT_MISSING``, or ``NO_GATES`` (see
+            ``SubmissionContractError``), or ``SUBMISSION_INVALID`` when the
+            registration is for another reasoner.
     """
     reasoner_id = submission.reasoner_id
 
@@ -360,6 +353,7 @@ def validate_submission(
         )
 
     rule = _validate_citation(submission, registration, _fail)
+    _validate_native_subject(submission, registration, _fail)
 
     gate_set = effective_gate_set(registration, deployment_mandatory)
     addressed = {context.gate_id for context in submission.gate_contexts}
@@ -468,6 +462,40 @@ def evaluate_competing_rules(
         for rule in registration.bypass_rules
         if rule.rule_id != cited.rule_id
     )
+
+
+def _validate_native_subject(
+    submission: Submission,
+    registration: ReasonerRegistration,
+    fail: _FailFactory,
+) -> None:
+    """A native subject in a declared namespace matches the reasoner's own id.
+
+    The registration's declaration of a namespace says which subject type it
+    names and which UUID5 namespace its ids derive under (DR-32); a
+    submission that names a subject there and a different ``entity_id`` or
+    ``entity_type`` contradicts its own registration. A namespace the
+    registration does not declare is not checked: the ledger records the
+    reasoner's ``entity_id`` unless a resolver matches the subject.
+    """
+    subject = submission.native_subject
+    if subject is None:
+        return
+    namespace = registration.native_namespace(subject.native_namespace)
+    if namespace is None:
+        return
+    expected = namespace.entity_id_of(subject.native_subject_id)
+    if (submission.entity_id, submission.entity_type) != (
+        expected,
+        namespace.entity_type,
+    ):
+        raise fail(
+            "NATIVE_SUBJECT_MISMATCH",
+            f"the native subject is in namespace {subject.native_namespace!r}, "
+            f"which this reasoner's registration declares: its entity is "
+            f"{expected} of type {namespace.entity_type!r}, but the submission "
+            f"names {submission.entity_id} of type {submission.entity_type!r}",
+        )
 
 
 def _validate_citation(
