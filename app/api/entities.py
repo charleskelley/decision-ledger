@@ -1,12 +1,16 @@
-"""Entity route — one subject's decisions, newest first (DR-31).
+"""Entity route — one subject's decisions, newest first (DR-31, DR-32).
 
 ``GET /api/v1/entities/{entity_id}/decisions`` is the ledger read by subject:
-every decision any reasoner made about one ``entity_id``, newest first, from
-the row's indexed columns (so rows of every schema version are listed). A
-reasoner key sees its own reasoner's decisions only; the operator key sees
-every reasoner's, optionally narrowed with ``reasoner_id``. Page with
-``before`` and ``before_id``: the ``created_at`` and ``decision_id`` of the
-last decision of the previous page.
+every decision any reasoner made about one ``entity_id`` — and about every id
+the identity journal merged with it — newest first, from the row's indexed
+columns (so rows of every schema version are listed). With
+``include_related=<type>`` the timeline also covers every subject one
+relationship of that type away (a subject's group, or a group's members), as
+the membership projection holds now; each decision says which subject it is
+about and how that subject is linked. A reasoner key sees its own reasoner's
+decisions only; the operator key sees every reasoner's, optionally narrowed
+with ``reasoner_id``. Page with ``before`` and ``before_id``: the
+``created_at`` and ``decision_id`` of the last decision of the previous page.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ def entity_decisions(
     limit: int = DEFAULT_LIMIT,
     before: datetime | None = None,
     before_id: str | None = None,
+    include_related: str | None = None,
 ) -> EntityDecisions:
     """List a subject's decisions, newest first.
 
@@ -54,15 +59,17 @@ def entity_decisions(
         limit: Page size (1 to ``MAX_LIMIT``).
         before: The ``created_at`` of the last decision already seen.
         before_id: The ``decision_id`` of that decision.
+        include_related: A relationship type whose subjects' decisions join
+            the timeline.
 
     Returns:
         The subject's decisions.
 
     Raises:
         LedgerError: 422 ``ENTITY_ID_INVALID``; 422 ``REQUEST_INVALID`` for
-            a ``limit`` out of range or a malformed ``before_id``; 403
-            ``REASONER_MISMATCH`` when a reasoner key asks for another
-            reasoner's decisions.
+            a ``limit`` out of range, a malformed ``before_id``, or an empty
+            ``include_related``; 403 ``REASONER_MISMATCH`` when a reasoner
+            key asks for another reasoner's decisions.
     """
     if not 1 <= limit <= MAX_LIMIT:
         raise LedgerError(
@@ -70,6 +77,13 @@ def entity_decisions(
             "REQUEST_INVALID",
             f"limit must be between 1 and {MAX_LIMIT}",
             extra={"errors": [{"loc": ["query", "limit"], "msg": "out of range"}]},
+        )
+    if include_related is not None and not include_related.strip():
+        raise LedgerError(
+            422,
+            "REQUEST_INVALID",
+            "include_related names a relationship type",
+            extra={"errors": [{"loc": ["query", "include_related"], "msg": "empty"}]},
         )
     if before_id is not None and before is None:
         raise LedgerError(
@@ -100,6 +114,7 @@ def entity_decisions(
             limit=limit,
             before=before,
             before_id=before_id,
+            include_related=include_related,
         )
     except KeyError as err:
         raise LedgerError(
@@ -107,6 +122,7 @@ def entity_decisions(
         ) from err
     return EntityDecisions(
         entity_id=entity_id,
+        include_related=include_related,
         decisions=[
             EntityDecision(
                 decision_id=row.decision_id,
@@ -117,6 +133,8 @@ def entity_decisions(
                 mode=row.mode,
                 event_id=row.event_id,
                 entity_type=row.entity_type,
+                entity_id=row.entity_id,
+                relationship_type=row.relationship_type,
             )
             for row in rows
         ],
@@ -136,8 +154,13 @@ def get_entity_decisions(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     before: datetime | None = None,
     before_id: str | None = None,
+    include_related: str | None = Query(None, min_length=1),
 ) -> EntityDecisions:
-    """A subject's decisions, newest first (page with ``before``, ``before_id``)."""
+    """A subject's decisions, newest first (page with ``before``, ``before_id``).
+
+    Covers the ids merged with the subject; ``include_related=<type>`` adds
+    the subjects one relationship of that type away.
+    """
     return entity_decisions(
         entity_id,
         principal=principal,
@@ -146,4 +169,5 @@ def get_entity_decisions(
         limit=limit,
         before=before,
         before_id=before_id,
+        include_related=include_related,
     )
