@@ -165,15 +165,14 @@ def test_windows_have_correct_counts(login_event):
 
 
 def test_feature_vector_entity_id_matches_account_id(login_event):
-    import uuid
-
-    from ato_reasoner.events import _ATO_ACCOUNT_NS
+    from ato_reasoner.registry import ATO_ACCOUNT_NAMESPACE
 
     history = _make_history()
     now_ts = login_event.timestamp.timestamp()
     fv = _compute_features(login_event, history, now_ts)
-    expected = uuid.uuid5(_ATO_ACCOUNT_NS, login_event.account_id)
+    expected = ATO_ACCOUNT_NAMESPACE.entity_id_of(login_event.account_id)
     assert fv.entity_id == expected
+    assert fv.entity_id == login_event.entity_id
 
 
 # ---------------------------------------------------------------------------

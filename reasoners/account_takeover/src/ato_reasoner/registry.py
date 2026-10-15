@@ -17,6 +17,12 @@ reasoner:
   These numbers live here and nowhere in the framework; the scorer's band
   metrics read them from this module.
 - **Recordable actions**: ALLOW and BLOCK (the bands' actions).
+- **Native namespace** (DR-32): ATO names the subject it scores — an
+  account — as ``(ato-account, account_id)``. The declaration carries the
+  UUID5 namespace ATO's account ids have always derived under, so the
+  ledger's passthrough resolver assigns exactly the ``entity_id`` (and the
+  ``entity_type`` ``account``) ATO always had, and an enterprise resolver
+  can map the account to the customer it belongs to.
 - **Enforcement profile**: Tier 3 fires on ``sparse_history`` (a novel
   account, on gated logins), and Tier 5 treats US and EU policy snippets in
   the same retrieval set as a jurisdiction conflict.
@@ -30,8 +36,11 @@ the RAG policy gate's call (DR-28): the gate accepts the templates in ATO's
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from core.actions import DecisionAction
 from core.gate import Compare
+from core.identity import NativeNamespace
 from core.observation import BypassRule, GateBinding, ReasonerRegistration
 
 #: ``risk_score`` below this is recorded ALLOW (``allow-band``).
@@ -42,6 +51,16 @@ ALLOW_BAND_THRESHOLD = 0.20
 #: moderately confident attacks (~0.85-0.95) still go to the policy gate for
 #: adjudication rather than being blocked outright (DR-25).
 BLOCK_BAND_THRESHOLD = 0.95
+
+#: The native namespace of ATO's subjects: an account, keyed by
+#: ``account_id``. Its UUID5 namespace is the one ATO's account ids have
+#: always derived under (``LoginEvent.entity_id``), now declared where the
+#: ledger can read it.
+ATO_ACCOUNT_NAMESPACE = NativeNamespace(
+    native_namespace="ato-account",
+    namespace_uuid=UUID("8a1f9b2e-4c3d-5e6f-7a8b-9c0d1e2f3a4b"),
+    entity_type="account",
+)
 
 ALLOW_BAND = BypassRule(
     rule_id="allow-band",
@@ -71,6 +90,7 @@ ATO_REGISTRATION = ReasonerRegistration(
     gates=(GateBinding(gate_id="policy"),),
     bypass_rules=(ALLOW_BAND, BLOCK_BAND),
     recordable_actions=frozenset({DecisionAction.ALLOW, DecisionAction.BLOCK}),
+    native_namespaces=(ATO_ACCOUNT_NAMESPACE,),
     novel_entity_feature="sparse_history",
     jurisdiction_conflict_groups=(
         frozenset({"US_FEDERAL", "US_STATE"}),

@@ -1,20 +1,19 @@
 """ATO Reasoner feature vector and sliding window contracts.
 
-entity_id is derived from account_id using the same UUID5 namespace as
-LoginEvent, ensuring consistent framework identity across the event and
-feature layers.
+entity_id is derived from account_id under the same declared account
+namespace as LoginEvent (``registry.ATO_ACCOUNT_NAMESPACE``), ensuring a
+consistent identity across the event and feature layers.
 """
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
+from uuid import UUID  # noqa: TC003 (pydantic resolves the computed field's type)
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from ato_reasoner.events import _ATO_ACCOUNT_NS
+from ato_reasoner.registry import ATO_ACCOUNT_NAMESPACE
 
 
 class WindowSpec(BaseModel):
@@ -37,7 +36,8 @@ class WindowSpec(BaseModel):
 class AtoFeatureVector(BaseModel):
     """Computed ATO feature snapshot from the online feature layer.
 
-    entity_id is derived deterministically from account_id via UUID5.
+    entity_id is derived deterministically from account_id under ATO's
+    declared account namespace.
     account_id is retained as a domain attribute for application-layer use.
 
     All novelty and consistency values are in [0.0, 1.0]. sparse_history is
@@ -103,5 +103,5 @@ class AtoFeatureVector(BaseModel):
     @computed_field
     @property
     def entity_id(self) -> UUID:
-        """Framework UUID derived deterministically from account_id."""
-        return uuid.uuid5(_ATO_ACCOUNT_NS, self.account_id)
+        """ATO's UUID for the account, derived from account_id (DR-32)."""
+        return ATO_ACCOUNT_NAMESPACE.entity_id_of(self.account_id)
