@@ -21,6 +21,9 @@ the stub reasoner (``tests/_stub_reasoner``) and the scripted fake gates
   faithfully, or is not composed is recorded as ``failed`` and holds the
   decision; the bundle is still written. A gate's budget is charged only
   with its own evaluation, and only the caller's cancellation propagates.
+- **Registration version** (DR-31): every bundle records the version of the
+  registration intake used; ``decide`` returns the bundle ``submit`` would
+  write, without writing it.
 
 Fakes are hand-written (no MagicMock on the decision path) so a call on a
 path that must not reach a collaborator fails loudly.
@@ -44,13 +47,14 @@ from app.submit import (
     DEFAULT_GATE_BUDGET_MS,
     SKIPPED_FOR_BLOCK,
     SKIPPED_FOR_RECORD,
+    decide,
     submit,
 )
 from core.actions import DecisionAction
 from core.exceptions import SubmissionContractError, UnregisteredReasonerError
 from core.gate import EvidenceRef, GateInput, GateOutput, GateVerdict
 from core.gate_request import GateRequest
-from core.observation import GateBinding, GateContext
+from core.observation import GateBinding, GateContext, registration_version
 from core.submission import BypassCitation, storage_problem
 from tests._fake_gate.plugin import (
     AuthorizingFakeGate,
@@ -1102,3 +1106,37 @@ async def test_invoke_gate_reports_a_run_gate_as_ran(gated_submission):
     assert invocation.invoked
     assert invocation.failure is None
     assert isinstance(_gate(gates), FakeGate)
+
+
+# ---------------------------------------------------------------------------
+# Registration version and decide() (DR-31)
+# ---------------------------------------------------------------------------
+
+
+async def test_every_bundle_records_the_registration_version_it_was_decided_under(
+    submission, gated_submission
+):
+    gates = _compose(FakeGatePlugin())
+    for each in (submission, gated_submission):
+        bundle = await _run(each, gates=gates)
+        assert bundle.registration_version == registration_version(STUB_REGISTRATION)
+
+    other = _with_gates(_binding("fake", mandatory=True))
+    bundle = await _run(submission, gates=gates, registry=_registry(other))
+    assert bundle.registration_version == registration_version(other)
+    assert bundle.registration_version != registration_version(STUB_REGISTRATION)
+
+
+async def test_decide_returns_the_bundle_without_writing_it(gated_submission):
+    gates = _compose(FakeGatePlugin())
+
+    bundle = await decide(
+        submission=_scripted(gated_submission, permitted_actions=["CHALLENGE"]),
+        gates=gates,
+        registry=_registry(),
+        ingestion_timestamp=_INGESTION_TS,
+    )
+
+    assert bundle.decision_action == CHALLENGE
+    assert bundle.ingestion_timestamp == _INGESTION_TS
+    assert len(_gate(gates).requests) == 1

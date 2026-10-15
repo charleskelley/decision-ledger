@@ -3,8 +3,10 @@
 ``FrameworkSettings`` holds configuration for resources that are shared
 across the framework runtime and every plugin it composes — Postgres (the
 audit ledger, the framework's only infrastructure), process-wide logging,
-the reasoner allowlist, and the gates the deployment mandates for every
-reasoner. Tenant separation is logical (the
+the reasoner allowlist, the registration file, the gates the deployment
+mandates for every reasoner, and the API keys the ledger authenticates
+callers with (keys live in the environment or a mounted file only; there is
+no user model and no session). Tenant separation is logical (the
 ``reasoner_id`` column), not connection-level — multiple reasoners share
 one deployment.
 
@@ -27,6 +29,9 @@ the contract. See ``docs/operations/secrets.md`` for full guidance.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,9 +39,10 @@ class FrameworkSettings(BaseSettings):
     """Shared-infrastructure configuration with docker-compose defaults.
 
     Owns the Postgres connection params, logging knobs, the reasoner
-    allowlist, and the deployment's mandatory gates — ``app/bootstrap.py``
-    opens the framework's Postgres connection and composes the gates from
-    them.
+    allowlist and registration file, the deployment's mandatory gates, and
+    the API keys — ``app/bootstrap.py`` opens the framework's Postgres
+    connection and composes the registrations and gates from them, and
+    ``app/auth.py`` builds the key ring.
 
     Reasoner- or gate-specific configuration must NOT be added here; create
     a Settings class with that plugin's own env-var prefix in its package.
@@ -71,6 +77,25 @@ class FrameworkSettings(BaseSettings):
     #: fails. Blank (the default) mandates none.
     decisionledger_mandatory_gates: str = ""
 
+    #: Path to a YAML file of reasoner registrations, composed with the
+    #: installed reasoner plugins' (DR-31): how a reasoner that runs as its
+    #: own service, with no plugin installed here, registers. Blank (the
+    #: default) reads no file.
+    decisionledger_registrations: str = ""
+
+    #: API keys of the reasoners, as comma-separated ``reasoner_id:key``
+    #: pairs. A key authenticates its reasoner's writes and its reads of its
+    #: own decisions; a reasoner may hold several keys (rotation).
+    decisionledger_api_keys: SecretStr = SecretStr("")
+
+    #: Path to a YAML file mapping ``reasoner_id`` to a key or a list of keys,
+    #: read in addition to ``DECISIONLEDGER_API_KEYS`` (a mounted secret).
+    decisionledger_api_keys_file: str = ""
+
+    #: The operator key: a single shared secret that resolves held decisions
+    #: and reads every reasoner's decisions. Blank disables operator access.
+    decisionledger_operator_key: SecretStr = SecretStr("")
+
     @property
     def mandatory_gate_ids(self) -> frozenset[str]:
         """The parsed ``DECISIONLEDGER_MANDATORY_GATES`` set (empty when blank)."""
@@ -79,6 +104,18 @@ class FrameworkSettings(BaseSettings):
             for part in self.decisionledger_mandatory_gates.split(",")
             if part.strip()
         )
+
+    @property
+    def registrations_path(self) -> Path | None:
+        """The ``DECISIONLEDGER_REGISTRATIONS`` file, or ``None`` when blank."""
+        value = self.decisionledger_registrations.strip()
+        return Path(value) if value else None
+
+    @property
+    def api_keys_path(self) -> Path | None:
+        """The ``DECISIONLEDGER_API_KEYS_FILE`` file, or ``None`` when blank."""
+        value = self.decisionledger_api_keys_file.strip()
+        return Path(value) if value else None
 
     @property
     def postgres_dsn(self) -> str:
