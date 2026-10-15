@@ -75,7 +75,7 @@ jobs:
           allowed="gates/policy_rag/src/policy_rag_gate/llm/"
           leaks=$(grep -rE "^[[:space:]]*(from|import)[[:space:]]+(openai|anthropic)([[:space:].]|$)" \
             --include="*.py" \
-            app/ core/ eval/ reasoners/ gates/ tests/ \
+            app/ core/ eval/ reasoners/ gates/ integrations/ conformance/ tests/ \
             | grep -v "^${allowed}" || true)
           if [ -n "$leaks" ]; then
             echo "ERROR: DR-23 boundary violation — LLM SDK imported outside ${allowed}:"
