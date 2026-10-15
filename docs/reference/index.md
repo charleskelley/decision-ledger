@@ -29,9 +29,15 @@ and `app/` — never imports from a reasoner package (DR-24, DR-26).
   intake validation → the decision's gate set (mandatory, then advisory)
   → enforcement and the combinator → audit.
 - [`ReasonerPlugin`][app.plugin.ReasonerPlugin] — What a reasoner
-  publishes under the `decisionledger.reasoners` entry point;
+  publishes under the `decisionledger.reasoners` entry point (its
+  registration and the assets its gates read);
   [`discover_plugins`][app.plugins.discover_plugins] loads them and
-  [`create_app`][app.main.create_app] composes them.
+  [`create_app`][app.main.create_app] composes them into the ledger's HTTP
+  surface ([`app.api`][app.api]).
+- [`LocalClient`][app.client.LocalClient] and
+  [`HttpClient`][app.client.HttpClient] — How a reasoner submits: in
+  process or over HTTP, through the same operations
+  ([`create_decision`][app.api.decisions.create_decision]).
 - [`ReasonerRegistration`][core.observation.ReasonerRegistration] —
   A reasoner's identity, gate set, bypass rules, and enforcement profile.
 

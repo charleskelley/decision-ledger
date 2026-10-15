@@ -17,9 +17,9 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 ## 0. End-to-End Walk-Through
 
 ```bash
-# 1. Install the framework and every workspace reasoner and gate (the default
-#    `reasoners` and `gates` dependency groups install ato-reasoner, the rules
-#    gate, and the RAG policy gate, with their entry points)
+# 1. Install the framework and every workspace member: the reasoners
+#    (ato-reasoner, example-reasoner), the gates (rules, RAG policy), and the
+#    MCP integration, with their entry points
 uv sync
 
 # 2. Start Postgres (framework), Elasticsearch (included from
@@ -27,43 +27,92 @@ uv sync
 #    reasoners/account_takeover/compose.yaml)
 docker compose up -d
 
-# 3. Prepare the reasoner: index its policy corpus under reasoner_id
-#    ato-reasoner, and train the XGBoost scorer if the artifact is missing
-make prepare-account_takeover
+# 3. Prepare the reasoners: index each policy corpus into the RAG policy gate
+#    under its reasoner_id, and train ATO's scorer if the artifact is missing
+make prepare-account_takeover prepare-example
 
-# 4. Confirm the plugin is discoverable
+# 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
-# Expected: ['ato-reasoner']
+# Expected: ['ato-reasoner', 'example-reasoner']
 
-# 5. Run the API (application factory; composes every discovered plugin)
-uv run uvicorn --factory app.main:create_app --reload
+# 5. Give the ledger API keys (in .env, or the environment): one per reasoner
+#    and the operator's. Every /api/v1 route needs one in X-DecisionLedger-Key.
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key"
+export DECISIONLEDGER_OPERATOR_KEY=op-key
+
+# 6. Run the ledger API (application factory; serves the framework's routes
+#    only — reasoners run as their own services or in process)
+uv run uvicorn --factory app.main:create_app --reload     # or: make serve
 ```
 
 In a second shell:
 
 ```bash
-# Liveness
+# Liveness (no key)
 curl -s localhost:8000/health
 # Expected: {"status":"ok"}
 
-# One decision through the ATO router: generate a synthetic login event and POST it
+H='X-DecisionLedger-Key: ex-key'
+
+# Record a widget (the example reasoner's low band: low-score → ALLOW)
+uv run python -m example_reasoner sample --band low > /tmp/record.json
+curl -s -X POST localhost:8000/api/v1/decisions -H "$H" \
+  -H 'content-type: application/json' --data @/tmp/record.json
+# Expected: 201, a receipt {"decision_id": ..., "mode": "record",
+#   "decision_action": "ALLOW", "bypass_rule_id": "low-score", "gates": [...],
+#   "registration_version": ...}, and Location: /api/v1/decisions/<id>
+
+# Ask the gates (mid band → the RAG policy gate; calls OpenAI)
+uv run python -m example_reasoner sample --band mid > /tmp/gate.json
+curl -s -X POST localhost:8000/api/v1/decisions -H "$H" \
+  -H 'content-type: application/json' --data @/tmp/gate.json
+
+# Another reasoner's key cannot write this reasoner's decision
+curl -s -X POST localhost:8000/api/v1/decisions -H 'X-DecisionLedger-Key: ato-key' \
+  -H 'content-type: application/json' --data @/tmp/record.json
+# Expected: 403 application/problem+json {"code": "REASONER_MISMATCH", ...}
+
+# Record 1,000 decisions in one request (NDJSON, records only)
+uv run python -m example_reasoner batch --count 1000 > /tmp/widgets.ndjson
+curl -s -X POST localhost:8000/api/v1/decisions:batch -H "$H" \
+  -H 'content-type: application/x-ndjson' --data-binary @/tmp/widgets.ndjson
+# Expected: {"recorded": 1000, "rejected": 0, "results": [...]}
+
+# The bundle, its replay, and the subject's timeline
+curl -s localhost:8000/api/v1/decisions/<decision_id> -H "$H" | python3 -m json.tool | head -40
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay -H "$H"
+# Expected: "matched": true, under the bundle's registration_version
+curl -s localhost:8000/api/v1/entities/<entity_id>/decisions -H "$H"
+# Page with the last item's created_at and decision_id: ?limit=50&before=...&before_id=...
+
+# What the deployment serves: registrations (with versions) and gates
+curl -s localhost:8000/api/v1/reasoners -H "$H"
+curl -s localhost:8000/api/v1/gates -H "$H"
+
+# Resolve a held decision (operator key; ALLOW or BLOCK)
+curl -s -X POST localhost:8000/api/v1/decisions/<held_id>/resolutions \
+  -H 'X-DecisionLedger-Key: op-key' -H 'content-type: application/json' \
+  --data @conformance/examples/resolution.json
+# Errors are RFC 9457 problems with a stable code: 404 DECISION_NOT_FOUND,
+# 409 BUNDLE_SCHEMA_UNSUPPORTED (a bundle written before the submission
+# contract; lookup still returns it), 409 DECISION_ALREADY_RESOLVED, ...
+
+# ATO as its own service (port 8001), submitting to the ledger over HTTP
+ATO_LEDGER_URL=http://localhost:8000 ATO_LEDGER_KEY=ato-key make serve-account_takeover &
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 1 --dry-run \
   | tail -1 > /tmp/ato-event.json
-curl -s -X POST localhost:8000/api/v1/ato/decisions \
+curl -s -X POST localhost:8001/api/v1/ato/decisions \
   -H 'content-type: application/json' --data @/tmp/ato-event.json
 # Expected: {"decision_id": "...", "decision_action": "...", "mode": "record" | "gate",
 #            "bypass_rule_id": "allow-band" | "block-band" | null, "gates": [...], ...}
-# A login in a score band is recorded under that band's bypass rule (the policy
-# gate is "skipped"); one between the bands goes to the policy gate (mode "gate").
+# Without ATO_LEDGER_URL, ATO runs the ledger in its own process (LocalClient).
 
-# Fetch the bundle and replay it (framework routes, work for any reasoner)
-curl -s localhost:8000/api/v1/decisions/<decision_id> | python3 -m json.tool | head -40
-curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
-# Expected: "matched": true (action, every gate's action, and the bypass check)
-# 404 DECISION_NOT_FOUND for an unknown or malformed id; 409 BUNDLE_SCHEMA_UNSUPPORTED
-# for a bundle written before the submission contract (lookup still returns it,
-# with "schema_version": 1); 409 REASONER_NOT_COMPOSED when replaying a bundle
-# whose reasoner is not installed in this deployment
+# The ledger as MCP tools for an agent (stdio)
+DECISIONLEDGER_URL=http://localhost:8000 DECISIONLEDGER_KEY=ex-key uv run decisionledger-mcp
+
+# The HTTP contract suite against this instance
+DECISIONLEDGER_URL=http://localhost:8000 DECISIONLEDGER_KEY=ex-key \
+DECISIONLEDGER_OTHER_KEY=ato-key DECISIONLEDGER_OPERATOR_KEY=op-key make conformance
 
 # Publish 10 baseline_normal events to the ATO Redis stream
 make scenario-account_takeover
@@ -75,7 +124,7 @@ make eval-account_takeover
 make eval-gate-policy_rag REASONER=ato-reasoner
 ```
 
-To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). With none composed, the API still starts, logs `api.no_reasoners`, and serves only the framework routes.
+To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
 
 ---
 

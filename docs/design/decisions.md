@@ -2760,9 +2760,9 @@ not replayable); thresholds in the framework; a separate audit-only mode
 **Status:** Accepted
 **Category:** Pipeline & System Design
 
-> Phase 2 implements the wire schema (below). The HTTP surface, registration
+> Phase 2 implements the wire schema; Phase 3 the HTTP surface, registration
 > as a resource, auth, clients, contract artifacts, conformance, and MCP
-> land in Phase 3, with the rationale in the documentation pass.
+> (both below). The rationale lands in the documentation pass.
 
 **Decision.**
 
@@ -2853,3 +2853,140 @@ not replayable); thresholds in the framework; a separate audit-only mode
 - **Schema-version-1 rows are refused, not converted.** Their reasoner-typed
   event cannot be rebuilt without reasoner code, and no production data
   exists. A local volume keeps its old rows readable (`lookup`, `GET`).
+
+**Implementation (Phase 3, the ledger API).**
+
+- **The ledger serves its own routes only.** `app/main.py:create_app` mounts
+  `GET /health` and the `/api/v1` surface (`app/api/`): `POST /decisions`
+  (one `Submission`, `mode` in the body; 201 with a `DecisionReceipt` and a
+  `Location`, the full bundle at `GET /decisions/{id}`, as DR-16 decided),
+  `POST /decisions:batch` (NDJSON, `mode: record` only; each line decided
+  like a single record, mandatory gates included, and every bundle written
+  in one `executemany`; a bad line is rejected on its own, a line for
+  another reasoner refuses the whole batch), lookup, replay,
+  `POST /decisions/{id}/resolutions` (operator; a terminal `HUMAN` attempt
+  appended to the resolution journal), `GET /entities/{id}/decisions`
+  (newest first; `limit`, `before`, `before_id`), `GET /reasoners`,
+  `GET /reasoners/{id}`, `GET /reasoners/{id}/registrations/{version}`, and
+  `GET /gates` (each gate's kind, determinism, mandate, and `gate_config`
+  JSON schema). It mounts no reasoner router and keeps no reasoner services:
+  `ReasonerPlugin` is now the registration plus `prompts_dir` and
+  `corpus_dir`, and `ReasonerServices` and `app.state.reasoners` are gone.
+- **Operations, not handlers.** Each route calls a plain operation
+  (`create_decision`, `record_batch`, `lookup_decision`, `replay_decision`,
+  `resolve_decision`, `entity_decisions`, `list_reasoners`, `list_gates`)
+  that takes the raw body, the caller's principal, and the
+  `FrameworkServices`, and raises `core.exceptions.LedgerError`.
+  `app/client.py:LocalClient` serializes the same `Submission` and calls the
+  same operations as the trusted in-process principal;
+  `HttpClient` (httpx) calls the routes and raises the same `LedgerError`
+  from the problem document. Both satisfy `LedgerClient` and return the same
+  wire models (`app/api/models.py`). `app/submit.py` splits into `decide`
+  (no write; the batch uses it) and `submit` (`decide` plus the write).
+- **Problems.** Every error is RFC 9457 `application/problem+json` with
+  `type` (`urn:decisionledger:problem:<code>`), `title`, `status`, `detail`,
+  `instance`, a stable `code`, and extension members (a validation `errors`
+  list never echoes the input). FastAPI's own validation errors, routing
+  errors, and unhandled exceptions are rendered the same way. The Phase 2
+  envelope (`{"detail": {"error_code": ...}}`) is gone.
+- **Auth** (`app/auth.py`). `X-DecisionLedger-Key` maps to a principal: a
+  reasoner (writes and reads its own decisions; another tenant's decision
+  reads as 404), the operator (reads everything, resolves, writes nothing),
+  or the trusted in-process caller. Keys come from `DECISIONLEDGER_API_KEYS`
+  (`reasoner_id:key` pairs), a mounted YAML file
+  (`DECISIONLEDGER_API_KEYS_FILE`), and `DECISIONLEDGER_OPERATOR_KEY`, are
+  indexed by SHA-256 digest, and a key given to two principals refuses
+  startup. With no key configured every `/api/v1` route answers 401.
+- **Registration as data.** Registrations come from the installed plugins
+  and the YAML file `DECISIONLEDGER_REGISTRATIONS` (a reasoner registered
+  twice refuses startup with `RegistrationError`), served read-only with
+  their source. `registration_version` is the content address of the
+  canonical registration (sets sorted, 16 hex digits of SHA-256); the
+  bootstrap snapshots every served version into
+  `decisionledger.reasoner_registrations` before the first decision, every
+  bundle records its version, and replay reads that snapshot, so a decision
+  replays under the profile it was made under even after its registration
+  changed or its reasoner left the deployment. A bundle that records no
+  version (Phase 2) replays against the current registration; a recorded
+  version with no snapshot replays only if it is the current one, else 409
+  `REGISTRATION_SNAPSHOT_MISSING`. The gate-set check at startup covers
+  file registrations too.
+- **Reasoners run themselves.** ATO is its own FastAPI service
+  (`ato_reasoner/app.py`, port 8001): `LocalClient.from_settings()` by
+  default, `HttpClient` to `ATO_LEDGER_URL` with `ATO_LEDGER_KEY` when set.
+  `run_ato_decision` takes a `LedgerClient` and returns the receipt with
+  ATO's own step timings; the eval driver and the baseline capture submit
+  through `LocalClient` and read the bundle back. `reasoners/example` is the
+  stub promoted to a documented member (widgets; a heuristic scorer, the RAG
+  policy gate advisory, `low-score`/`high-score` bypass rules, a prompt, a
+  three-document corpus, an eval adapter and datasets, and a CLI);
+  `tests/_stub_reasoner` stays minimal.
+- **Contract artifacts.** `schemas/submission-v2.json` and
+  `schemas/bundle-v2.json` are exported from the models (`app/schemas.py`,
+  `make schemas`); `tests/test_schemas.py` fails on drift. `conformance/` is
+  a black-box pytest suite (HTTP only) with example payloads per route and
+  the example reasoner's registration file, run with `make conformance`
+  against any instance. `integrations/mcp` (`decisionledger-mcp`) serves six
+  tools over `HttpClient` on stdio: `record_decision`, `gate_decision`,
+  `lookup_decision`, `replay_decision`, `list_decisions_for_entity`,
+  `resolve_hold`. `ReasonerContext` documents its fields for an LLM-agent
+  reasoner (model id, prompt digest, tool-trace digest).
+- **Boundary.** The framework names no workspace reasoner (read from the
+  members' pyprojects), mounts no plugin router, and builds no reasoner
+  services; the conformance suite imports nothing but the standard library,
+  `pytest`, `httpx`, and `yaml`; integration members import from `app`
+  only `app.client` and `app.api.models` and publish no plugin; the
+  workspace is `reasoners/*`, `gates/*`, `integrations/*`.
+
+**Judgment calls and deviations (Phase 3).**
+
+- **The write returns a receipt, not the bundle.** DR-16 already decided the
+  primary response stays small; `HttpClient.get_bundle` and
+  `LocalClient.get_bundle` read the full record.
+- **`httpx` and `starlette` join the framework's dependencies.** The plan's
+  layout puts `HttpClient` (httpx) in `app/client.py`, and the problem
+  handler for routing errors imports Starlette's `HTTPException` directly
+  (FastAPI re-exports it only privately).
+- **The bundle's ingestion timestamp is when the ledger received the
+  submission,** and the latency breakdown holds the ledger's own steps:
+  the wire `Submission` carries neither, and `LocalClient` goes through the
+  same serialization. A reasoner reports its own timings (ATO returns
+  them with the receipt).
+- **Reads are tenant-scoped.** DR-31 names only the write rule; a reasoner
+  key reading another reasoner's decision gets 404, so a key cannot probe
+  another tenant's ids.
+- **No idempotency on the wire.** `decision_id` is assigned per call, so a
+  retried POST records twice; `HttpClient` does not retry. Enforcing
+  `(reasoner_id, idempotency_key)` uniqueness is left to a later phase.
+- **The MCP server is hand-rolled** (JSON-RPC 2.0 over stdio, protocol
+  versions 2024-11-05 to 2025-11-25), per plan section 9, rather than
+  generated from the FastAPI app or built on the MCP SDK. The official SDK's
+  client (1.30) interoperates with it.
+- **A gate may say whom it serves** (`app.gates.ReasonerScope`, an optional
+  capability like `ConfigAuthorizer`). The RAG policy gate serves only the
+  reasoners whose prompts and corpus it loaded from their plugins, so a
+  reasoner registered by file cannot bind it; the startup gate-set check now
+  refuses such a deployment instead of letting intake refuse every
+  submission. The registration file therefore serves reasoners whose gates
+  need no per-reasoner assets (rules, lookup, or no RAG gate composed).
+- **Bounded requests.** A submission or resolution body is at most 1 MiB and
+  a batch body 64 MiB (413 `BODY_TOO_LARGE`, refused while streaming), and a
+  batch stops at its 10,000th non-blank line (413 `BATCH_TOO_LARGE`) before
+  it is parsed. Batch lines end at a line feed only (a carriage return is
+  dropped) and are parsed as bytes, so U+2028, U+2029, and U+0085 inside a
+  JSON string do not split a line, and a line that is not UTF-8 is rejected
+  on its own rather than repaired.
+- **The timeline cursor is the order's own key.** Decisions are listed by
+  `(created_at, decision_id)`, newest first, and a page continues from
+  `before` plus `before_id`, so decisions written in the same instant are
+  neither skipped nor repeated.
+- **Hardening from the review round.** Identifiers are bound in canonical
+  UUID form (a `urn:uuid:` spelling is found, never a 500); `LocalClient`
+  checks the timeline's `limit` as the route does; a resolution the journal
+  cannot store is 422; replay of a bundle whose cited version has no
+  snapshot is always `REGISTRATION_SNAPSHOT_MISSING`; a malformed key file
+  is reported by position, never quoting its text; `HttpClient` strips its
+  keys, refuses one a header cannot carry, waits 120 s for a decision (two
+  gate phases) and without a read timeout for a batch; and an unreachable
+  ledger is reported by error type, never by an `httpx` message that could
+  quote the key header.
