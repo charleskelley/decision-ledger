@@ -1,0 +1,7 @@
+{
+  "resolver_id": "analyst-7",
+  "resolution_action": "ALLOW",
+  "note": "Verified with the widget steward; release.",
+  "reviewer_role": "analyst",
+  "reference_ticket_id": "WIDGET-1042"
+}

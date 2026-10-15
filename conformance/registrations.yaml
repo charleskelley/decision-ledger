@@ -1,0 +1,43 @@
+# The example reasoner's registration, for a DecisionLedger instance that does
+# not install the example reasoner's plugin. Point the instance at it:
+#
+#   DECISIONLEDGER_REGISTRATIONS=conformance/registrations.yaml
+#
+# An instance that installs the plugin (a default `uv sync` of this
+# repository) registers it already; listing it here too refuses startup
+# (a reasoner registered twice). The shape of each entry is a
+# ReasonerRegistration as JSON (schemas: GET /api/v1/reasoners).
+registrations:
+- reasoner_id: example-reasoner
+  reasoner_name: Example Reasoner
+  gates:
+  - gate_id: policy
+    mandatory: false
+  bypass_rules:
+  - rule_id: low-score
+    version: '1'
+    description: 'widget_score below 0.2: the widget is steady and aligned; record
+      ALLOW without the policy gate'
+    predicate:
+      kind: compare
+      field: label_value
+      op: lt
+      value: 0.2
+    action: ALLOW
+  - rule_id: high-score
+    version: '1'
+    description: 'widget_score above 0.9: the widget is shaking apart; record BLOCK
+      without the policy gate'
+    predicate:
+      kind: compare
+      field: label_value
+      op: gt
+      value: 0.9
+    action: BLOCK
+  recordable_actions:
+  - ALLOW
+  - BLOCK
+  novel_entity_feature: thin_history
+  jurisdiction_conflict_groups:
+  - - REGION_A
+  - - REGION_B
