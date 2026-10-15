@@ -21,6 +21,10 @@ dict and answers the store's statements the way psycopg would:
 - ``write_many()`` checks every bundle, then sends them in one
   ``executemany``; ``entity_decisions()`` lists a subject's rows, newest
   first, filtered by tenant and paged by ``before``.
+- The subject column is the bundle's resolved identity (DR-32); a newly
+  written bundle whose identity relates its subject opens those links in the
+  membership projection once (a rewrite opens nothing), and a subject's
+  timeline unions the ids merged with it and, on request, related subjects.
 - Registration snapshots are written once per version and reload equal.
 - ``recent_recorded()`` samples a tenant's recorded v2 bundles, newest first,
   scoped by ``since``, and skips unloadable rows.
@@ -31,6 +35,7 @@ dict and answers the store's statements the way psycopg would:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +92,7 @@ class _FakeCursor:
     def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
         self._rows: list[tuple[Any, ...]] = []
+        self._sets: list[list[tuple[Any, ...]]] = []
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -101,12 +107,28 @@ class _FakeCursor:
             self._conn.fail_next = False
             raise RuntimeError("simulated database error")
         text = " ".join(query.split())
+        self._rows = []
         if text.startswith("INSERT INTO decisionledger.decision_bundles"):
             decision_id, reasoner_id, entity, created, action, version, bundle = params
-            self._conn.rows.setdefault(
-                decision_id,
-                _Row(reasoner_id, version, bundle, created, str(entity), action),
-            )
+            if decision_id not in self._conn.rows:
+                self._conn.rows[decision_id] = _Row(
+                    reasoner_id, version, bundle, created, str(entity), action
+                )
+                self._rows = [(decision_id,)]  # RETURNING decision_id
+        elif text.startswith("INSERT INTO decisionledger.entity_membership"):
+            subject, related, relationship, since = params
+            link = (subject, related, relationship)
+            if not any(m[:3] == link and m[4] is None for m in self._conn.memberships):
+                self._conn.memberships.append(
+                    (subject, related, relationship, since, None)
+                )
+        elif text.startswith("SELECT subject_entity_id, related_entity_id"):
+            keys, _same = params
+            self._rows = [
+                (uuid.UUID(s), uuid.UUID(r), t, since, until)
+                for s, r, t, since, until in self._conn.memberships
+                if until is None and (s in keys or r in keys)
+            ]
         elif text.startswith("INSERT INTO decisionledger.reasoner_registrations"):
             reasoner_id, version, registration = params
             self._conn.registrations.setdefault(
@@ -124,11 +146,11 @@ class _FakeCursor:
                 if rid == params[0]
             ]
         elif text.startswith("SELECT decision_id, reasoner_id, entity_id, created_at"):
-            entity_id, reasoner_id, _same, before, _b2, _b3, cursor, _c2, limit = params
+            ids, reasoner_id, _same, before, _b2, _b3, cursor, _c2, limit = params
             matches = [
                 (decision_id, row)
                 for decision_id, row in self._conn.rows.items()
-                if row.entity_id == entity_id
+                if row.entity_id in ids
                 and (reasoner_id is None or row.reasoner_id == reasoner_id)
                 and (
                     before is None
@@ -143,7 +165,9 @@ class _FakeCursor:
             matches.sort(key=lambda item: (item[1].created_at, item[0]), reverse=True)
             self._rows = []
             for decision_id, row in matches[:limit]:
-                submission = json.loads(row.bundle).get("submission") or {}
+                stored = json.loads(row.bundle)
+                submission = stored.get("submission") or {}
+                identity = stored.get("identity") or {}
                 self._rows.append(
                     (
                         decision_id,
@@ -154,7 +178,7 @@ class _FakeCursor:
                         row.schema_version,
                         submission.get("mode"),
                         submission.get("event_id"),
-                        submission.get("entity_type"),
+                        identity.get("entity_type") or submission.get("entity_type"),
                     )
                 )
         elif text.startswith("INSERT INTO decisionledger.replay_logs"):
@@ -181,10 +205,26 @@ class _FakeCursor:
         else:  # pragma: no cover - guards against an unexpected statement
             raise AssertionError(f"unexpected statement: {query!r}")
 
-    def executemany(self, query: str, params_seq: list[tuple[Any, ...]]) -> None:
+    def executemany(
+        self,
+        query: str,
+        params_seq: list[tuple[Any, ...]],
+        *,
+        returning: bool = False,
+    ) -> None:
         self._conn.executemany_calls += 1
+        results: list[list[tuple[Any, ...]]] = []
         for params in params_seq:
             self.execute(query, params)
+            results.append(self._rows)
+        self._rows = results[0] if returning and results else []
+        self._sets = results[1:] if returning else []
+
+    def nextset(self) -> bool | None:
+        if not self._sets:
+            return None
+        self._rows = self._sets.pop(0)
+        return True
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._rows[0] if self._rows else None
@@ -205,6 +245,7 @@ class _FakeConn:
         self.rows: dict[str, _Row] = {}
         self.replay_logs: list[tuple[Any, ...]] = []
         self.registrations: dict[tuple[str, str], tuple[Any, datetime]] = {}
+        self.memberships: list[tuple[Any, ...]] = []
         self.statements = 0
         self.executemany_calls = 0
         self.fail_next = False
@@ -759,3 +800,96 @@ def test_entity_decisions_lists_a_subjects_rows_newest_first(submission):
         entity_id, before=first.created_at, before_id=_OTHER_ID
     )
     assert [r.decision_id for r in tied] == [_DECISION_ID]
+
+
+# ---------------------------------------------------------------------------
+# The identity layer: subject column, relationships, merged timelines (DR-32)
+# ---------------------------------------------------------------------------
+
+
+def _resolved_bundle(
+    submission: Submission, decision_id: str, widget: str = "widget-12345"
+) -> DecisionBundle:
+    """A record whose subject the stub resolver established (owner + fleet)."""
+    from core.identity import NativeSubject
+    from tests._stub_resolver.plugin import PLUGIN as RESOLVER
+
+    native = NativeSubject(native_namespace="widget-registry", native_subject_id=widget)
+    named = submission.model_copy(
+        update={"native_subject": native, "event_id": f"evt-{decision_id[:4]}"}
+    )
+    identity = RESOLVER.build(None).resolve("widget-registry", widget)  # type: ignore[arg-type]
+    assert identity is not None
+    return _record_bundle(named, decision_id=decision_id).model_copy(
+        update={"submission": named, "identity": identity}
+    )
+
+
+def test_the_subject_column_is_the_resolved_identity(submission):
+    conn = _FakeConn()
+    bundle = _resolved_bundle(submission, _DECISION_ID)
+    _store(conn).write(bundle)
+    assert conn.rows[_DECISION_ID].entity_id == str(bundle.entity_id)
+    assert bundle.entity_id != submission.entity_id
+
+
+def test_a_new_bundle_opens_its_relationships_once(submission):
+    from tests._stub_resolver.plugin import fleet_id
+
+    conn = _FakeConn()
+    store = _store(conn)
+    first = _resolved_bundle(submission, _DECISION_ID)
+    store.write(first)
+    store.write(first)  # a rewrite of the same decision opens nothing
+    store.write(_resolved_bundle(submission, _OTHER_ID, widget="widget-67890"))
+    assert conn.memberships == [
+        (
+            str(first.entity_id),
+            str(fleet_id("fleet-north")),
+            "fleet",
+            first.identity.provenance.resolved_at,  # type: ignore[union-attr]
+            None,
+        )
+    ]
+
+
+def test_write_many_opens_the_relationships_of_the_bundles_it_inserted(submission):
+    conn = _FakeConn()
+    store = _store(conn)
+    old = _resolved_bundle(submission, _DECISION_ID)
+    store.write(old)
+    conn.memberships.clear()  # the projection was rebuilt without it
+    fresh = _resolved_bundle(submission, _OTHER_ID, widget="widget-55555")
+    store.write_many([old, fresh])
+    assert [m[0] for m in conn.memberships] == [str(fresh.entity_id)]
+
+
+def test_a_timeline_unions_merged_ids_and_related_subjects(submission):
+    from tests._stub_resolver.plugin import fleet_id, owner_id
+
+    conn = _FakeConn()
+    store = _store(conn)
+    store.write(_resolved_bundle(submission, _DECISION_ID))
+    store.write(_resolved_bundle(submission, _OTHER_ID, widget="widget-55555"))
+    stray_id = "44444444-4444-4444-4444-444444444444"
+    stray = _record_bundle(submission, decision_id=stray_id)
+    store.write(stray)
+    owner = owner_id("owner-7")
+    conn.memberships.append(
+        (str(owner), str(submission.entity_id), None, datetime.now(UTC), None)
+    )
+
+    merged = store.entity_decisions(str(owner))
+    assert {r.decision_id for r in merged} == {_DECISION_ID, stray.decision_id}
+    assert {r.relationship_type for r in merged} == {None}
+    assert {r.entity_type for r in merged} == {"owner", "widget"}
+
+    group = store.entity_decisions(
+        str(fleet_id("fleet-north")), include_related="fleet"
+    )
+    assert {r.decision_id for r in group} == {
+        _DECISION_ID,
+        _OTHER_ID,
+        stray.decision_id,
+    }
+    assert {r.relationship_type for r in group} == {"fleet"}

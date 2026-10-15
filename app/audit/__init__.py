@@ -12,10 +12,14 @@ agnostic — non-deterministic gates (like LLMs at any temperature) cannot be
 reproduced from inputs alone, so the bundle caches the outputs instead. The
 enforcement profile comes from the snapshot of the registration version the
 bundle cites (``RegistrationSnapshots``), and human resolutions of held
-decisions are appended to the ``ResolutionJournal``.
+decisions are appended to the ``ResolutionJournal``. Changes to the identity
+graph (merges, detaches, relationships) are appended to the
+``EntityJournal``, which rebuilds the membership projection a subject's
+timeline reads (DR-32).
 """
 
 from app.audit.bundle import build_bundle
+from app.audit.entity_journal import EntityJournal
 from app.audit.registrations import RegistrationSnapshot, RegistrationSnapshots
 from app.audit.resolution_journal import ResolutionJournal
 from app.audit.schema import apply_canonical_schema
@@ -33,6 +37,7 @@ from app.audit.store import (
 __all__ = [
     "BundleStore",
     "DecisionSummary",
+    "EntityJournal",
     "GateReplay",
     "RecordedSample",
     "RegistrationSnapshot",
