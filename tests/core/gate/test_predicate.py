@@ -99,6 +99,13 @@ def test_int_and_float_compare_as_numbers():
     assert _holds(Compare(field="feature_set.ratio", op="lt", value=1))
 
 
+def test_an_integer_too_large_for_a_float_orders_exactly():
+    subject = _subject(feature_set={"count": 10**400})
+    assert _holds(Compare(field="feature_set.count", op="gt", value=5), subject)
+    assert _holds(Compare(field="feature_set.count", op="ge", value=1e308), subject)
+    assert not _holds(Compare(field="feature_set.count", op="lt", value=0.5), subject)
+
+
 # ---------------------------------------------------------------------------
 # Compare — kind separation
 # ---------------------------------------------------------------------------

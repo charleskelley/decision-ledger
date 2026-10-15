@@ -1,22 +1,22 @@
 """ReasonerContext — generic lattice for domain reasoner evidence.
 
-ReasonerContext is the framework's domain-agnostic contract for what any
-domain reasoner must provide when submitting an Observation. It decouples
+ReasonerContext is the framework's domain-agnostic contract for the evidence
+any domain reasoner provides with a ``Submission``. It decouples
 the framework from upstream model internals: the framework stores the
 context verbatim in the DecisionBundle and uses only ``reasoner_id``,
 ``model_version``, and ``inference_latency_ms`` for telemetry. Label
 semantics and feature interpretation are the domain's concern.
 
 Domain assemblers translate internal model output types into ReasonerContext
-before populating the outbound Observation. This translation step is the
-handoff boundary between domain and framework.
+before building the outbound submission. This translation step is the
+handoff boundary between domain and framework. Gates read it, and a recorded
+decision's bypass rule is evaluated against its ``label_value`` and
+``feature_set``.
 
-Extension point — OperatingMode:
-    A future ``OperatingMode`` enum (GOVERNED | AUDIT_ONLY) will be added here
-    when multi-tenant registration is implemented. AUDIT_ONLY mode allows
-    domain reasoners that embed policy rules upstream (or have no gate
-    requirement) to use DecisionLedger as a pure audit record system without
-    providing GateContext. In the reference MVP, all observations are GOVERNED.
+A reasoner that decides upstream does not need a separate audit-only mode:
+it *records* its decisions (``Submission.mode == "record"``), citing one of
+its registered bypass rules, and the ledger runs only its mandatory gates
+(DR-30). Every submission carries a ReasonerContext either way.
 """
 
 from __future__ import annotations
@@ -51,7 +51,9 @@ class Contribution(BaseModel):
             Sign and magnitude semantics vary by method — see ``method``.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     feature_name: str
     feature_value: float
@@ -103,7 +105,9 @@ class AttributionSummary(BaseModel):
             applies, or to supplement them with domain context.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     feature_contributions: list[Contribution] | None = None
     feature_importance: dict[str, float] | None = None
@@ -114,9 +118,9 @@ class ReasonerContext(BaseModel):
     """Generic lattice for domain reasoner evidence submitted to DecisionLedger.
 
     All fields are domain-agnostic. Domain assemblers translate their internal
-    model output types into this contract before submitting an Observation to
-    the framework. The framework stores ReasonerContext verbatim in the
-    DecisionBundle.
+    model output types into this contract before submitting to the
+    framework. The framework stores ReasonerContext verbatim in the
+    DecisionBundle (inside the stored submission).
 
     ``label_type``, ``label_name``, and ``label_value`` together describe the
     model's prediction in a self-documenting way that is interpretable without
@@ -163,7 +167,9 @@ class ReasonerContext(BaseModel):
             decisions in the bundle.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     # Reasoner identity
     reasoner_id: str

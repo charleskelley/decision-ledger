@@ -42,7 +42,7 @@ feature, not a predicate.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
@@ -110,7 +110,9 @@ class Compare(BaseModel):
             list of scalars for ``in`` / ``not_in``, any scalar otherwise.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     kind: Literal["compare"] = "compare"
     field: str
@@ -154,7 +156,9 @@ class AllOf(BaseModel):
         predicates: Children, evaluated left to right with short-circuit.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     kind: Literal["all"] = "all"
     predicates: list[Predicate] = Field(min_length=1)
@@ -168,7 +172,9 @@ class AnyOf(BaseModel):
         predicates: Children, evaluated left to right with short-circuit.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     kind: Literal["any"] = "any"
     predicates: list[Predicate] = Field(min_length=1)
@@ -182,7 +188,9 @@ class Not(BaseModel):
         predicate: The negated child.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     kind: Literal["not"] = "not"
     predicate: Predicate
@@ -311,8 +319,10 @@ def _compare(node: Compare, actual: Scalar) -> bool:
         msg = f"{node.field} is {actual!r}; op {op!r} needs a number"
         raise PredicateError(msg)
     # Both operands are numbers here: the model validator guarantees a
-    # numeric ``expected`` for ordering operators.
-    left, right = float(actual), float(expected)
+    # numeric ``expected`` for ordering operators. Python orders ints and
+    # floats exactly, so neither is converted (``float()`` of an int too large
+    # for a float would overflow).
+    left, right = cast("float", actual), cast("float", expected)
     if op == "lt":
         return left < right
     if op == "le":

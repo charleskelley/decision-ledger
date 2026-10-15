@@ -6,25 +6,28 @@ Package structure:
 
 Top-level modules (framework output artifacts and vocabulary):
     actions.py:    DecisionAction — the framework's decision-time action vocabulary.
-    routes.py:     GateRoute — gate path enum produced by the reasoner,
-                   consumed by the gate. Lives at the root because both
-                   ``observation/`` and ``gate/`` need it; placing it in
-                   either subpackage forces a cross-subpackage import.
-    bundle.py:     DecisionBundle and bundle-composition types.
+    submission.py: Submission — the concrete wire contract a reasoner hands the
+                   ledger to record or to gate a decision (DR-30, DR-31), with
+                   its bypass citation, the reserved NativeSubject, and the
+                   pure intake and bypass-rule checks. Lives at the root
+                   because it composes ``observation/`` types and is carried
+                   into the gate layer.
+    bundle.py:     DecisionBundle (schema version 2) and GateRecord.
     gate_request.py: GateRequest — what the framework hands a gate. Lives at
-                   the root because it carries the Observation into the gate
+                   the root because it carries the Submission into the gate
                    layer, and ``gate/`` never imports ``observation/``.
     enforcement.py: EnforcementDecision — enforcement's typed output.
     exceptions.py: Framework exception types.
 
 Subpackages (self-contained functional concerns):
-    observation/   Everything a domain reasoner must supply as the intake
-                   contract: Observation protocol, GateContext, ReasonerContext,
-                   registration contracts, and the intake validator.
+    observation/   What a domain reasoner supplies and what the ledger knows
+                   about it: ReasonerContext, GateContext, and the
+                   registration contracts (GateBinding, BypassRule,
+                   ReasonerRegistration).
     gate/          Universal gate contracts (GateInput, the open GateOutput and
-                   EvidenceRef, GateVerdict) and the predicate language. A
-                   gate's own typed models live in that gate's workspace
-                   member, never here (DR-28).
+                   EvidenceRef, GateVerdict), the predicate language, and the
+                   conjunction combinator. A gate's own typed models live in
+                   that gate's workspace member, never here (DR-28).
     resolution/    ResolutionAttempt subclasses — the append-only resolution
                    log for non-terminal decisions (CHALLENGE, HOLD).
     eval/          Evaluation dimension contracts and metric interfaces.

@@ -46,7 +46,9 @@ class GateVerdict(BaseModel):
             describes the specific concern requiring human judgment.
     """
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(
+        strict=True, frozen=True, extra="forbid", allow_inf_nan=False
+    )
 
     gate_id: str
     permitted_actions: list[DecisionAction]
