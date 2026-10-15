@@ -14,6 +14,9 @@ Public API:
                           recorded without the advisory gates.
     ReasonerRegistration: Framework declaration of a known domain reasoner.
     ReasonerRegistry:     Protocol for reasoner registries.
+    registration_version: Content address of a registration (what every
+                          bundle snapshots, DR-31).
+    canonical_registration: A registration's canonical JSON form.
 """
 
 from core.observation.gate_context import GateContext
@@ -28,6 +31,8 @@ from core.observation.registration import (
     GateBinding,
     ReasonerRegistration,
     ReasonerRegistry,
+    canonical_registration,
+    registration_version,
 )
 
 __all__ = [
@@ -40,4 +45,6 @@ __all__ = [
     "ReasonerContext",
     "ReasonerRegistration",
     "ReasonerRegistry",
+    "canonical_registration",
+    "registration_version",
 ]

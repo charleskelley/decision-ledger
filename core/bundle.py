@@ -4,10 +4,11 @@ One bundle per decision, immutable once written. Version 2 (DR-29 to DR-31)
 stores the reasoner's ``Submission`` verbatim instead of a reasoner-typed
 event, and one ``GateRecord`` per gate in the decision's gate set instead of
 a single gate's input and output, so no reasoner code, no gate, and no
-corpus is needed to audit or replay a decision. Replay still reads one thing
-outside the bundle: the reasoner's registration, for its enforcement profile
-(the novel-entity feature and the jurisdiction conflict groups), until the
-registration is snapshotted (``registration_version``, DR-31 Phase 3).
+corpus is needed to audit or replay a decision. The enforcement profile
+replay needs (the novel-entity feature and the jurisdiction conflict
+groups) comes from the snapshot of the registration version the bundle
+records (``registration_version``, DR-31), which the ledger keeps for every
+version it serves.
 """
 
 from __future__ import annotations
@@ -138,8 +139,9 @@ class DecisionBundle(BaseModel):
             ``raw_event``.
         idempotency_key: Deduplication key (the event id unless the caller
             supplied one).
-        ingestion_timestamp: When the event entered the reasoner's
-            pipeline.
+        ingestion_timestamp: When the ledger received the submission (over
+            HTTP or through a client; the event's own time is
+            ``submission.timestamp``).
         gates: One record per gate in the decision's gate set, mandatory
             gates first, each in gate-set order.
         decision_action: The action this decision produced.
@@ -164,14 +166,17 @@ class DecisionBundle(BaseModel):
         other_bypass_checks: For a record, every other rule the reasoner
             registers, as evaluated (snapshots), so replay can re-check that
             no stricter rule also held; empty for a gated decision.
-        registration_version: Reserved for the registration snapshot
-            (DR-31): the version of the reasoner's registration in effect at
-            decision time. ``None`` until registrations become versioned
-            resources.
-        latency_breakdown: Per-component duration in milliseconds: the
-            reasoner's upstream steps, ``gate_ms`` (wall-clock time of the
-            whole gate phase; each gate's own time is in its record), and
-            ``enforcement_ms``.
+        registration_version: The version (content address) of the
+            reasoner's registration the decision was made under (DR-31).
+            Replay enforces against that version's snapshot, served at
+            ``GET /api/v1/reasoners/{reasoner_id}/registrations/{version}``.
+            ``None`` only on a bundle written before registrations were
+            versioned.
+        latency_breakdown: The ledger's own steps in milliseconds:
+            ``gate_ms`` (wall-clock time of the whole gate phase; each
+            gate's own time is in its record) and ``enforcement_ms``, plus
+            any step an in-process caller of ``submit`` reported. A reasoner
+            reports its own timings itself.
     """
 
     model_config = ConfigDict(
