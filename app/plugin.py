@@ -18,19 +18,22 @@ Three types make up the seam:
   stores, ML scorers, its own queues). The framework only knows how to
   ``close()`` it.
 - ``ReasonerPlugin`` — the plugin object itself: the registration record,
-  the FastAPI router, the prompt and corpus directories, the raw-event
-  deserializer used by replay, and the ``build_services`` factory.
+  the FastAPI router, the prompt and corpus directories, and the
+  ``build_services`` factory. Replay needs no reasoner code: a bundle stores
+  the reasoner's ``Submission``, a concrete framework type, with its own
+  event as opaque JSON (DR-31). It does need the reasoner's registration
+  composed, for its enforcement profile.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from app.gates import close_gates
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     import psycopg
@@ -40,14 +43,6 @@ if TYPE_CHECKING:
     from app.gates import ComposedGate
     from app.settings import FrameworkSettings
     from core.observation import ReasonerRegistration, ReasonerRegistry
-
-#: Deserializer signature for a reasoner's raw event payload. The bundle store
-#: calls this on the JSON dict stored in ``bundle["raw_event"]`` to reconstitute
-#: a typed Observation for replay. The return is typed loosely as ``Any``
-#: because Pydantic ``computed_field`` properties make concrete event classes
-#: structurally — but not nominally — compatible with the ``Observation``
-#: Protocol; downstream code duck-types on the protocol.
-RawEventFactory = Callable[[dict[str, Any]], Any]
 
 
 @dataclass(frozen=True)
@@ -67,8 +62,9 @@ class FrameworkServices:
         reasoners: The composed reasoner plugins, in composition order.
             Gates read reasoner-shipped assets from them (a retrieving gate
             loads each reasoner's ``prompts_dir`` and ``corpus_dir``).
-        gates: Composed gates keyed by ``gate_id``. Empty while the gates
-            themselves are being built: a gate never reaches another gate.
+        gates: Composed gates keyed by ``gate_id`` (each flagged when the
+            deployment mandates it). Empty while the gates themselves are
+            being built: a gate never reaches another gate.
     """
 
     settings: FrameworkSettings
@@ -109,22 +105,19 @@ class ReasonerPlugin(Protocol):
 
     Attributes:
         registration: The reasoner's ``ReasonerRegistration`` — identity,
-            allowed gates, and enforcement profile. Its ``reasoner_id`` must
-            equal the entry-point name.
+            gate set, bypass rules, and enforcement profile. Its
+            ``reasoner_id`` must equal the entry-point name.
         router: FastAPI router mounted by ``create_app``.
         prompts_dir: Directory of ``*.yaml`` prompt templates an LLM-backed
             gate loads for this reasoner.
         corpus_dir: Directory of Markdown policy documents a retrieving gate
             indexes for this reasoner.
-        raw_event_factory: Deserializer from the stored ``raw_event`` JSON
-            dict back to the reasoner's typed Observation, used by replay.
     """
 
     registration: ReasonerRegistration
     router: APIRouter
     prompts_dir: Path
     corpus_dir: Path
-    raw_event_factory: RawEventFactory
 
     def build_services(self, framework: FrameworkServices) -> ReasonerServices:
         """Build this reasoner's request-time services against shared infra.

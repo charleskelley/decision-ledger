@@ -87,7 +87,7 @@ def discover_plugins(
                 ep.name,
                 f"object {obj!r} loaded from {ep.value!r} does not satisfy the "
                 "ReasonerPlugin protocol (registration, router, prompts_dir, "
-                "corpus_dir, raw_event_factory, build_services)",
+                "corpus_dir, build_services)",
             )
 
         reasoner_id = obj.registration.reasoner_id

@@ -38,27 +38,23 @@ from app.gates import ComposedGate
 from app.plugin import FrameworkServices
 from app.settings import FrameworkSettings
 from core.exceptions import GatePluginError
-from tests._fake_gate.plugin import FakeGate, FakeGatePlugin
+from tests._fake_gate.plugin import FakeGate, FakeGatePlugin, FakeLookupGatePlugin
 from tests._stub_reasoner.plugin import PLUGIN
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from core.observation import ReasonerRegistry
 
 
 class _RecordingStore(BundleStore):
     """``BundleStore`` that remembers the constructor arguments it received."""
 
-    last_factories: Mapping[str, Any] | None = None
+    last_conn: Any = None
     last_registry: ReasonerRegistry | None = None
 
-    def __init__(self, conn: Any, *, raw_event_factories: Any, registry: Any) -> None:
-        super().__init__(
-            conn, raw_event_factories=raw_event_factories, registry=registry
-        )
-        _RecordingStore.last_factories = raw_event_factories
+    def __init__(self, conn: Any, *, registry: Any) -> None:
+        super().__init__(conn, registry=registry)
+        _RecordingStore.last_conn = conn
         _RecordingStore.last_registry = registry
 
 
@@ -80,8 +76,9 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     pg_conn = MagicMock(name="pg_conn")
     pg_conn.close.side_effect = lambda: calls.append("pg_conn.close")
 
-    def _connect(dsn: str) -> MagicMock:
+    def _connect(dsn: str, *, autocommit: bool = False) -> MagicMock:
         calls.append(f"connect:{dsn}")
+        calls.append(f"autocommit:{autocommit}")
         return pg_conn
 
     def _apply_schema(conn: Any) -> None:
@@ -91,7 +88,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(bootstrap.psycopg, "connect", _connect)
     monkeypatch.setattr(bootstrap, "apply_canonical_schema", _apply_schema)
     monkeypatch.setattr(bootstrap, "BundleStore", _RecordingStore)
-    _RecordingStore.last_factories = None
+    _RecordingStore.last_conn = None
     _RecordingStore.last_registry = None
     return {"calls": calls, "pg_conn": pg_conn}
 
@@ -127,21 +124,45 @@ def test_bootstrap_opens_only_postgres_and_applies_the_canonical_ddl(
 
     assert fakes["calls"] == [
         f"connect:{settings.postgres_dsn}",
+        "autocommit:True",
         "apply_canonical_schema",
     ]
 
 
-def test_bootstrap_gives_the_store_one_raw_event_factory_per_reasoner(
+def test_the_store_gets_the_autocommit_connection_and_needs_no_reasoner_code(
     fakes: dict[str, Any], settings: FrameworkSettings
 ):
+    # Replay runs from the bundle: the store takes the connection and the
+    # registry, and nothing from a reasoner plugin.
     bootstrap.build_framework_services(settings, [PLUGIN], [])
+    assert _RecordingStore.last_conn is fakes["pg_conn"]
+    assert not hasattr(PLUGIN, "raw_event_factory")
 
-    assert _RecordingStore.last_factories is not None
-    assert set(_RecordingStore.last_factories) == {STUB_REGISTRATION.reasoner_id}
-    assert (
-        _RecordingStore.last_factories[STUB_REGISTRATION.reasoner_id]
-        is PLUGIN.raw_event_factory
+
+def test_the_deployments_mandatory_gates_are_composed_flagged(fakes: dict[str, Any]):
+    settings = FrameworkSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        decisionledger_mandatory_gates=" fake-lookup , ",
     )
+    services = bootstrap.build_framework_services(
+        settings, [PLUGIN], [FakeGatePlugin(), FakeLookupGatePlugin()]
+    )
+    assert {g: c.mandatory for g, c in services.gates.items()} == {
+        "fake": False,
+        "fake-lookup": True,
+    }
+
+
+def test_a_mandated_gate_the_deployment_does_not_compose_fails_startup(
+    fakes: dict[str, Any],
+):
+    settings = FrameworkSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        decisionledger_mandatory_gates="missing",
+    )
+    with pytest.raises(GatePluginError, match="does not compose"):
+        bootstrap.build_framework_services(settings, [PLUGIN], [FakeGatePlugin()])
+    assert fakes["calls"][-1] == "pg_conn.close"
 
 
 def test_bootstrap_registry_holds_each_plugin_registration(
@@ -159,7 +180,6 @@ def test_bootstrap_with_no_plugins_builds_an_empty_registry_store_and_gate_set(
     services = bootstrap.build_framework_services(settings, [], [])
 
     assert not services.registry.is_registered(STUB_REGISTRATION.reasoner_id)
-    assert _RecordingStore.last_factories == {}
     assert dict(services.gates) == {}
 
 

@@ -14,14 +14,14 @@ import pytest
 
 from app.reasoner_registry import StaticReasonerRegistry
 from core.exceptions import UnregisteredReasonerError
-from core.observation import ReasonerRegistration, ReasonerRegistry
+from core.observation import GateBinding, ReasonerRegistration, ReasonerRegistry
 
 
 def _reg(reasoner_id: str) -> ReasonerRegistration:
     return ReasonerRegistration(
         reasoner_id=reasoner_id,
         reasoner_name=f"Reasoner {reasoner_id}",
-        allowed_gate_ids=frozenset({"policy"}),
+        gates=(GateBinding(gate_id="policy"),),
     )
 
 

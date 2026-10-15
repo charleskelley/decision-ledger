@@ -8,16 +8,14 @@ members keep their own fixtures under ``gates/<name>/tests``).
 
 All fixtures produce valid, fully-constructed objects. Tests that need an
 edge-case variant build one via ``model_copy(update=...)`` or construct the
-deviation directly.
-
-Reasoner-specific trees (``tests/reasoner/``) keep their own ``conftest.py``
-with that reasoner's fixtures; pytest's conftest scoping means those never
-shadow these for framework tests.
+deviation directly. The stub reasoner binds one advisory gate, the scripted
+fake gate ``"fake"``, so the baseline submissions address exactly that gate.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -32,9 +30,12 @@ from core.observation import (
     ReasonerContext,
     ReasonerRegistration,
 )
-from core.routes import GateRoute
+from tests._stub_reasoner.assembler import build_submission
 from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.registry import STUB_REGISTRATION
+
+if TYPE_CHECKING:
+    from core.submission import Submission
 
 # ---------------------------------------------------------------------------
 # Stub reasoner identity
@@ -54,7 +55,7 @@ def stub_registry(stub_registration: ReasonerRegistration) -> StaticReasonerRegi
 
 
 # ---------------------------------------------------------------------------
-# Observation building blocks
+# Submission building blocks
 # ---------------------------------------------------------------------------
 
 
@@ -71,20 +72,8 @@ def signal() -> Contribution:
 
 @pytest.fixture
 def gate_context() -> GateContext:
-    """Policy-gate dispatch envelope using the stub template and ``REGION_A``."""
-    return GateContext(
-        gate_id="policy",
-        gate_config={
-            "template_id": "stub-v1",
-            "template_vars": {
-                "widget_score": "0.150",
-                "thin_history": "False",
-                "region": "REGION_A",
-            },
-            "jurisdictions": ["REGION_A"],
-            "risk_tier": "STANDARD",
-        },
-    )
+    """The envelope for the stub's bound gate (the fake gate, default script)."""
+    return GateContext(gate_id="fake", gate_config={})
 
 
 @pytest.fixture
@@ -109,19 +98,34 @@ def reasoner_context(signal: Contribution) -> ReasonerContext:
 
 
 @pytest.fixture
-def observation(
-    gate_context: GateContext, reasoner_context: ReasonerContext
-) -> StubEvent:
-    """A fully assembled fast-path (``FAST_PATH_ALLOW``) stub observation."""
+def stub_event() -> StubEvent:
+    """The stub event every baseline submission is about."""
     return StubEvent(
         event_id="evt-test-001",
         timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         widget_id="widget-12345",
-        route=GateRoute.FAST_PATH_ALLOW,
-        reasoner_context=reasoner_context,
-        fast_path_rationale="widget_score=0.150 < 0.20 → FAST_PATH_ALLOW",
-        gate_context=gate_context,
     )
+
+
+@pytest.fixture
+def submission(
+    stub_event: StubEvent,
+    reasoner_context: ReasonerContext,
+    gate_context: GateContext,
+) -> Submission:
+    """A recorded stub submission: ``widget_score`` 0.15 → ``low-score`` → ALLOW."""
+    return build_submission(stub_event, reasoner_context, gate_contexts=[gate_context])
+
+
+@pytest.fixture
+def gated_submission(
+    stub_event: StubEvent,
+    reasoner_context: ReasonerContext,
+    gate_context: GateContext,
+) -> Submission:
+    """A gate-mode stub submission: ``widget_score`` 0.55, between the bands."""
+    context = reasoner_context.model_copy(update={"label_value": 0.55})
+    return build_submission(stub_event, context, gate_contexts=[gate_context])
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +135,9 @@ def observation(
 
 @pytest.fixture
 def gate_verdict() -> GateVerdict:
-    """A confident ALLOW verdict from the policy gate (universal fields only)."""
+    """A confident ALLOW verdict from the fake gate (universal fields only)."""
     return GateVerdict(
-        gate_id="policy",
+        gate_id="fake",
         permitted_actions=[DecisionAction.ALLOW],
         required_controls=[],
         confidence=0.92,
@@ -144,11 +148,11 @@ def gate_verdict() -> GateVerdict:
 
 @pytest.fixture
 def gate_output(gate_verdict: GateVerdict) -> GateOutput:
-    """A non-deterministic policy-gate output: the ALLOW verdict, one ``REGION_A``
+    """A non-deterministic fake-gate output: the ALLOW verdict, one ``REGION_A``
     evidence reference (so the jurisdiction tier runs and finds no conflict),
     and a small opaque extension."""
     return GateOutput(
-        gate_id="policy",
+        gate_id="fake",
         deterministic=False,
         verdict=gate_verdict,
         evidence=(

@@ -4,7 +4,8 @@
 reasoner plugins, and the discovered gate plugins into one
 ``FrameworkServices`` object: the Postgres connection (with the canonical
 DDL applied), the bundle store, the reasoner registry, the composed reasoner
-plugins, and the composed gates. The FastAPI lifespan (``app/main.py``) and
+plugins, and the composed gates (the ones ``DECISIONLEDGER_MANDATORY_GATES``
+names flagged mandatory). The FastAPI lifespan (``app/main.py``) and
 the eval harness drivers both call it, so there is exactly one description
 of how the framework is wired.
 
@@ -55,8 +56,8 @@ def build_framework_services(
     Args:
         settings: Connection parameters and credentials.
         plugins: The reasoner plugins this deployment composes. Their
-            registrations form the reasoner registry and their raw-event
-            factories are handed to the bundle store for replay.
+            registrations form the reasoner registry the store replays
+            against.
         gate_plugins: The gate plugins this deployment composes. ``None``
             (the default) discovers every plugin installed under the
             ``decisionledger.gates`` entry-point group; tests pass an
@@ -67,23 +68,22 @@ def build_framework_services(
         releases the Postgres connection.
 
     Raises:
-        GatePluginError: A gate plugin is malformed or cannot be built.
+        GatePluginError: A gate plugin is malformed or cannot be built, or
+            ``DECISIONLEDGER_MANDATORY_GATES`` names a gate that is not
+            composed.
     """
     composed_gate_plugins = (
         list(gate_plugins) if gate_plugins is not None else discover_gates()
     )
 
-    pg_conn = psycopg.connect(settings.postgres_dsn)
+    # Autocommit: each store method opens its own transaction block, so no
+    # read is left idle in a transaction and a failed write cannot leave the
+    # shared connection aborted.
+    pg_conn = psycopg.connect(settings.postgres_dsn, autocommit=True)
     try:
         apply_canonical_schema(pg_conn)
         registry = build_registry(plugins)
-        store = BundleStore(
-            conn=pg_conn,
-            raw_event_factories={
-                p.registration.reasoner_id: p.raw_event_factory for p in plugins
-            },
-            registry=registry,
-        )
+        store = BundleStore(conn=pg_conn, registry=registry)
         services = FrameworkServices(
             settings=settings,
             pg_conn=pg_conn,
@@ -91,7 +91,9 @@ def build_framework_services(
             registry=registry,
             reasoners=tuple(plugins),
         )
-        gates = build_gates(composed_gate_plugins, services)
+        gates = build_gates(
+            composed_gate_plugins, services, mandatory=settings.mandatory_gate_ids
+        )
     except Exception:
         pg_conn.close()
         raise
@@ -101,5 +103,6 @@ def build_framework_services(
         component="bootstrap",
         reasoner_ids=[p.registration.reasoner_id for p in plugins],
         gate_ids=list(gates),
+        mandatory_gate_ids=sorted(g for g, c in gates.items() if c.mandatory),
     )
     return dataclasses.replace(services, gates=MappingProxyType(gates))

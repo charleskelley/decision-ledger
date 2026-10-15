@@ -21,7 +21,8 @@ Modules and subpackages:
                   discovery and building.
     bootstrap:    Builds the shared services and the composed gates once per
                   process.
-    decide:       ``execute_decision`` — the framework half of every decision.
+    submit:       ``submit`` — submission intake, the gate set, and the bundle
+                  write: the framework half of every decision.
     enforcement:  Deterministic rule-based action resolution.
     audit:        Decision Bundle construction, persistence, and replay.
     monitoring:   Structured JSON logging and observability.
