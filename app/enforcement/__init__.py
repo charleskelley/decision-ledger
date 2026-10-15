@@ -6,7 +6,7 @@ work: re-executing enforcement against cached intermediate states produces an id
 result.
 
 Gate-level tiers (applied to one gate's ``GateOutput``; first that fires wins):
-    1. Schema validation failure (no verdict) → HOLD
+    1. Schema validation failure (no verdict, or the gate failed closed) → HOLD
     2. Adversarial probe flag detected → BLOCK (skipped for a deterministic gate)
     4. Low confidence + high-risk action (BLOCK or HOLD) → HOLD
        (skipped for a deterministic gate)
@@ -14,10 +14,14 @@ Gate-level tiers (applied to one gate's ``GateOutput``; first that fires wins):
        (runs only when the evidence carries jurisdictions)
     6. No trigger fired → most conservative permitted action from the verdict
 
-Decision-level tier (applied once per decision):
-    3. Novel entity (insufficient history) → HOLD (route to human review)
+Decision-level rules (applied once per decision):
+    3. Novel entity (gated decisions; insufficient history) → the advisory
+       gates' verdicts are held for review (HOLD), unless an advisory gate's
+       own Tier 1 or 2 decided; mandatory gates and the proposal are untouched
+    B. Bypass rule not satisfied (recorded decisions) → HOLD floor
 
-The two levels combine in the historical tier priority (DR-28): gate Tiers 1-2
-outrank Tier 3, which outranks gate Tiers 4-6, so a single-gate decision
-resolves exactly as the single-pass resolver did.
+The combinator then takes the most restrictive of the proposal, every
+mandatory gate, the advisory side, and any floor (DR-29). A decision with a
+single advisory gate and no proposal resolves exactly as the single-gate
+resolver of DR-28 did.
 """
