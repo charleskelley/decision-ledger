@@ -1,8 +1,8 @@
-"""Submission intake — the framework half of every decision (DR-29, DR-30, DR-31).
+"""Submission intake — the framework half of every decision (DR-29 to DR-32).
 
 ``submit()`` takes a reasoner's ``Submission`` and runs everything the ledger
-owns: intake validation, the decision's gate set, enforcement, the
-combinator, and the bundle write. It returns the persisted
+owns: intake validation, the decision's subject, the decision's gate set,
+enforcement, the combinator, and the bundle write. It returns the persisted
 ``DecisionBundle``. The reasoner is responsible for everything before it:
 its features, its scoring, and building the submission — including choosing
 its mode: *record* a decision it made, citing a registered bypass rule, or
@@ -12,43 +12,53 @@ The steps, in order:
 
 1. **Validate.** The reasoner must be registered; ``validate_submission``
    checks the record's citation (a registered rule, the rule's action, a
-   recordable action, a matching version pin) and the gate contexts (only
-   gates the registration binds, one for every bound gate). Every gate
-   in the set that is composed then checks its own context: its
-   ``config_model`` and, when the built gate is a ``ConfigAuthorizer``, its
-   per-reasoner authorization. Any failure raises
-   ``SubmissionContractError`` before a gate runs; nothing is persisted.
-2. **Gate set.** The registration's bindings plus the gates the deployment
+   recordable action, a matching version pin), a native subject in a
+   namespace the registration declares against the submission's
+   ``entity_id``, and the gate contexts (only gates the registration binds,
+   one for every bound gate). Every gate in the set that is composed then
+   checks its own context: its ``config_model`` and, when the built gate is
+   a ``ConfigAuthorizer``, its per-reasoner authorization. Any failure
+   raises ``SubmissionContractError`` before a gate runs; nothing is
+   persisted.
+2. **Identity** (DR-32). The deployment's identity step resolves the
+   submission's native subject through the active resolver, under its time
+   budget, and records the result on the bundle; the passthrough subject,
+   unresolved and with the reason, when there is no resolver or it does not
+   match, fails, or times out. It never refuses a decision. Every gate sees
+   the resolved subject (``GateRequest.identity``).
+3. **Gate set.** The registration's bindings plus the gates the deployment
    mandates (``ComposedGate.mandatory``); a mandated gate the reasoner does
    not bind runs with an empty configuration.
-3. **Mandatory gates** run concurrently, on every decision.
-4. **Advisory gates** run concurrently, only on a gated decision, and only
+4. **Mandatory gates** run concurrently, on every decision.
+5. **Advisory gates** run concurrently, only on a gated decision, and only
    if no mandatory gate already blocks it (BLOCK absorbs in the combinator,
    so skipping cannot change the result). The reasoner's own proposal never
    skips them: a proposed BLOCK on a gated decision still gets the gates'
    evidence, or a reasoner could block without gating and without a bypass
    rule. Each skipped gate is recorded with the reason.
-5. **Fail closed.** A gate that raises, outlives its budget, returns an
+6. **Fail closed.** A gate that raises, outlives its budget, returns an
    unusable output, or is not composed is recorded as ``failed`` and its
    enforcement holds the decision (``app.gates.invoke_gate``).
-6. **Enforce and combine.** Gate-level tiers per gate as it returns, then
+7. **Enforce and combine.** Gate-level tiers per gate as it returns, then
    the decision-level rules and the combinator
    (``app.enforcement.resolver.resolve_decision``); a record's cited rule,
    and every other rule its reasoner registers, are evaluated against its
    evidence and snapshotted into the bundle.
-7. **Write** the version-2 bundle, stamped with the
+8. **Write** the version-2 bundle, stamped with the
    ``registration_version`` of the registration intake used (DR-31), so
    replay enforces against that version's snapshot.
 
-``decide()`` runs steps 1-6 and returns the bundle without writing it (the
+``decide()`` runs steps 1-7 and returns the bundle without writing it (the
 batch route writes many in one round trip); ``submit()`` is ``decide()``
 plus the write. Both are what the ledger's API operations call, so an HTTP
 request, a ``LocalClient`` call, and an eval run decide identically.
 
-Async (DR-23): the gates are the only awaits; enforcement and the store are
-synchronous and run inline. The function logs no per-step events of its own
-beyond what the gates and enforcement log — callers log what makes sense for
-their context (HTTP request, eval run, etc.).
+Async (DR-23): the identity step and the gates are the only awaits (a
+resolver, synchronous by contract, runs in a worker thread); enforcement and
+the store are synchronous and run inline. The function logs no per-step
+events of its own beyond what the identity step, the gates, and enforcement
+log — callers log what makes sense for their context (HTTP request, eval
+run, etc.).
 """
 
 from __future__ import annotations
@@ -63,6 +73,7 @@ from pydantic import ValidationError
 from app.audit import build_bundle
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from app.gates import ConfigAuthorizer, invoke_gate
+from app.identity import IdentityService
 from app.monitoring import duration_ms
 from core.actions import DecisionAction
 from core.bundle import GateRecord
@@ -102,6 +113,9 @@ if TYPE_CHECKING:
 #: closed (HOLD) and the bundle has no gate forensics for it.
 DEFAULT_GATE_BUDGET_MS = 45_000
 
+#: The identity step of a caller that passes none: the passthrough alone.
+_PASSTHROUGH_ONLY = IdentityService()
+
 #: Why an advisory gate did not run on a recorded decision.
 SKIPPED_FOR_RECORD = "mode=record: a recorded decision runs its mandatory gates only"
 #: Why an advisory gate did not run once a mandatory gate blocked the decision.
@@ -122,6 +136,7 @@ async def submit(
     decision_id: str | None = None,
     idempotency_key: str | None = None,
     gate_budget_ms: int = DEFAULT_GATE_BUDGET_MS,
+    identity: IdentityService | None = None,
 ) -> DecisionBundle:
     """Run the framework half of a decision on a submission and write it.
 
@@ -140,6 +155,9 @@ async def submit(
         idempotency_key: Optional explicit key; defaults to
             ``submission.event_id``.
         gate_budget_ms: Wall-clock budget for each gate invocation.
+        identity: The deployment's identity step
+            (``FrameworkServices.identity``); the passthrough alone when
+            omitted.
 
     Returns:
         The version-2 ``DecisionBundle`` after persistence.
@@ -151,7 +169,8 @@ async def submit(
             contract.
 
     Side effects:
-        - Calls the gates of the decision's gate set.
+        - Calls the identity resolver and the gates of the decision's gate
+          set.
         - Writes the bundle to Postgres.
     """
     bundle = await decide(
@@ -163,6 +182,7 @@ async def submit(
         decision_id=decision_id,
         idempotency_key=idempotency_key,
         gate_budget_ms=gate_budget_ms,
+        identity=identity,
     )
     store.write(bundle)
     return bundle
@@ -178,8 +198,9 @@ async def decide(
     decision_id: str | None = None,
     idempotency_key: str | None = None,
     gate_budget_ms: int = DEFAULT_GATE_BUDGET_MS,
+    identity: IdentityService | None = None,
 ) -> DecisionBundle:
-    """Decide a submission — intake, the gate set, enforcement — without writing.
+    """Decide a submission — intake, identity, the gate set, enforcement — unwritten.
 
     Args:
         submission: The reasoner's submission (already a validated
@@ -202,6 +223,11 @@ async def decide(
         idempotency_key: Optional explicit key; defaults to
             ``submission.event_id``.
         gate_budget_ms: Wall-clock budget for each gate invocation.
+        identity: The deployment's identity step
+            (``FrameworkServices.identity``): the active resolver, its
+            budget, and the passthrough fallback. The passthrough alone when
+            omitted. Its result is the bundle's ``identity`` and every
+            gate's ``GateRequest.identity``.
 
     Returns:
         The version-2 ``DecisionBundle``, not yet persisted.
@@ -213,7 +239,8 @@ async def decide(
             contract (see ``SubmissionContractError`` for the codes).
 
     Side effects:
-        - Calls the gates of the decision's gate set (each may reach its own
+        - Calls the identity resolver (in a worker thread, bounded) and the
+          gates of the decision's gate set (each may reach its own
           infrastructure, such as an index or an LLM API).
     """
     registration = registry.get(submission.reasoner_id)
@@ -240,6 +267,13 @@ async def decide(
     decision_id = decision_id or str(uuid.uuid4())
     idempotency_key = idempotency_key or submission.event_id
     latency: dict[str, float] = dict(upstream_latency or {})
+
+    t0 = time.perf_counter()
+    subject = await (identity or _PASSTHROUGH_ONLY).identify(
+        submission, registration, decision_id=decision_id
+    )
+    latency["identity_ms"] = duration_ms(t0)
+
     bypass_check = (
         evaluate_bypass(rule, submission.reasoner_context) if rule is not None else None
     )
@@ -255,6 +289,7 @@ async def decide(
             submission=submission,
             gate_context=contexts[gate_id],
             budget_ms=gate_budget_ms,
+            identity=subject,
         )
 
     mandatory = [b for b in gate_set if b.mandatory]
@@ -301,6 +336,7 @@ async def decide(
     return build_bundle(
         decision_id=decision_id,
         submission=submission,
+        identity=subject,
         idempotency_key=idempotency_key,
         ingestion_timestamp=ingestion_timestamp,
         gates=records,

@@ -4,11 +4,11 @@
 across the framework runtime and every plugin it composes — Postgres (the
 audit ledger, the framework's only infrastructure), process-wide logging,
 the reasoner allowlist, the registration file, the gates the deployment
-mandates for every reasoner, and the API keys the ledger authenticates
-callers with (keys live in the environment or a mounted file only; there is
-no user model and no session). Tenant separation is logical (the
-``reasoner_id`` column), not connection-level — multiple reasoners share
-one deployment.
+mandates for every reasoner, the active identity resolver, and the API keys
+the ledger authenticates callers with (keys live in the environment or a
+mounted file only; there is no user model and no session). Tenant
+separation is logical (the ``reasoner_id`` column), not connection-level —
+multiple reasoners share one deployment.
 
 Per-plugin configuration lives in that plugin's own ``Settings`` class with
 its own env-var prefix, inside its package: a reasoner's model artifact
@@ -83,6 +83,14 @@ class FrameworkSettings(BaseSettings):
     #: default) reads no file.
     decisionledger_registrations: str = ""
 
+    #: The deployment's one active identity resolver (DR-32): the name of a
+    #: plugin installed under the ``decisionledger.identity_resolvers``
+    #: entry-point group, or blank (or ``passthrough``) for the passthrough
+    #: default, which records the subject each reasoner names, unresolved. An
+    #: installed resolver is never activated implicitly; a name that is not
+    #: installed refuses startup.
+    decisionledger_identity_resolver: str = ""
+
     #: API keys of the reasoners, as comma-separated ``reasoner_id:key``
     #: pairs. A key authenticates its reasoner's writes and its reads of its
     #: own decisions; a reasoner may hold several keys (rotation).
@@ -104,6 +112,12 @@ class FrameworkSettings(BaseSettings):
             for part in self.decisionledger_mandatory_gates.split(",")
             if part.strip()
         )
+
+    @property
+    def identity_resolver_id(self) -> str | None:
+        """The active resolver's id, or ``None`` for the passthrough default."""
+        value = self.decisionledger_identity_resolver.strip()
+        return None if value in ("", "passthrough") else value
 
     @property
     def registrations_path(self) -> Path | None:
