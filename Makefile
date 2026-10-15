@@ -30,7 +30,8 @@ SQL_DIRS := app/audit/sql $(wildcard gates/*/src/*/sql)
 
 .PHONY: help sync lint lint-sql typecheck test test-smoke test-integration \
         eval test-all check verify verify-ready verify-push \
-        build-policy-index install-hooks train prepare-reasoners prepare-gates
+        build-policy-index install-hooks train prepare-reasoners prepare-gates \
+        schemas conformance serve
 
 # -----------------------------------------------------------------------------
 # Help
@@ -69,8 +70,13 @@ help:
 	@echo "  Per-gate targets"
 	@for line in $(GATE_HELP); do echo "$$line"; done
 	@echo ""
+	@echo "  Ledger API"
+	@echo "    serve             Run the ledger API (uvicorn, port 8000)"
+	@echo "    schemas           Regenerate schemas/*.json from the models (CI diffs them)"
+	@echo "    conformance       HTTP contract suite against DECISIONLEDGER_URL (see conformance/)"
+	@echo ""
 	@echo "  Development"
-	@echo "    sync              Install the framework + every workspace reasoner and gate (uv sync)"
+	@echo "    sync              Install the framework + every workspace reasoner, gate, and integration (uv sync)"
 	@echo "    install-hooks     Install pre-commit git hooks"
 	@echo ""
 
@@ -161,3 +167,18 @@ eval: $(REASONER_EVAL_TARGETS) $(GATE_EVAL_TARGETS)
 install-hooks:
 	uv run pre-commit install
 	uv run pre-commit install --hook-type pre-push
+
+# -----------------------------------------------------------------------------
+# Ledger API
+# -----------------------------------------------------------------------------
+
+serve:
+	uv run uvicorn --factory app.main:create_app --port $(or $(PORT),8000)
+
+schemas:
+	uv run python -m app.schemas --write
+
+# The conformance suite runs against a live instance (DECISIONLEDGER_URL and
+# the keys in the environment; see conformance/README.md). Not part of `test`.
+conformance:
+	uv run pytest conformance -m conformance -v
