@@ -38,6 +38,7 @@ from app.api.decisions import (
 )
 from app.api.entities import DEFAULT_LIMIT, entity_decisions
 from app.api.gates import list_gates
+from app.api.identity import resolve_identity
 from app.api.models import (
     BatchResult,
     DecisionReceipt,
@@ -53,6 +54,7 @@ from app.api.registrations import get_reasoner, list_reasoners
 from app.auth import KEY_HEADER, TRUSTED, Principal
 from core.bundle import DecisionBundle
 from core.exceptions import LedgerError
+from core.identity import ResolvedIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -105,8 +107,19 @@ class LedgerClient(Protocol):
         limit: int = DEFAULT_LIMIT,
         before: datetime | None = None,
         before_id: str | None = None,
+        include_related: str | None = None,
     ) -> EntityDecisions:
-        """A subject's decisions, newest first (page with ``before``, ``before_id``)."""
+        """A subject's decisions, newest first (page with ``before``, ``before_id``).
+
+        Covers the ids merged with the subject; ``include_related`` adds the
+        subjects one relationship of that type away (DR-32).
+        """
+        ...
+
+    async def resolve_identity(
+        self, native_namespace: str, native_subject_id: str
+    ) -> ResolvedIdentity:
+        """The subject a native subject resolves to (DR-32)."""
         ...
 
     async def resolve(
@@ -252,8 +265,13 @@ class LocalClient:
         limit: int = DEFAULT_LIMIT,
         before: datetime | None = None,
         before_id: str | None = None,
+        include_related: str | None = None,
     ) -> EntityDecisions:
-        """A subject's decisions, newest first (page with ``before``, ``before_id``)."""
+        """A subject's decisions, newest first (page with ``before``, ``before_id``).
+
+        Covers the ids merged with the subject; ``include_related`` adds the
+        subjects one relationship of that type away.
+        """
         return entity_decisions(
             str(entity_id),
             principal=self._principal,
@@ -262,6 +280,22 @@ class LocalClient:
             limit=limit,
             before=before,
             before_id=before_id,
+            include_related=include_related,
+        )
+
+    async def resolve_identity(
+        self, native_namespace: str, native_subject_id: str
+    ) -> ResolvedIdentity:
+        """The subject a native subject resolves to.
+
+        Raises:
+            LedgerError: As ``GET /api/v1/identity/resolve`` would answer.
+        """
+        return await resolve_identity(
+            native_namespace,
+            native_subject_id,
+            principal=self._principal,
+            framework=self._framework,
         )
 
     async def resolve(
@@ -432,8 +466,13 @@ class HttpClient:
         limit: int = DEFAULT_LIMIT,
         before: datetime | None = None,
         before_id: str | None = None,
+        include_related: str | None = None,
     ) -> EntityDecisions:
-        """A subject's decisions, newest first (page with ``before``, ``before_id``)."""
+        """A subject's decisions, newest first (page with ``before``, ``before_id``).
+
+        Covers the ids merged with the subject; ``include_related`` adds the
+        subjects one relationship of that type away.
+        """
         params: dict[str, Any] = {"limit": limit}
         if reasoner_id is not None:
             params["reasoner_id"] = reasoner_id
@@ -441,10 +480,23 @@ class HttpClient:
             params["before"] = before.isoformat()
         if before_id is not None:
             params["before_id"] = before_id
+        if include_related is not None:
+            params["include_related"] = include_related
         response = await self._request(
             "GET", f"/api/v1/entities/{entity_id}/decisions", params=params
         )
         return EntityDecisions.model_validate_json(response.content)
+
+    async def resolve_identity(
+        self, native_namespace: str, native_subject_id: str
+    ) -> ResolvedIdentity:
+        """The subject a native subject resolves to."""
+        response = await self._request(
+            "GET",
+            "/api/v1/identity/resolve",
+            params={"namespace": native_namespace, "native_id": native_subject_id},
+        )
+        return ResolvedIdentity.model_validate_json(response.content)
 
     async def resolve(
         self, decision_id: str, resolution: ResolutionRequest

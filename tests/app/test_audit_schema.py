@@ -141,3 +141,19 @@ def test_canonical_ddl_is_idempotent(name):
     assert creates, f"{name} declares nothing"
     unguarded = [c for c in creates if "if not exists" not in c]
     assert unguarded == []
+
+
+def test_the_identity_journal_and_its_projection_are_framework_tables():
+    """DR-32: the journal and the membership projection live in the framework's
+    schema, keyed by framework UUIDs only (native keys stay in the bundles)."""
+    tables = (DEFAULT_SQL_DIR / "02_tables.sql").read_text(encoding="utf-8")
+    for table in ("entity_events", "entity_membership"):
+        assert f"create table if not exists decisionledger.{table}" in tables
+    assert "native_subject" not in tables.split("entity_events", 1)[1]
+    # One open interval per link: recording a held relationship is a no-op.
+    assert re.search(
+        r"create unique index if not exists idx_entity_membership_open_link"
+        r".*?nulls not distinct\s+where valid_to is null",
+        tables,
+        re.S,
+    )

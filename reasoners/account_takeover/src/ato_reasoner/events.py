@@ -6,8 +6,11 @@ assembler (``assembler.build_submission``) turns an event, its features, and
 its score into the framework's ``Submission``, which carries the event
 itself as opaque ``raw_event`` JSON (DR-31).
 
-``entity_id`` is derived deterministically from ``account_id`` using UUID5,
-so any caller can reproduce the framework identity of an account from the
+The account is ATO's native subject: ``(ato-account, account_id)``
+(``native_subject``), which the ledger resolves to the decision's subject
+(DR-32). ``entity_id`` is ATO's own id for the account, derived from
+``account_id`` under the namespace ATO's registration declares
+(``registry.ATO_ACCOUNT_NAMESPACE``), so any caller can reproduce it from the
 domain business key without a registry lookup.
 
 An event accepts nothing its submission would refuse — a naive timestamp, an
@@ -18,10 +21,9 @@ letter for the stream consumer), before its features are written.
 
 from __future__ import annotations
 
-import uuid
 from enum import StrEnum
 from typing import Literal
-from uuid import UUID
+from uuid import UUID  # noqa: TC003 (pydantic resolves the computed field's type)
 
 from pydantic import (
     AwareDatetime,
@@ -32,12 +34,9 @@ from pydantic import (
     model_validator,
 )
 
+from ato_reasoner.registry import ATO_ACCOUNT_NAMESPACE
+from core.identity import NativeSubject
 from core.submission import storage_problem
-
-# Stable UUID5 namespace for ATO Reasoner account entity identifiers.
-# UUID5(_ATO_ACCOUNT_NS, account_id) produces a reproducible, opaque
-# framework UUID for any account business key.
-_ATO_ACCOUNT_NS: UUID = UUID("8a1f9b2e-4c3d-5e6f-7a8b-9c0d1e2f3a4b")
 
 
 class AuthMethod(StrEnum):
@@ -110,9 +109,11 @@ class Geolocation(BaseModel):
 class LoginEvent(BaseModel):
     """Validated login event entering the ATO Reasoner pipeline.
 
-    ``entity_id`` is derived deterministically from ``account_id`` via UUID5
-    — no registry required. ``account_id`` is retained as a domain attribute
-    for application-layer use (Redis keys, log labels, query filters).
+    ``entity_id`` is derived deterministically from ``account_id`` under
+    ATO's declared account namespace — no registry required.
+    ``account_id`` is retained as a domain attribute for application-layer
+    use (Redis keys, log labels, query filters) and is the key of the
+    event's ``native_subject``.
 
     Attributes:
         event_id: Unique, non-empty identifier for this event instance.
@@ -169,5 +170,13 @@ class LoginEvent(BaseModel):
     @computed_field
     @property
     def entity_id(self) -> UUID:
-        """Framework UUID derived deterministically from account_id."""
-        return uuid.uuid5(_ATO_ACCOUNT_NS, self.account_id)
+        """ATO's UUID for the account, derived from account_id (DR-32)."""
+        return ATO_ACCOUNT_NAMESPACE.entity_id_of(self.account_id)
+
+    @property
+    def native_subject(self) -> NativeSubject:
+        """The account as ATO names it: ``(ato-account, account_id)``."""
+        return NativeSubject(
+            native_namespace=ATO_ACCOUNT_NAMESPACE.native_namespace,
+            native_subject_id=self.account_id,
+        )

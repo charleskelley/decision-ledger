@@ -38,6 +38,14 @@ support indexed lookups — the subject's decision timeline
 (``entity_decisions``) among them; the full bundle is stored as JSONB in
 ``bundle``. ``write_many`` inserts a batch of bundles in one round trip.
 The ``replay_logs.diff`` column is populated only when ``is_matched = false``.
+
+The ``entity_id`` column is the decision's subject as the ledger resolved it
+(``DecisionBundle.identity``, DR-32). Writing a bundle whose identity relates
+its subject to others opens those relationships in the membership projection
+(``entity_membership``) unless they are open already; the timeline of a
+subject unions the decisions about every id merged with it and, on request,
+about the subjects one relationship of a type away
+(``core.identity.linked_entities`` over the projection's current rows).
 """
 
 from __future__ import annotations
@@ -46,11 +54,12 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from pydantic import ValidationError
 
+from app.audit.entity_journal import membership_from_row
 from app.audit.registrations import RegistrationSnapshots
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from core.bundle import BUNDLE_SCHEMA_VERSION, DecisionBundle, GateRecord
@@ -58,6 +67,7 @@ from core.exceptions import (
     BundleSchemaUnsupportedError,
     RegistrationSnapshotMissingError,
 )
+from core.identity import Membership, linked_entities
 from core.observation import registration_version
 from core.submission import evaluate_bypass
 
@@ -115,7 +125,8 @@ class DecisionSummary:
     Args:
         decision_id: The decision.
         reasoner_id: The tenant that decided it.
-        entity_id: The decision subject.
+        entity_id: The decision subject (the timeline's own subject, an id
+            merged with it, or a related subject).
         created_at: When the bundle was written.
         decision_action: The action the decision produced.
         schema_version: The bundle schema version of the row.
@@ -123,6 +134,9 @@ class DecisionSummary:
             version 2).
         event_id: The submission's event id (``None`` for an older row).
         entity_type: The subject's type (``None`` for an older row).
+        relationship_type: How ``entity_id`` is linked to the timeline's
+            subject: ``None`` for the subject itself or an id merged with
+            it, the requested relationship type for a related subject.
     """
 
     decision_id: str
@@ -134,6 +148,7 @@ class DecisionSummary:
     mode: str | None
     event_id: str | None
     entity_type: str | None
+    relationship_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +257,43 @@ _INSERT_BUNDLE = """
          decision_action, schema_version, bundle)
     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
     ON CONFLICT (decision_id) DO NOTHING
+    RETURNING decision_id
 """
+
+#: A relationship a decision's identity asserts: opens an interval in the
+#: membership projection unless one is open for the link (the partial unique
+#: index on open links makes that a no-op).
+_INSERT_RELATIONSHIP = """
+    INSERT INTO decisionledger.entity_membership
+        (subject_entity_id, related_entity_id, relationship_type, valid_from)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT DO NOTHING
+"""
+
+#: The projection's current rows touching any of the given ids.
+_SELECT_CURRENT_EDGES = """
+    SELECT subject_entity_id, related_entity_id, relationship_type,
+           valid_from, valid_to
+    FROM decisionledger.entity_membership
+    WHERE valid_to IS NULL
+      AND (subject_entity_id = ANY(%s::uuid[]) OR related_entity_id = ANY(%s::uuid[]))
+"""
+
+
+def relationship_rows(bundle: DecisionBundle) -> list[tuple[object, ...]]:
+    """The membership rows a bundle's identity asserts (none when unrelated)."""
+    identity = bundle.identity
+    if identity is None:
+        return []
+    return [
+        (
+            str(identity.entity_id),
+            str(related.entity_id),
+            related.relationship_type,
+            identity.provenance.resolved_at,
+        )
+        for related in identity.related
+    ]
 
 
 def _row(bundle: DecisionBundle) -> tuple[object, ...]:
@@ -262,11 +313,10 @@ def _row(bundle: DecisionBundle) -> tuple[object, ...]:
             "trip; refusing to store a decision that could not be replayed"
         )
         raise ValueError(msg)
-    submission = bundle.submission
     return (
         bundle.decision_id,
-        submission.reasoner_id,
-        str(submission.entity_id),
+        bundle.submission.reasoner_id,
+        str(bundle.entity_id),
         bundle.created_at,
         bundle.decision_action.value,
         BUNDLE_SCHEMA_VERSION,
@@ -354,6 +404,11 @@ class BundleStore:
         than stored. Intake validation makes that unreachable; the check
         keeps it that way.
 
+        A newly written bundle whose identity relates its subject to others
+        then opens those relationships in the membership projection (a
+        second statement; ``EntityJournal.rebuild_membership`` restores the
+        projection from the bundles if it is ever interrupted).
+
         Args:
             bundle: Fully assembled bundle to persist.
 
@@ -363,6 +418,10 @@ class BundleStore:
         row = _row(bundle)
         with self._conn.cursor() as cur:
             cur.execute(_INSERT_BUNDLE, row)
+            inserted = cur.fetchone() is not None
+            relationships = relationship_rows(bundle) if inserted else []
+            if relationships:
+                cur.executemany(_INSERT_RELATIONSHIP, relationships)
         submission = bundle.submission
         log.info(
             "audit.bundle_written",
@@ -380,7 +439,9 @@ class BundleStore:
         is sent, so a bundle that would not reload refuses the whole call and
         nothing is written. The insert is one ``executemany`` (pipelined by
         psycopg) with ``ON CONFLICT DO NOTHING`` per row, on the autocommit
-        connection: each row commits on its own.
+        connection: each row commits on its own. The relationships the newly
+        written bundles' identities assert are then opened in the membership
+        projection, as ``write`` does.
 
         Args:
             bundles: Fully assembled bundles to persist.
@@ -392,7 +453,22 @@ class BundleStore:
         if not rows:
             return
         with self._conn.cursor() as cur:
-            cur.executemany(_INSERT_BUNDLE, rows)
+            cur.executemany(_INSERT_BUNDLE, rows, returning=True)
+            inserted: set[str] = set()
+            while True:
+                found = cast("tuple[Any, ...] | None", cur.fetchone())
+                if found is not None:
+                    inserted.add(str(found[0]))
+                if not cur.nextset():
+                    break
+            relationships = [
+                relationship
+                for bundle in bundles
+                if str(uuid.UUID(bundle.decision_id)) in inserted
+                for relationship in relationship_rows(bundle)
+            ]
+            if relationships:
+                cur.executemany(_INSERT_RELATIONSHIP, relationships)
         log.info(
             "audit.bundles_written",
             component="audit",
@@ -593,6 +669,14 @@ class BundleStore:
                 return current
         raise RegistrationSnapshotMissingError(reasoner_id, version)
 
+    def membership_touching(self, ids: frozenset[uuid.UUID]) -> list[Membership]:
+        """The projection's current intervals touching any of ``ids``."""
+        keys = [str(i) for i in ids]
+        with self._conn.cursor() as cur:
+            cur.execute(_SELECT_CURRENT_EDGES, (keys, keys))
+            rows = cast("list[tuple[Any, ...]]", cur.fetchall())
+        return [membership_from_row(row) for row in rows]
+
     def entity_decisions(
         self,
         entity_id: str,
@@ -601,14 +685,19 @@ class BundleStore:
         limit: int = 50,
         before: datetime | None = None,
         before_id: str | None = None,
+        include_related: str | None = None,
     ) -> list[DecisionSummary]:
         """Return a subject's decisions, newest first (its ledger timeline).
 
-        Reads the indexed scalar columns plus three submission fields, so it
-        serves rows of any schema version and needs no reasoner. Rows are
-        ordered by ``(created_at, decision_id)``, newest first, and the page
-        cursor is that same pair, so decisions written in the same instant
-        are neither skipped nor repeated across pages.
+        The timeline covers the subject, every id merged with it, and — with
+        ``include_related`` — every subject one relationship of that type
+        away (and the ids merged with those), as the membership projection
+        holds now (``core.identity.linked_entities``). It reads the indexed
+        scalar columns plus three bundle fields, so it serves rows of any
+        schema version and needs no reasoner. Rows are ordered by
+        ``(created_at, decision_id)``, newest first, and the page cursor is
+        that same pair, so decisions written in the same instant are neither
+        skipped nor repeated across pages.
 
         Args:
             entity_id: The decision subject (a UUID string).
@@ -619,22 +708,28 @@ class BundleStore:
             before_id: The ``decision_id`` of that decision. Without it,
                 ``before`` alone excludes every decision written at that
                 instant.
+            include_related: A relationship type whose subjects' decisions
+                join the timeline, or ``None``.
 
         Returns:
-            Up to ``limit`` summaries, newest first.
+            Up to ``limit`` summaries, newest first, each saying how its
+            subject is linked to ``entity_id``.
 
         Raises:
             KeyError: ``entity_id`` or ``before_id`` is not a well-formed
                 UUID.
         """
         try:
-            canonical = str(uuid.UUID(entity_id))
+            subject = uuid.UUID(entity_id)
         except ValueError:
             raise KeyError(f"entity_id {entity_id!r} is not a UUID") from None
         try:
             cursor_id = str(uuid.UUID(before_id)) if before_id is not None else None
         except ValueError:
             raise KeyError(f"before_id {before_id!r} is not a UUID") from None
+        linked = linked_entities(
+            subject, self.membership_touching, include_related=include_related
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -642,9 +737,12 @@ class BundleStore:
                        decision_action, schema_version,
                        bundle -> 'submission' ->> 'mode',
                        bundle -> 'submission' ->> 'event_id',
-                       bundle -> 'submission' ->> 'entity_type'
+                       coalesce(
+                           bundle -> 'identity' ->> 'entity_type',
+                           bundle -> 'submission' ->> 'entity_type'
+                       )
                 FROM decisionledger.decision_bundles
-                WHERE entity_id = %s
+                WHERE entity_id = ANY(%s::uuid[])
                   AND (%s::text IS NULL OR reasoner_id = %s::text)
                   AND (
                       %s::timestamptz IS NULL
@@ -659,7 +757,7 @@ class BundleStore:
                 LIMIT %s
                 """,
                 (
-                    canonical,
+                    [str(i) for i in linked],
                     reasoner_id,
                     reasoner_id,
                     before,
@@ -682,6 +780,7 @@ class BundleStore:
                 mode=mode,
                 event_id=event_id,
                 entity_type=entity_type,
+                relationship_type=linked.get(uuid.UUID(str(row_entity))),
             )
             for (
                 decision_id,

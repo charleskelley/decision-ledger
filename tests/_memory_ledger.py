@@ -6,9 +6,14 @@ and replaces only its I/O, so the logic under test (replay, the registration
 a bundle is replayed against, the realized action of a resolution chain) is
 the production code:
 
-- ``MemoryBundleStore`` keeps rows in a dict. ``write`` and ``write_many``
-  apply the real store's round-trip check; ``replay`` and
-  ``registration_for`` are inherited unchanged.
+- ``MemoryBundleStore`` keeps rows in a dict and the membership projection
+  in a list. ``write`` and ``write_many`` apply the real store's round-trip
+  check and open the relationships a new bundle's identity asserts;
+  ``replay``, ``registration_for``, and the timeline's walk over the
+  projection (``core.identity.linked_entities``) are the production code.
+- ``MemoryEntityJournal`` keeps entity events in a list; it checks them as
+  the real journal does and rebuilds the store's projection with the
+  production fold (``core.identity.project_membership``).
 - ``MemorySnapshots`` keeps registration snapshots as canonical JSON and
   reloads them on read, as the table does.
 - ``MemoryJournal`` keeps resolution attempts in a list and refuses a
@@ -16,8 +21,9 @@ the production code:
   does; ``realized_action`` is inherited.
 
 ``memory_framework`` composes them into ``FrameworkServices`` the way the
-bootstrap does (registry, snapshots, gates built against the services), and
-``TEST_KEYRING`` holds the keys the API tests authenticate with.
+bootstrap does (registry, snapshots, the identity step with an optional
+resolver, gates built against the services), and ``TEST_KEYRING`` holds the
+keys the API tests authenticate with.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from app.audit.entity_journal import EntityJournal
 from app.audit.registrations import RegistrationSnapshot, RegistrationSnapshots
 from app.audit.resolution_journal import ResolutionJournal
 from app.audit.store import (
@@ -41,13 +48,26 @@ from app.audit.store import (
     ReplayResult,
     StoredBundle,
     _row,
+    relationship_rows,
 )
 from app.auth import KeyRing
 from app.gates import build_gates
+from app.identity import (
+    DEFAULT_IDENTITY_BUDGET_MS,
+    IdentityService,
+    build_resolver,
+    declared_namespaces,
+)
 from app.plugin import FrameworkServices
 from app.plugins import build_registry
 from app.settings import FrameworkSettings
 from core.bundle import BUNDLE_SCHEMA_VERSION, DecisionBundle
+from core.identity import (
+    EntityEvent,
+    Membership,
+    linked_entities,
+    project_membership,
+)
 from core.observation import (
     ReasonerRegistration,
     canonical_registration,
@@ -59,6 +79,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from app.gates import GatePlugin
+    from app.identity import IdentityResolverPlugin
     from app.plugin import ReasonerPlugin
     from app.reasoner_registry import StaticReasonerRegistry
     from core.resolution import ResolutionAttempt
@@ -124,6 +145,7 @@ class MemoryBundleStore(BundleStore):
 
     Attributes:
         rows: ``decision_id`` → row.
+        memberships: The membership projection (``entity_membership``).
         replays: Every replay result logged, in order.
         write_many_calls: The size of each ``write_many`` batch, in order.
     """
@@ -137,32 +159,61 @@ class MemoryBundleStore(BundleStore):
         self._registry = registry
         self._snapshots = snapshots if snapshots is not None else MemorySnapshots()
         self.rows: dict[str, MemoryRow] = {}
+        self.memberships: list[Membership] = []
         self.replays: list[ReplayResult] = []
         self.write_many_calls: list[int] = []
 
-    def _insert(self, row: tuple[object, ...]) -> None:
+    def _insert(self, row: tuple[object, ...]) -> bool:
         decision_id, reasoner_id, entity_id, created_at, action, version, payload = row
-        self.rows.setdefault(
-            str(decision_id),
-            MemoryRow(
-                decision_id=str(decision_id),
-                reasoner_id=str(reasoner_id),
-                entity_id=str(entity_id),
-                created_at=created_at,  # type: ignore[arg-type]
-                decision_action=str(action),
-                schema_version=int(version),  # type: ignore[call-overload]
-                payload=json.loads(str(payload)),
-            ),
+        if str(decision_id) in self.rows:
+            return False
+        self.rows[str(decision_id)] = MemoryRow(
+            decision_id=str(decision_id),
+            reasoner_id=str(reasoner_id),
+            entity_id=str(entity_id),
+            created_at=created_at,  # type: ignore[arg-type]
+            decision_action=str(action),
+            schema_version=int(version),  # type: ignore[call-overload]
+            payload=json.loads(str(payload)),
         )
+        return True
+
+    def _relate(self, bundle: DecisionBundle) -> None:
+        """Open the bundle's asserted relationships, as the real write does."""
+        for subject, related, relationship, since in relationship_rows(bundle):
+            link = (uuid.UUID(str(subject)), uuid.UUID(str(related)), relationship)
+            if not any(
+                m.current
+                and (m.subject_entity_id, m.related_entity_id, m.relationship_type)
+                == link
+                for m in self.memberships
+            ):
+                self.memberships.append(
+                    Membership(
+                        subject_entity_id=link[0],
+                        related_entity_id=link[1],
+                        relationship_type=relationship,  # type: ignore[arg-type]
+                        valid_from=since,  # type: ignore[arg-type]
+                    )
+                )
 
     def write(self, bundle: DecisionBundle) -> None:
-        self._insert(_row(bundle))
+        if self._insert(_row(bundle)):
+            self._relate(bundle)
 
     def write_many(self, bundles: Sequence[DecisionBundle]) -> None:
         rows = [_row(bundle) for bundle in bundles]
         self.write_many_calls.append(len(rows))
-        for row in rows:
-            self._insert(row)
+        for bundle, row in zip(bundles, rows, strict=True):
+            if self._insert(row):
+                self._relate(bundle)
+
+    def membership_touching(self, ids: frozenset[uuid.UUID]) -> list[Membership]:
+        return [
+            m
+            for m in self.memberships
+            if m.current and (m.subject_entity_id in ids or m.related_entity_id in ids)
+        ]
 
     def insert_raw(
         self,
@@ -214,12 +265,17 @@ class MemoryBundleStore(BundleStore):
         limit: int = 50,
         before: datetime | None = None,
         before_id: str | None = None,
+        include_related: str | None = None,
     ) -> list[DecisionSummary]:
         try:
-            entity_id = str(uuid.UUID(entity_id))
+            subject = uuid.UUID(entity_id)
             cursor = str(uuid.UUID(before_id)) if before_id is not None else None
         except ValueError:
             raise KeyError(entity_id) from None
+        linked = linked_entities(
+            subject, self.membership_touching, include_related=include_related
+        )
+        subjects = {str(i): link for i, link in linked.items()}
 
         def _after_cursor(row: MemoryRow) -> bool:
             if before is None:
@@ -235,7 +291,7 @@ class MemoryBundleStore(BundleStore):
         rows = [
             row
             for row in self.rows.values()
-            if row.entity_id == entity_id
+            if row.entity_id in subjects
             and (reasoner_id is None or row.reasoner_id == reasoner_id)
             and _after_cursor(row)
         ]
@@ -244,6 +300,8 @@ class MemoryBundleStore(BundleStore):
         for row in rows[:limit]:
             submission = row.payload.get("submission")
             fields = submission if isinstance(submission, dict) else {}
+            identity = row.payload.get("identity")
+            identity_fields = identity if isinstance(identity, dict) else {}
             summaries.append(
                 DecisionSummary(
                     decision_id=row.decision_id,
@@ -254,7 +312,9 @@ class MemoryBundleStore(BundleStore):
                     schema_version=row.schema_version,
                     mode=fields.get("mode"),
                     event_id=fields.get("event_id"),
-                    entity_type=fields.get("entity_type"),
+                    entity_type=identity_fields.get("entity_type")
+                    or fields.get("entity_type"),
+                    relationship_type=subjects[row.entity_id],
                 )
             )
         return summaries
@@ -288,6 +348,52 @@ class MemoryBundleStore(BundleStore):
             for row in self.rows.values()
             if row.schema_version == BUNDLE_SCHEMA_VERSION
         ]
+
+
+class MemoryEntityJournal(EntityJournal):
+    """``EntityJournal`` over a list; checks and the fold are the real ones.
+
+    Attributes:
+        appended: Every event appended, in order.
+    """
+
+    def __init__(  # no connection
+        self, store: MemoryBundleStore, *, relationship_types: frozenset[str]
+    ) -> None:
+        self._store = store
+        self._relationship_types = relationship_types
+        self.appended: list[EntityEvent] = []
+
+    def append(
+        self, events: Iterable[EntityEvent], *, rebuild: bool = True
+    ) -> tuple[Membership, ...] | None:
+        self.appended.extend(self.checked(events))
+        return self.rebuild_membership() if rebuild else None
+
+    def events(self) -> list[EntityEvent]:
+        return list(self.appended)
+
+    def membership(self) -> list[Membership]:
+        return list(self._store.memberships)
+
+    def rebuild_membership(self) -> tuple[Membership, ...]:
+        rows = sorted(
+            (
+                row
+                for row in self._store.rows.values()
+                if row.schema_version == BUNDLE_SCHEMA_VERSION
+            ),
+            key=lambda r: (r.created_at, uuid.UUID(r.decision_id)),
+        )
+        identities = [
+            DecisionBundle.model_validate_json(json.dumps(row.payload)).identity
+            for row in rows
+        ]
+        projection = project_membership(
+            self.appended, [i for i in identities if i is not None and i.related]
+        )
+        self._store.memberships = list(projection)
+        return projection
 
 
 class MemoryJournal(ResolutionJournal):
@@ -331,6 +437,8 @@ def memory_framework(
     mandatory: Iterable[str] = (),
     registration_file: Path | None = None,
     journal: ResolutionJournal | None = None,
+    resolver_plugin: IdentityResolverPlugin | None = None,
+    identity_budget_ms: int = DEFAULT_IDENTITY_BUDGET_MS,
 ) -> FrameworkServices:
     """Compose in-memory ``FrameworkServices`` the way the bootstrap does.
 
@@ -340,6 +448,9 @@ def memory_framework(
         mandatory: Gate ids the deployment mandates.
         registration_file: A registration file composed with the plugins.
         journal: The resolution journal; a fresh ``MemoryJournal`` by default.
+        resolver_plugin: The active identity resolver, built against the
+            services; the passthrough when omitted.
+        identity_budget_ms: The identity step's budget per resolver call.
 
     Returns:
         The services, with a ``MemoryBundleStore`` whose snapshots hold every
@@ -347,6 +458,7 @@ def memory_framework(
     """
     plugins = tuple(plugins)
     registry = build_registry(plugins, registration_file=registration_file)
+    declared_namespaces(entry.registration for entry in registry.entries())
     store = MemoryBundleStore(registry)
     for entry in registry.entries():
         store.snapshots.record(entry.registration)
@@ -357,6 +469,14 @@ def memory_framework(
         registry=registry,
         reasoners=plugins,
         journal=journal if journal is not None else MemoryJournal(),
+    )
+    resolver = (
+        build_resolver(resolver_plugin, services)
+        if resolver_plugin is not None
+        else None
+    )
+    services = dataclasses.replace(
+        services, identity=IdentityService(resolver, budget_ms=identity_budget_ms)
     )
     gates = build_gates(list(gate_plugins), services, mandatory=mandatory)
     return dataclasses.replace(services, gates=MappingProxyType(gates))

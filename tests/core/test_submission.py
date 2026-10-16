@@ -6,7 +6,8 @@ Contracts (DR-30, DR-31):
   citation; a gate request carries no citation and an optional proposal; the
   evidence belongs to the submitter; each gate is addressed once; unknown
   fields (the old observation's route and rationale included) are rejected;
-  timestamps are timezone-aware; ``native_subject`` is reserved and inert.
+  timestamps are timezone-aware; ``native_subject`` is optional and is the
+  identity contract's ``NativeSubject`` (DR-32).
 - Wire: a submission parses from JSON text in strict mode and round-trips
   unchanged; ``raw_event`` is stored verbatim; a value the ledger cannot
   store (a non-finite number, a NUL, invalid Unicode) is rejected anywhere,
@@ -14,7 +15,8 @@ Contracts (DR-30, DR-31):
 - ``effective_gate_set``: registration bindings, deployment mandates layered
   on top.
 - ``validate_submission``: every registration-level rule, each with its
-  stable error code.
+  stable error code — a native subject in a namespace the registration
+  declares must carry the ``entity_id`` and ``entity_type`` it derives.
 - ``matching_bypass_rule`` / ``evaluate_bypass``: the pure bypass helpers a
   reasoner and the ledger share.
 """
@@ -32,6 +34,7 @@ from pydantic import ValidationError
 from core.actions import DecisionAction
 from core.exceptions import SubmissionContractError
 from core.gate import Compare
+from core.identity import NativeNamespace
 from core.observation import BypassRule, GateBinding, GateContext, ReasonerRegistration
 from core.submission import (
     BypassCitation,
@@ -156,13 +159,20 @@ def test_raw_event_and_reasoner_context_are_required(submission):
             Submission(**fields)  # type: ignore[arg-type]
 
 
-def test_native_subject_is_reserved_accepted_and_inert(submission):
+def test_a_submission_may_name_its_native_subject(submission):
     subject = NativeSubject(native_namespace="widget-db", native_subject_id="w-1")
-    reserved = _rebuild(submission, native_subject=subject)
-    assert reserved.native_subject == subject
+    named = _rebuild(submission, native_subject=subject)
+    assert named.native_subject == subject
     assert submission.native_subject is None
     with pytest.raises(ValidationError):
         NativeSubject(native_namespace="", native_subject_id="w-1")
+
+
+def test_the_native_subject_is_the_identity_contracts():
+    """``core.submission`` re-exports the one ``NativeSubject`` (DR-32)."""
+    import core.identity
+
+    assert NativeSubject is core.identity.NativeSubject
 
 
 def test_a_submission_is_immutable(submission):
@@ -540,3 +550,73 @@ def test_evaluate_bypass_is_deterministic_and_round_trips(reasoner_context):
     )
     assert first == second
     assert type(first).model_validate_json(first.model_dump_json()) == first
+
+
+# ---------------------------------------------------------------------------
+# Native subjects in declared namespaces (DR-32)
+# ---------------------------------------------------------------------------
+
+_WIDGET_DB = NativeNamespace(
+    native_namespace="widget-db",
+    namespace_uuid=uuid.UUID("3f6e1b7c-9d2a-5e48-8b1f-0c7a4d9e2b61"),
+    entity_type="widget",
+)
+
+
+def _declaring(stub_registration):
+    fields = {
+        name: getattr(stub_registration, name)
+        for name in ReasonerRegistration.model_fields
+    }
+    return ReasonerRegistration(**{**fields, "native_namespaces": (_WIDGET_DB,)})
+
+
+def _named(submission, key: str = "w-1", **overrides):
+    native = NativeSubject(native_namespace="widget-db", native_subject_id=key)
+    fields = {
+        "native_subject": native,
+        "entity_id": _WIDGET_DB.entity_id_of(key),
+        "entity_type": "widget",
+    }
+    fields.update(overrides)
+    return _rebuild(submission, **fields)
+
+
+def test_a_native_subject_in_a_declared_namespace_matches_its_entity(
+    submission, stub_registration
+):
+    assert validate_submission(_named(submission), _declaring(stub_registration))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"entity_id": uuid.uuid4()},
+        {"entity_type": "gadget"},
+        {"entity_id": uuid.uuid5(_WIDGET_DB.namespace_uuid, "w-2")},
+    ],
+    ids=["another-id", "another-type", "another-key"],
+)
+def test_a_native_subject_that_contradicts_its_declared_namespace_is_refused(
+    submission, stub_registration, overrides
+):
+    with pytest.raises(SubmissionContractError) as caught:
+        validate_submission(
+            _named(submission, **overrides), _declaring(stub_registration)
+        )
+    assert caught.value.code == "NATIVE_SUBJECT_MISMATCH"
+    assert "w-1" not in caught.value.violation  # the native key is not echoed
+
+
+def test_a_native_subject_in_an_undeclared_namespace_is_not_checked(
+    submission, stub_registration
+):
+    named = _named(submission, entity_id=uuid.uuid4())
+    assert validate_submission(named, stub_registration)  # declares nothing
+    elsewhere = _rebuild(
+        named,
+        native_subject=NativeSubject(
+            native_namespace="other-db", native_subject_id="k"
+        ),
+    )
+    assert validate_submission(elsewhere, _declaring(stub_registration))

@@ -12,6 +12,10 @@ Key contracts (DR-29, DR-30):
 - ``registration_version`` content-addresses a registration (DR-31): equal
   registrations have equal versions in every process (sets are canonically
   ordered), and any change to what enforcement or intake reads changes it.
+- A registration declares the native namespaces it names subjects in
+  (DR-32), each once; the declarations are unordered in its version, and a
+  registration that declares none keeps the version it had before
+  registrations could declare them.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import uuid
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +31,7 @@ from pydantic import ValidationError
 from core.actions import DecisionAction
 from core.exceptions import UnregisteredReasonerError
 from core.gate import AllOf, Compare, Not
+from core.identity import NativeNamespace
 from core.observation import (
     BypassRule,
     GateBinding,
@@ -394,10 +400,92 @@ def test_the_version_does_not_depend_on_the_process_hash_seed():
         {"recordable_actions": frozenset({ALLOW, BLOCK, HOLD})},
         {"novel_entity_feature": None},
         {"jurisdiction_conflict_groups": (frozenset({"REGION_A"}),)},
+        {
+            "native_namespaces": (
+                NativeNamespace(
+                    native_namespace="widget-db",
+                    namespace_uuid=uuid.uuid4(),
+                    entity_type="w",
+                ),
+            )
+        },
     ],
-    ids=["name", "gate-set", "rule-version", "recordable", "tier3", "tier5"],
+    ids=[
+        "name",
+        "gate-set",
+        "rule-version",
+        "recordable",
+        "tier3",
+        "tier5",
+        "namespace",
+    ],
 )
 def test_any_change_changes_the_version(change):
     assert registration_version(_profiled(**change)) != registration_version(
         _profiled()
     )
+
+
+# ---------------------------------------------------------------------------
+# Native namespaces (DR-32)
+# ---------------------------------------------------------------------------
+
+_WIDGETS = NativeNamespace(
+    native_namespace="widget-db",
+    namespace_uuid=uuid.UUID("3f6e1b7c-9d2a-5e48-8b1f-0c7a4d9e2b61"),
+    entity_type="widget",
+)
+_GADGETS = NativeNamespace(
+    native_namespace="gadget-db",
+    namespace_uuid=uuid.UUID("0b8f7a6e-5d4c-5b3a-9f8e-7d6c5b4a3f2e"),
+    entity_type="gadget",
+)
+
+
+def test_a_registration_declares_no_native_namespace_by_default():
+    assert _registration().native_namespaces == ()
+    assert _registration().native_namespace("widget-db") is None
+
+
+def test_a_registration_looks_its_native_namespaces_up_by_name():
+    registration = _registration(native_namespaces=(_WIDGETS, _GADGETS))
+    assert registration.native_namespace("widget-db") == _WIDGETS
+    assert registration.native_namespace("gadget-db") == _GADGETS
+    assert registration.native_namespace("other") is None
+
+
+def test_a_native_namespace_is_declared_once():
+    twin = _WIDGETS.model_copy(update={"entity_type": "other"})
+    with pytest.raises(ValidationError, match="more than once"):
+        _registration(native_namespaces=(_WIDGETS, twin))
+
+
+def test_a_registration_without_namespaces_keeps_its_pre_identity_version():
+    """No ``native_namespaces`` key in the canonical form, so no new version.
+
+    The stub reasoner declares no native namespace; its version is pinned to
+    the one it had before registrations could declare them.
+    """
+    from tests._stub_reasoner.registry import STUB_REGISTRATION
+
+    assert "native_namespaces" not in canonical_registration(STUB_REGISTRATION)
+    assert registration_version(STUB_REGISTRATION) == "909c836dc579e075"
+
+
+def test_namespace_declarations_are_unordered_in_the_version():
+    one = _profiled(native_namespaces=(_WIDGETS, _GADGETS))
+    other = _profiled(native_namespaces=(_GADGETS, _WIDGETS))
+    assert registration_version(one) == registration_version(other)
+    assert [
+        n["native_namespace"] for n in canonical_registration(one)["native_namespaces"]
+    ] == ["gadget-db", "widget-db"]
+
+
+def test_a_registration_with_namespaces_round_trips_through_its_canonical_form():
+    registration = _profiled(native_namespaces=(_WIDGETS,))
+    reloaded = ReasonerRegistration.model_validate_json(
+        ReasonerRegistration.model_validate(
+            canonical_registration(registration), strict=False
+        ).model_dump_json()
+    )
+    assert reloaded == registration

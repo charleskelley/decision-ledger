@@ -224,6 +224,7 @@ async def create_decision(
             store=framework.store,
             registry=framework.registry,
             ingestion_timestamp=datetime.now(UTC),
+            identity=framework.identity,
         )
     except UnregisteredReasonerError as err:
         raise _unregistered(err) from err
@@ -318,6 +319,7 @@ async def record_batch(
                     gates=framework.gates,
                     registry=framework.registry,
                     ingestion_timestamp=received_at,
+                    identity=framework.identity,
                 )
         except UnregisteredReasonerError as err:
             results[number] = _rejected(number, _unregistered(err), submission.event_id)

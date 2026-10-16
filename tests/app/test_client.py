@@ -7,8 +7,8 @@ Both run here against one ledger app (``HttpClient`` through
 
 - the same receipt for the same submission, and the same ``LedgerError``
   (status and code) for the same refusal;
-- the same lookup, typed bundle, replay, batch, timeline, resolution, and
-  resources;
+- the same lookup, typed bundle, replay, batch, timeline (with merged and
+  related subjects), identity resolution, resolution, and resources;
 - ``get_bundle`` refuses a bundle older than schema version 2;
 - ``LocalClient`` acts as the trusted principal unless given another, and
   ``from_settings`` composes the deployment like ``create_app`` and owns it;
@@ -250,3 +250,70 @@ def test_a_batch_waits_for_the_ledger_and_a_decision_outlasts_two_gate_phases():
     client = HttpClient("http://x")
     assert client._batch_timeout.read is None
     assert client._timeout > 2 * 45
+
+
+async def test_both_clients_resolve_identities_and_group_timelines_alike(
+    monkeypatch: pytest.MonkeyPatch, submission
+):
+    """DR-32 over both clients: the same identity, the same group timeline."""
+    from core.identity import NativeSubject
+    from tests._fake_gate.plugin import FakeGatePlugin
+    from tests._memory_ledger import memory_framework
+    from tests._stub_reasoner.plugin import PLUGIN
+    from tests._stub_resolver.plugin import (
+        FLEET,
+        StubResolverPlugin,
+        fleet_id,
+        owner_id,
+    )
+    from tests.app.conftest import start_ledger
+
+    gate_plugin = FakeGatePlugin()
+    framework = memory_framework(
+        [PLUGIN], [gate_plugin], resolver_plugin=StubResolverPlugin()
+    )
+    for ledger in start_ledger(monkeypatch, framework, gate_plugin):
+        http = HttpClient(
+            "http://ledger.test",
+            api_key=STUB_KEY,
+            transport=httpx.ASGITransport(app=ledger.client.app),
+        )
+        local = LocalClient(ledger.framework)
+        named = submission.model_copy(
+            update={
+                "native_subject": NativeSubject(
+                    native_namespace="widget-registry",
+                    native_subject_id="widget-12345",
+                )
+            }
+        )
+        receipt = await local.submit(named)
+        assert receipt.entity_id == str(owner_id("owner-7"))
+        assert receipt.entity_type == "owner"
+        identities = [
+            await client.resolve_identity("widget-registry", "widget-12345")
+            for client in (local, http)
+        ]
+        assert identities[0] == identities[1].model_copy(
+            update={
+                "provenance": identities[1].provenance.model_copy(
+                    update={"resolved_at": identities[0].provenance.resolved_at}
+                )
+            }
+        )
+        timelines = [
+            await client.entity_decisions(
+                fleet_id("fleet-north"), include_related=FLEET
+            )
+            for client in (local, http)
+        ]
+        assert timelines[0] == timelines[1]
+        assert [d.decision_id for d in timelines[0].decisions] == [receipt.decision_id]
+        assert timelines[0].decisions[0].relationship_type == FLEET
+        errors = []
+        for client in (local, http):
+            with pytest.raises(LedgerError) as err:
+                await client.resolve_identity("other-registry", "k")
+            errors.append((err.value.status, err.value.code))
+        assert errors == [(404, "IDENTITY_UNRESOLVED")] * 2
+        await http.aclose()

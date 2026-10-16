@@ -342,3 +342,130 @@ def test_close_releases_the_connection_even_when_a_gate_close_raises(
         services.close()
 
     assert calls == ["gate.close:b", "gate.close:a", "pg_conn.close"]
+
+
+# ---------------------------------------------------------------------------
+# The identity step (DR-32)
+# ---------------------------------------------------------------------------
+
+
+def _resolving_settings(resolver: str) -> FrameworkSettings:
+    return FrameworkSettings(decisionledger_identity_resolver=resolver)
+
+
+def test_bootstrap_keeps_the_passthrough_unless_a_resolver_is_named(
+    fakes: dict[str, Any],
+):
+    from tests._stub_resolver.plugin import StubResolverPlugin
+
+    plugin = StubResolverPlugin()
+    services = bootstrap.build_framework_services(
+        FrameworkSettings(), [PLUGIN], [], resolver_plugins=[plugin]
+    )
+    assert services.identity.resolver_id == "passthrough"
+    assert plugin.built == []
+
+
+def test_bootstrap_builds_the_named_resolver_against_the_services(
+    fakes: dict[str, Any],
+):
+    from tests._stub_resolver.plugin import StubResolverPlugin
+
+    plugin = StubResolverPlugin()
+    services = bootstrap.build_framework_services(
+        _resolving_settings("stub-resolver"), [PLUGIN], [], resolver_plugins=[plugin]
+    )
+    assert services.identity.resolver_id == "stub-resolver"
+    assert services.identity.relationship_types == frozenset({"fleet"})
+    [resolver] = plugin.built
+    services.close()
+    assert resolver.closed
+    assert fakes["calls"][-1] == "pg_conn.close"
+
+
+def test_a_named_resolver_that_is_not_installed_refuses_startup_before_postgres(
+    fakes: dict[str, Any],
+):
+    from core.exceptions import ResolverPluginError
+
+    with pytest.raises(ResolverPluginError, match="crosswalk"):
+        bootstrap.build_framework_services(
+            _resolving_settings("crosswalk"), [PLUGIN], [], resolver_plugins=[]
+        )
+    assert fakes["calls"] == []
+
+
+def test_a_resolver_that_fails_to_build_closes_the_connection(fakes: dict[str, Any]):
+    from tests._stub_resolver.plugin import StubResolverPlugin
+
+    class _Exploding(StubResolverPlugin):
+        def build(self, framework):  # type: ignore[override]
+            raise RuntimeError("crosswalk artifact missing")
+
+    with pytest.raises(RuntimeError, match="crosswalk artifact missing"):
+        bootstrap.build_framework_services(
+            _resolving_settings("stub-resolver"),
+            [PLUGIN],
+            [],
+            resolver_plugins=[_Exploding()],
+        )
+    assert fakes["calls"][-1] == "pg_conn.close"
+
+
+def test_a_gate_that_fails_to_build_closes_the_resolver_too(fakes: dict[str, Any]):
+    from tests._stub_resolver.plugin import StubResolverPlugin
+
+    plugin = StubResolverPlugin()
+    with pytest.raises(RuntimeError, match="cannot start"):
+        bootstrap.build_framework_services(
+            _resolving_settings("stub-resolver"),
+            [PLUGIN],
+            [_ExplodingGatePlugin()],
+            resolver_plugins=[plugin],
+        )
+    [resolver] = plugin.built
+    assert resolver.closed
+    assert fakes["calls"][-1] == "pg_conn.close"
+
+
+def test_two_registrations_declaring_one_namespace_differently_refuse_startup(
+    fakes: dict[str, Any],
+):
+    import uuid
+    from dataclasses import dataclass
+
+    from core.exceptions import RegistrationError
+    from core.identity import NativeNamespace
+    from core.observation import ReasonerRegistration
+
+    @dataclass
+    class _Plugin:
+        registration: ReasonerRegistration
+        prompts_dir: Any = PLUGIN.prompts_dir
+        corpus_dir: Any = PLUGIN.corpus_dir
+
+    def _declaring(reasoner_id: str) -> _Plugin:
+        fields = {
+            name: getattr(STUB_REGISTRATION, name)
+            for name in ReasonerRegistration.model_fields
+        }
+        namespace = NativeNamespace(
+            native_namespace="widget-db",
+            namespace_uuid=uuid.uuid4(),
+            entity_type="widget",
+        )
+        return _Plugin(
+            ReasonerRegistration(
+                **{
+                    **fields,
+                    "reasoner_id": reasoner_id,
+                    "native_namespaces": (namespace,),
+                }
+            )
+        )
+
+    with pytest.raises(RegistrationError, match="declared differently"):
+        bootstrap.build_framework_services(
+            FrameworkSettings(), [_declaring("one"), _declaring("two")], []
+        )
+    assert fakes["calls"][-1] == "pg_conn.close"

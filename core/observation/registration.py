@@ -15,6 +15,10 @@ reasoner:
   citation, evaluates the rule's predicate against the submission's
   evidence, and replay evaluates it again;
 - the actions it may record (``recordable_actions``);
+- the native namespaces it names its subjects in (``native_namespaces``,
+  DR-32): for each, the subject type it names and the UUID5 namespace the
+  ledger derives those subjects' ids under when no identity resolver
+  matches them;
 - the enforcement profile the deterministic enforcement layer reads for the
   novel-entity tier (Tier 3) and the jurisdiction-conflict tier (Tier 5).
 
@@ -43,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.actions import DecisionAction
 from core.gate import Predicate
+from core.identity import NativeNamespace
 
 #: Hex digits of the SHA-256 digest a registration version keeps (64 bits).
 REGISTRATION_VERSION_LENGTH = 16
@@ -127,6 +132,12 @@ class ReasonerRegistration(BaseModel):
             gate (its records would have nothing to cite).
         recordable_actions: Actions the reasoner may record. Every bypass
             rule's ``action`` must be one of them. Defaults to every action.
+        native_namespaces: The native namespaces the reasoner names its
+            subjects in (DR-32), each ``native_namespace`` once. A
+            submission naming a subject in one of them must carry the
+            ``entity_id`` and ``entity_type`` it declares, and the
+            passthrough resolver records that subject when no resolver
+            matches it. Empty (the default) declares none.
         novel_entity_feature: Enforcement profile for Tier 3 (novel
             entity). Names the ``ReasonerContext.feature_set`` key whose
             truthy value signals that the decision subject has too little
@@ -152,6 +163,7 @@ class ReasonerRegistration(BaseModel):
     gates: tuple[GateBinding, ...]
     bypass_rules: tuple[BypassRule, ...] = ()
     recordable_actions: frozenset[DecisionAction] = frozenset(DecisionAction)
+    native_namespaces: tuple[NativeNamespace, ...] = ()
     novel_entity_feature: str | None = None
     jurisdiction_conflict_groups: tuple[frozenset[str], ...] = ()
 
@@ -167,6 +179,11 @@ class ReasonerRegistration(BaseModel):
         repeated_rules = sorted({r for r in rule_ids if rule_ids.count(r) > 1})
         if repeated_rules:
             msg = f"duplicate bypass rule_id(s): {repeated_rules}"
+            raise ValueError(msg)
+        names = [namespace.native_namespace for namespace in self.native_namespaces]
+        repeated_namespaces = sorted({n for n in names if names.count(n) > 1})
+        if repeated_namespaces:
+            msg = f"native namespace(s) declared more than once: {repeated_namespaces}"
             raise ValueError(msg)
         unrecordable = sorted(
             rule.rule_id
@@ -194,6 +211,12 @@ class ReasonerRegistration(BaseModel):
         """Return the registered bypass rule ``rule_id``, or ``None``."""
         return next((r for r in self.bypass_rules if r.rule_id == rule_id), None)
 
+    def native_namespace(self, name: str) -> NativeNamespace | None:
+        """Return the declared native namespace ``name``, or ``None``."""
+        return next(
+            (n for n in self.native_namespaces if n.native_namespace == name), None
+        )
+
 
 def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]:
     """Return the registration as JSON-shaped data with every set sorted.
@@ -203,6 +226,10 @@ def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]
     fields (``recordable_actions`` and each jurisdiction conflict group) are
     sorted here so the same registration always has the same form. Tuples
     keep their order: gate bindings and bypass rules are ordered by meaning.
+    Native namespace declarations have no order, so they are sorted by name;
+    a registration that declares none has no ``native_namespaces`` key at
+    all, so its form (and its version) is the one it had before
+    registrations could declare them (DR-32).
 
     Args:
         registration: The registration.
@@ -215,6 +242,12 @@ def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]
     data["jurisdiction_conflict_groups"] = [
         sorted(group) for group in data["jurisdiction_conflict_groups"]
     ]
+    if data["native_namespaces"]:
+        data["native_namespaces"] = sorted(
+            data["native_namespaces"], key=lambda n: n["native_namespace"]
+        )
+    else:
+        del data["native_namespaces"]
     return data
 
 
@@ -224,9 +257,10 @@ def registration_version(registration: ReasonerRegistration) -> str:
     The first ``REGISTRATION_VERSION_LENGTH`` hex digits of the SHA-256 of
     the canonical form (sorted keys, no whitespace). Equal registrations
     have equal versions in every process; any change to the gate set, a
-    bypass rule, the recordable actions, or the enforcement profile changes
-    it. Every decision bundle records the version its registration had, and
-    replay reads the snapshot of that version.
+    bypass rule, the recordable actions, a native namespace declaration, or
+    the enforcement profile changes it. Every decision bundle records the
+    version its registration had, and replay reads the snapshot of that
+    version.
 
     Args:
         registration: The registration.

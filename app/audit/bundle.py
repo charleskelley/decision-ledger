@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from core.bundle import GateRecord
     from core.enforcement import EnforcementDecision
+    from core.identity import ResolvedIdentity
     from core.submission import BypassCheck, Submission
 
 
@@ -35,6 +36,7 @@ def build_bundle(
     other_bypass_checks: Sequence[BypassCheck] = (),
     latency_breakdown: dict[str, float] | None = None,
     registration_version: str | None = None,
+    identity: ResolvedIdentity | None = None,
 ) -> DecisionBundle:
     """Assemble a complete DecisionBundle from every layer of a decision.
 
@@ -61,6 +63,8 @@ def build_bundle(
         registration_version: The version of the reasoner's registration
             the decision was made under (``registration_version`` of the
             registration intake used); replay reads that version's snapshot.
+        identity: The decision's subject, as the ledger's identity step
+            established it (DR-32).
 
     Returns:
         Fully assembled version-2 ``DecisionBundle``.
@@ -68,12 +72,14 @@ def build_bundle(
     Raises:
         pydantic.ValidationError: The layers are inconsistent (a record
             without its bypass check, a gate recorded twice, a gate record
-            whose fields do not match its status).
+            whose fields do not match its status, an identity about another
+            native subject than the submission's).
     """
     return DecisionBundle(
         decision_id=decision_id,
         created_at=datetime.now(UTC),
         submission=submission,
+        identity=identity,
         idempotency_key=idempotency_key,
         ingestion_timestamp=ingestion_timestamp,
         gates=tuple(gates),

@@ -27,7 +27,8 @@ FRAMEWORK_TOP_LEVEL = [
     REPO_ROOT / "core" / "bundle.py",
     REPO_ROOT / "core" / "exceptions.py",
     REPO_ROOT / "core" / "gate_request.py",
-    # core/routing.py removed — GateRoute now lives in core/routes.py
+    REPO_ROOT / "core" / "identity.py",
+    REPO_ROOT / "core" / "submission.py",
 ]
 
 DOMAIN_PREFIXES = [
@@ -105,4 +106,19 @@ def test_observation_subpackage_does_not_import_gate_implementation_types():
         "DR-11 violation — core/observation/ must not import gate "
         "implementation types (core.gate.output, core.gate.prompt):\n"
         + "\n".join(violations)
+    )
+
+
+def test_the_identity_contract_is_a_leaf_of_core():
+    # core/identity.py (DR-32) is imported by the submission, the
+    # registration, the bundle, and the gate request; it imports nothing from
+    # core itself, so no contract module can form a cycle through it.
+    identity = REPO_ROOT / "core" / "identity.py"
+    violations = [
+        imported
+        for imported in _collect_imports(identity)
+        if imported == "core" or imported.startswith("core.")
+    ]
+    assert not violations, (
+        f"core/identity.py must import nothing from core: {violations}"
     )

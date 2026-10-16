@@ -10,6 +10,7 @@ round-trips through JSON (the store's path), and that it is immutable.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -19,6 +20,12 @@ from core.actions import DecisionAction
 from core.bundle import BUNDLE_SCHEMA_VERSION, DecisionBundle, GateRecord
 from core.enforcement import EnforcementDecision
 from core.gate import GateInput, GateOutput
+from core.identity import (
+    EntityDerivation,
+    IdentityProvenance,
+    NativeSubject,
+    ResolvedIdentity,
+)
 from core.submission import evaluate_bypass
 from tests._stub_reasoner.registry import LOW_SCORE_RULE
 
@@ -234,3 +241,59 @@ def test_an_unknown_status_is_rejected():
             status="pending",  # type: ignore[arg-type]
             reason="r",
         )
+
+
+# ---------------------------------------------------------------------------
+# The identity layer (DR-32)
+# ---------------------------------------------------------------------------
+
+_OWNER_NS = uuid.UUID("fc8e0cd7-dbd8-4155-a211-129e7b1af534")
+
+
+def _resolved(native: NativeSubject | None) -> ResolvedIdentity:
+    derivation = EntityDerivation(namespace_uuid=_OWNER_NS, enterprise_key="owner-7")
+    return ResolvedIdentity(
+        entity_id=derivation.entity_id,
+        entity_type="owner",
+        derivation=derivation,
+        provenance=IdentityProvenance(
+            native_namespace=native.native_namespace if native else None,
+            native_subject_id=native.native_subject_id if native else None,
+            resolved_by="resolver",
+            method="deterministic",
+            resolved_at=datetime(2024, 1, 15, 10, 30, 1, tzinfo=UTC),
+        ),
+    )
+
+
+def test_the_bundles_subject_is_its_resolved_identity(submission):
+    native = NativeSubject(native_namespace="widget-registry", native_subject_id="w")
+    named = submission.model_copy(update={"native_subject": native})
+    identity = _resolved(native)
+    bundle = _bundle(named, identity=identity)
+    assert bundle.identity == identity
+    assert bundle.entity_id == identity.entity_id != named.entity_id
+    assert bundle.entity_type == "owner"
+    reloaded = DecisionBundle.model_validate_json(bundle.model_dump_json())
+    assert reloaded == bundle
+
+
+def test_a_bundle_written_before_the_identity_contract_is_about_its_submission(
+    submission,
+):
+    bundle = _bundle(submission)
+    assert bundle.identity is None
+    assert bundle.entity_id == submission.entity_id
+    assert bundle.entity_type == submission.entity_type
+
+
+def test_the_identity_resolves_the_native_subject_the_submission_named(submission):
+    native = NativeSubject(native_namespace="widget-registry", native_subject_id="w")
+    named = submission.model_copy(update={"native_subject": native})
+    other = NativeSubject(native_namespace="widget-registry", native_subject_id="x")
+    with pytest.raises(ValidationError, match="different native subject"):
+        _bundle(named, identity=_resolved(other))
+    with pytest.raises(ValidationError, match="different native subject"):
+        _bundle(named, identity=_resolved(None))
+    with pytest.raises(ValidationError, match="different native subject"):
+        _bundle(submission, identity=_resolved(native))

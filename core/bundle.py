@@ -8,20 +8,26 @@ corpus is needed to audit or replay a decision. The enforcement profile
 replay needs (the novel-entity feature and the jurisdiction conflict
 groups) comes from the snapshot of the registration version the bundle
 records (``registration_version``, DR-31), which the ledger keeps for every
-version it serves.
+version it serves. The decision's subject is the identity the ledger
+resolved before any gate ran (``identity``, DR-32), with the mapping and
+its provenance; a reasoner's own ``entity_id`` stays in its submission.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.actions import DecisionAction
 from core.enforcement import EnforcementDecision
 from core.gate import GateInput, GateOutput, GateStatus
+from core.identity import ResolvedIdentity
 from core.submission import BypassCheck, Submission
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 #: The bundle schema version this module defines (the
 #: ``decision_bundles.schema_version`` column of every row written).
@@ -137,6 +143,14 @@ class DecisionBundle(BaseModel):
         submission: The reasoner's submission, verbatim — identity, mode,
             proposal and citation, evidence, gate contexts, and its opaque
             ``raw_event``.
+        identity: The decision's subject as the ledger resolved it before
+            any gate ran (DR-32): the subject's id and type, how the id was
+            derived, the provenance of the mapping (resolver, crosswalk
+            version, method, confidence, time, and why an unresolved
+            subject is unresolved), and the subject's related subjects.
+            ``entity_id`` is the bundle's timeline key. ``None`` only on a
+            bundle written before the identity contract; such a bundle's
+            subject is ``submission.entity_id``.
         idempotency_key: Deduplication key (the event id unless the caller
             supplied one).
         ingestion_timestamp: When the ledger received the submission (over
@@ -187,6 +201,7 @@ class DecisionBundle(BaseModel):
     decision_id: str
     created_at: datetime
     submission: Submission
+    identity: ResolvedIdentity | None = None
     idempotency_key: str
     ingestion_timestamp: datetime
     gates: tuple[GateRecord, ...]
@@ -218,6 +233,44 @@ class DecisionBundle(BaseModel):
             msg = f"a gate appears more than once in the gate records: {gate_ids}"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _identity_resolves_the_submitted_subject(self) -> DecisionBundle:
+        """The identity's provenance names the native subject the reasoner did."""
+        if self.identity is None:
+            return self
+        provenance = self.identity.provenance
+        native = self.submission.native_subject
+        named = (
+            (native.native_namespace, native.native_subject_id)
+            if native is not None
+            else (None, None)
+        )
+        if (provenance.native_namespace, provenance.native_subject_id) != named:
+            msg = (
+                "the identity's provenance names a different native subject "
+                "than the submission"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def entity_id(self) -> UUID:
+        """The decision's subject: the resolved identity's id (DR-32).
+
+        ``submission.entity_id`` for a bundle written before the identity
+        contract.
+        """
+        if self.identity is not None:
+            return self.identity.entity_id
+        return self.submission.entity_id
+
+    @property
+    def entity_type(self) -> str:
+        """The decision's subject type (the submission's, before DR-32)."""
+        if self.identity is not None:
+            return self.identity.entity_type
+        return self.submission.entity_type
 
     def gate(self, gate_id: str) -> GateRecord | None:
         """Return the record of ``gate_id``, or ``None`` if it was not in the set."""

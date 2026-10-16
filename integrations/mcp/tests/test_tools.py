@@ -113,10 +113,18 @@ class _Recording:
         )
 
     async def entity_decisions(
-        self, entity_id, *, reasoner_id, limit, before, before_id=None
+        self,
+        entity_id,
+        *,
+        reasoner_id,
+        limit,
+        before,
+        before_id=None,
+        include_related=None,
     ):
         self._record(
-            "entity_decisions", (entity_id, reasoner_id, limit, before, before_id)
+            "entity_decisions",
+            (entity_id, reasoner_id, limit, before, before_id, include_related),
         )
         return EntityDecisions(entity_id=entity_id, decisions=[])
 
@@ -237,18 +245,20 @@ async def test_the_reading_tools_call_the_client():
             "limit": 5,
             "before": "2026-10-14T12:00:00+00:00",
             "before_id": _DECISION_ID,
+            "include_related": "group",
         }
     )
 
     assert client.calls[0] == ("get_decision", _DECISION_ID)
     assert client.calls[1] == ("replay", _DECISION_ID)
-    name, (entity_id, reasoner_id, limit, before, before_id) = client.calls[2]
-    assert (name, entity_id, reasoner_id, limit, before_id) == (
+    name, (entity_id, reasoner_id, limit, before, before_id, related) = client.calls[2]
+    assert (name, entity_id, reasoner_id, limit, before_id, related) == (
         "entity_decisions",
         _ENTITY_ID,
         None,
         5,
         _DECISION_ID,
+        "group",
     )
     assert before == datetime(2026, 10, 14, 12, tzinfo=UTC)
 

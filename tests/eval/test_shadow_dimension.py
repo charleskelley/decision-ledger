@@ -301,6 +301,9 @@ async def test_the_gate_sees_the_stored_context_and_a_gate_mode_submission(
     assert request.submission.mode == "gate"
     assert request.submission.bypass is None
     assert request.submission.proposed_action is None
+    # The gate sees the subject the decision was made about (DR-32).
+    assert request.identity == bundle.identity
+    assert request.identity is not None
 
 
 def test_the_dimension_runs_after_the_others_under_its_own_kind():

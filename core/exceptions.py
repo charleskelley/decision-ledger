@@ -43,6 +43,9 @@ class SubmissionContractError(Exception):
         ``BYPASS_ACTION_MISMATCH``: a record's proposed action is not the
             action its cited rule justifies.
         ``ACTION_NOT_RECORDABLE``: the reasoner may not record that action.
+        ``NATIVE_SUBJECT_MISMATCH``: the submission names a native subject in
+            a namespace its registration declares, but not the ``entity_id``
+            or ``entity_type`` that declaration derives (DR-32).
         ``GATE_NOT_BOUND``: a gate context names a gate the registration
             does not bind (a gate the deployment mandates without a binding
             included: it runs with an empty configuration).
@@ -148,6 +151,31 @@ class GatePluginError(Exception):
         super().__init__(f"Gate plugin error [{gate_id}]: {reason}")
 
 
+class ResolverPluginError(Exception):
+    """Raised when the deployment's identity resolver cannot be composed.
+
+    A deployment-composition error, the identity twin of
+    ``GatePluginError`` (DR-32): ``DECISIONLEDGER_IDENTITY_RESOLVER`` names a
+    resolver that is not installed under the
+    ``decisionledger.identity_resolvers`` entry-point group, the entry point
+    fails to load, the loaded object does not satisfy the resolver plugin
+    protocol (or declares a malformed relationship type, or a name other
+    than its ``resolver_id``), or its ``build`` fails or returns something
+    that is not an ``IdentityResolver``. Raised at startup. A resolver that
+    misbehaves at decision time is not this error: the ledger records that
+    decision's subject unresolved, with the reason, and writes it.
+
+    Args:
+        resolver_id: The configured or published resolver id.
+        reason: Human-readable description of what went wrong.
+    """
+
+    def __init__(self, resolver_id: str, reason: str) -> None:  # noqa: D107
+        self.resolver_id = resolver_id
+        self.reason = reason
+        super().__init__(f"Identity resolver error [{resolver_id}]: {reason}")
+
+
 class PredicateError(ValueError):
     """Raised when a predicate cannot be evaluated against its subject.
 
@@ -171,7 +199,8 @@ class RegistrationError(Exception):
     A deployment registers reasoners from two sources (DR-31): the installed
     reasoner plugins and an optional registration file
     (``DECISIONLEDGER_REGISTRATIONS``). A file that cannot be read, parsed,
-    or validated, or two sources declaring the same ``reasoner_id``, raise
+    or validated, two sources declaring the same ``reasoner_id``, or two
+    registrations declaring one native namespace differently (DR-32) raise
     this error at startup, so a deployment never serves decisions under a
     registration it did not mean to have.
 

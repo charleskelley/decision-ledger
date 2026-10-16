@@ -284,6 +284,7 @@ FRAMEWORK_PATHS = {
     "/api/v1/decisions/{decision_id}/replay",
     "/api/v1/decisions/{decision_id}/resolutions",
     "/api/v1/entities/{entity_id}/decisions",
+    "/api/v1/identity/resolve",
     "/api/v1/reasoners",
     "/api/v1/reasoners/{reasoner_id}",
     "/api/v1/reasoners/{reasoner_id}/registrations/{version}",

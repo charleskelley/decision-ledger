@@ -178,6 +178,7 @@ class ShadowDimension:
                 gate_context=gated.gate_context(gate_id)
                 or GateContext(gate_id=gate_id),
                 budget_ms=self._budget_ms,
+                identity=bundle.identity,
             )
 
         shadow_records = await run_gate_set(

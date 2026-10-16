@@ -5,9 +5,9 @@
 -- All tables live in the framework-owned `decisionledger` schema. Reasoners
 -- are tenants distinguished by the `reasoner_id` column on row-level. These
 -- are the audit ledger's tables only: decision bundles, replay logs,
--- resolution attempts, and the reasoner registration snapshots bundles cite.
--- Gates keep whatever they store in their own schemas, created by their own
--- DDL.
+-- resolution attempts, the reasoner registration snapshots bundles cite, and
+-- the identity journal and its membership projection (DR-32). Gates keep
+-- whatever they store in their own schemas, created by their own DDL.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -27,8 +27,10 @@
 -- reasoner_id: tenant column holding the composing reasoner's id. A
 --              reasoner's own business keys live inside the JSONB bundle,
 --              not as scalar columns.
--- entity_id:   framework UUID derived deterministically from the
---              reasoner's domain business key via UUID5.
+-- entity_id:   the decision's subject: the identity the ledger resolved
+--              before any gate ran (bundle -> 'identity', DR-32), the
+--              reasoner's own entity_id when it is unresolved or the row
+--              predates the identity contract.
 -- schema_version: shape of the JSONB bundle. 2 = the submission contract
 --              (the reasoner's Submission and one record per gate). 1 =
 --              rows written before it: lookup returns them as stored;
@@ -169,3 +171,90 @@ create table if not exists decisionledger.reasoner_registrations (
     first_registered_at timestamptz not null default now(),
     primary key (reasoner_id, registration_version)
 );
+
+-- ---------------------------------------------------------------------------
+-- entity_events — the identity journal (DR-32), append-only
+--
+-- Every change to the identity graph, in append order (event_sequence): merge
+-- (two ids are one subject; subject_entity_id is the id kept for display), detach
+-- (a merge of the two ids ends, in either order), relate and unrelate (a typed
+-- relationship from subject to object begins or ends). Bundles never change:
+-- a decision keeps the identity it was made under, and the journal records
+-- what changed since. Rows are never updated or deleted; a correction is a new
+-- event. The ids are framework UUIDs only; native keys stay in the bundles.
+-- provenance holds who appended the event and from what (core.identity.
+-- JournalProvenance).
+-- ---------------------------------------------------------------------------
+create table if not exists decisionledger.entity_events (
+    event_id uuid primary key,
+    event_sequence bigint generated always as identity,
+    event_type text not null,
+    subject_entity_id uuid not null,
+    object_entity_id uuid not null,
+    relationship_type text,
+    effective_at timestamptz not null,
+    recorded_at timestamptz not null default now(),
+    provenance jsonb not null,
+    constraint entity_events_event_type_known check (
+        event_type in ('merge', 'detach', 'relate', 'unrelate')
+    ),
+    constraint entity_events_relationship_typed check (
+        (event_type in ('relate', 'unrelate')) = (relationship_type is not null)
+    ),
+    constraint entity_events_links_two_ids check (
+        subject_entity_id <> object_entity_id
+    )
+);
+
+create unique index if not exists idx_entity_events_sequence
+on decisionledger.entity_events (event_sequence);
+
+create index if not exists idx_entity_events_subject
+on decisionledger.entity_events (subject_entity_id);
+
+create index if not exists idx_entity_events_object
+on decisionledger.entity_events (object_entity_id);
+
+-- ---------------------------------------------------------------------------
+-- entity_membership — the membership projection (DR-32), rebuildable
+--
+-- Derived, never authoritative: the fold of the journal and of every
+-- relationship a decision's resolved identity asserted (bundle -> 'identity'
+-- -> 'related'), as validity intervals (core.identity.project_membership is
+-- its definition; the ledger rebuilds it from those two sources and keeps it
+-- current as decisions are written). relationship_type is null for a merge:
+-- related_entity_id is then the same subject as subject_entity_id. valid_to is
+-- null while the membership holds. A subject's timeline unions the ids merged
+-- with it (and, on request, the subjects one relationship of a type away) by
+-- reading the rows that hold now; the bundle itself says who belonged with the
+-- subject as of the decision.
+-- ---------------------------------------------------------------------------
+create table if not exists decisionledger.entity_membership (
+    subject_entity_id uuid not null,
+    related_entity_id uuid not null,
+    relationship_type text,
+    valid_from timestamptz not null,
+    valid_to timestamptz,
+    constraint entity_membership_interval_ordered check (
+        valid_to is null or valid_to > valid_from
+    ),
+    constraint entity_membership_links_two_ids check (
+        subject_entity_id <> related_entity_id
+    )
+);
+
+-- At most one open interval per link, so recording a relationship that already
+-- holds is a no-op (insert ... on conflict do nothing).
+create unique index if not exists idx_entity_membership_open_link
+on decisionledger.entity_membership (
+    subject_entity_id, related_entity_id, relationship_type
+) nulls not distinct
+where valid_to is null;
+
+create index if not exists idx_entity_membership_subject
+on decisionledger.entity_membership (subject_entity_id)
+where valid_to is null;
+
+create index if not exists idx_entity_membership_related
+on decisionledger.entity_membership (related_entity_id)
+where valid_to is null;

@@ -24,6 +24,12 @@ the stub reasoner (``tests/_stub_reasoner``) and the scripted fake gates
 - **Registration version** (DR-31): every bundle records the version of the
   registration intake used; ``decide`` returns the bundle ``submit`` would
   write, without writing it.
+- **Identity** (DR-32): after intake and before any gate, the identity step
+  establishes the decision's subject; every gate sees it
+  (``GateRequest.identity``) and the bundle records it. A native subject
+  that contradicts its declared namespace is refused at intake; a resolver
+  that fails, times out, or finds nothing never refuses a decision (the
+  subject is recorded unresolved and the bundle is written).
 
 Fakes are hand-written (no MagicMock on the decision path) so a call on a
 path that must not reach a collaborator fails loudly.
@@ -422,6 +428,7 @@ async def test_a_record_bundle_carries_identity_latency_and_the_raw_event(submis
     assert set(bundle.latency_breakdown) == {
         "features_ms",
         "scorer_ms",
+        "identity_ms",
         "gate_ms",
         "enforcement_ms",
     }
@@ -478,7 +485,10 @@ async def test_the_gate_receives_a_request_built_from_the_decision(gated_submiss
         submission=scripted,
         gate_context=scripted.gate_contexts[0],
         budget_ms=DEFAULT_GATE_BUDGET_MS,
+        identity=bundle.identity,
     )
+    assert request.identity is not None
+    assert request.identity.entity_id == scripted.entity_id
 
 
 async def test_the_gate_budget_can_be_set_by_the_caller(gated_submission):
@@ -1140,3 +1150,143 @@ async def test_decide_returns_the_bundle_without_writing_it(gated_submission):
     assert bundle.decision_action == CHALLENGE
     assert bundle.ingestion_timestamp == _INGESTION_TS
     assert len(_gate(gates).requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# Identity (DR-32)
+# ---------------------------------------------------------------------------
+
+
+def _identity_service(budget_ms: int = 1_000, **script: Any):
+    from app.identity import IdentityService, build_resolver
+    from tests._stub_resolver.plugin import StubResolverPlugin
+
+    composed = build_resolver(StubResolverPlugin(), None)  # type: ignore[arg-type]
+    for name, value in script.items():
+        setattr(composed.resolver, name, value)
+    return IdentityService(composed, budget_ms=budget_ms), composed.resolver
+
+
+def _naming(submission: Submission, key: str = "widget-12345") -> Submission:
+    from core.identity import NativeSubject
+
+    return submission.model_copy(
+        update={
+            "native_subject": NativeSubject(
+                native_namespace="widget-registry", native_subject_id=key
+            )
+        }
+    )
+
+
+async def test_the_subject_is_resolved_before_any_gate_and_every_gate_sees_it(
+    gated_submission,
+):
+    from tests._stub_resolver.plugin import owner_id
+
+    events: list[str] = []
+    identity, resolver = _identity_service()
+    original = resolver.resolve
+
+    def _resolve(namespace: str, key: str):
+        events.append("resolve")
+        return original(namespace, key)
+
+    resolver.resolve = _resolve  # type: ignore[method-assign]
+    gates = _compose(FakeGatePlugin())
+    gate = _gate(gates)
+    original_evaluate = gate.evaluate
+
+    async def _evaluate(request: GateRequest):
+        events.append("gate")
+        return await original_evaluate(request)
+
+    gate.evaluate = _evaluate
+    bundle = await _run(_naming(gated_submission), gates=gates, identity=identity)
+
+    assert events == ["resolve", "gate"]
+    assert bundle.identity is not None
+    assert bundle.entity_id == owner_id("owner-7")
+    [request] = gate.requests
+    assert request.identity == bundle.identity
+    assert bundle.latency_breakdown["identity_ms"] >= 0
+
+
+async def test_a_resolver_that_fails_never_refuses_the_decision(submission):
+    store = _RecordingStore()
+    identity, _ = _identity_service(error=RuntimeError("crosswalk down"))
+    bundle = await _run(
+        _naming(submission),
+        gates=_compose(FakeGatePlugin()),
+        store=store,
+        identity=identity,
+    )
+    assert store.written == [bundle]
+    assert bundle.decision_action == ALLOW  # the record is decided as usual
+    assert bundle.identity is not None
+    assert bundle.identity.provenance.method == "unresolved"
+    assert bundle.entity_id == submission.entity_id
+    assert "raised RuntimeError: crosswalk down" in (
+        bundle.identity.provenance.reason or ""
+    )
+
+
+async def test_a_resolver_that_times_out_never_holds_the_decision_up(submission):
+    store = _RecordingStore()
+    identity, _ = _identity_service(budget_ms=20, delay_s=0.5)
+    started = time.perf_counter()
+    bundle = await _run(
+        _naming(submission),
+        gates=_compose(FakeGatePlugin()),
+        store=store,
+        identity=identity,
+    )
+    assert time.perf_counter() - started < 0.4
+    assert store.written == [bundle]
+    assert bundle.identity is not None
+    assert "timed out after 20 ms" in (bundle.identity.provenance.reason or "")
+
+
+async def test_without_an_identity_step_the_passthrough_records_the_subject(
+    gated_submission,
+):
+    bundle = await _run(gated_submission, gates=_compose(FakeGatePlugin()))
+    assert bundle.identity is not None
+    assert bundle.identity.entity_id == gated_submission.entity_id
+    assert bundle.identity.provenance.resolved_by == "passthrough"
+
+
+async def test_a_native_subject_contradicting_its_declared_namespace_is_refused_first(
+    submission,
+):
+    import uuid
+
+    from core.identity import NativeNamespace
+
+    declared = _revalidated(
+        STUB_REGISTRATION.model_copy(
+            update={
+                "native_namespaces": (
+                    NativeNamespace(
+                        native_namespace="widget-registry",
+                        namespace_uuid=uuid.uuid4(),
+                        entity_type="widget",
+                    ),
+                )
+            }
+        )
+    )
+    store, gates = _RecordingStore(), _compose(FakeGatePlugin())
+    identity, resolver = _identity_service()
+    with pytest.raises(SubmissionContractError) as exc_info:
+        await _run(
+            _naming(submission),
+            gates=gates,
+            registry=_registry(declared),
+            store=store,
+            identity=identity,
+        )
+    assert exc_info.value.code == "NATIVE_SUBJECT_MISMATCH"
+    assert resolver.calls == []
+    assert _gate(gates).requests == []
+    assert store.written == []

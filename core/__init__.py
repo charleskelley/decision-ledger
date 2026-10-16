@@ -8,11 +8,17 @@ Top-level modules (framework output artifacts and vocabulary):
     actions.py:    DecisionAction — the framework's decision-time action vocabulary.
     submission.py: Submission — the concrete wire contract a reasoner hands the
                    ledger to record or to gate a decision (DR-30, DR-31), with
-                   its bypass citation, the reserved NativeSubject, and the
-                   pure intake and bypass-rule checks. Lives at the root
-                   because it composes ``observation/`` types and is carried
-                   into the gate layer.
-    bundle.py:     DecisionBundle (schema version 2) and GateRecord.
+                   its bypass citation and the pure intake and bypass-rule
+                   checks. Lives at the root because it composes
+                   ``observation/`` types and is carried into the gate layer.
+    identity.py:   The identity contract (DR-32): NativeSubject, the
+                   registered NativeNamespace, ResolvedIdentity with its
+                   IdentityProvenance and RelatedEntity values, the
+                   IdentityResolver protocol, derive_entity_id, the entity
+                   journal's EntityEvent, and the pure membership fold. A
+                   leaf: it imports nothing from the rest of ``core``.
+    bundle.py:     DecisionBundle (schema version 2, with its identity layer)
+                   and GateRecord.
     gate_request.py: GateRequest — what the framework hands a gate. Lives at
                    the root because it carries the Submission into the gate
                    layer, and ``gate/`` never imports ``observation/``.

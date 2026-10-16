@@ -64,6 +64,14 @@ Scans and build-metadata checks codify those rules:
   is a black box: it reaches an instance over HTTP only and imports no
   framework, member, or test code. Integration members (``integrations/*``)
   reach the ledger through ``app.client`` only and publish no plugin.
+- **Identity contract** (DR-32, Phase 3b): the framework assigns every
+  decision a resolved subject through a resolver the enterprise supplies,
+  and implements no identity resolution itself. No framework file has a
+  household concept (relationship types are a resolver's, declared when it
+  is composed) or names the test-only stub resolver, and no member still
+  keeps a private subject namespace constant: a reasoner declares its
+  native namespaces in its registration, where the passthrough resolver
+  reads them.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -259,6 +267,24 @@ CONFORMANCE_THIRD_PARTY = frozenset({"pytest", "httpx", "yaml"})
 # a gate closed when its output, verdict, or evidence reference is a
 # subclass.
 CLOSED_GATE_BASES = frozenset({"GateOutput", "GateInput", "GateVerdict"})
+
+#: A household, in any case and inside identifiers too (``household_id``,
+#: ``HouseholdView``). DR-32: the framework has no household concept. A
+#: relationship type (household, segment, advisor book, ...) is something an
+#: enterprise's identity resolver emits and declares when it is composed; the
+#: framework stores, validates, and projects relationship types it is told.
+HOUSEHOLD = re.compile(r"household", re.IGNORECASE)
+
+#: The test-only identity resolver (``tests/_stub_resolver``), in any
+#: spelling. Framework code knows resolvers only through the
+#: ``IdentityResolver`` contract and the resolver entry-point group.
+STUB_RESOLVER_TOKENS = re.compile(r"_?stub[-_ ]?resolver\w*", re.IGNORECASE)
+
+#: Private subject-namespace constants members kept before DR-32. A reasoner
+#: now declares each native namespace it names subjects in (and the UUID5
+#: namespace the passthrough derives its ids under) in its registration, so
+#: the ledger can assign the subject itself; the constant moved there.
+FORMER_IDENTITY_TOKENS = re.compile(r"\b_ATO_ACCOUNT_NS\b")
 
 #: ``create extension`` in any form — the framework's DDL needs none.
 CREATE_EXTENSION = re.compile(r"\bcreate\s+extension\b", re.IGNORECASE)
@@ -801,6 +827,57 @@ def test_every_integration_member_publishes_no_plugin():
         if groups:
             problems.append(f"{_rel(pyproject)}: publishes {groups}")
     assert not problems, problems
+
+
+# ---------------------------------------------------------------------------
+# Identity contract — the framework assigns identity, it does not resolve it
+# (DR-32, Phase 3b)
+# ---------------------------------------------------------------------------
+
+
+def test_framework_has_no_household_concept():
+    """No framework file names a household, in any spelling (DR-32).
+
+    The framework's identity contract is flat and typed: a resolver emits
+    ``RelatedEntity(relationship_type, entity_type, entity_id)`` values of
+    the relationship types it declares, and the framework validates,
+    journals, and projects them without knowing what any of them means. A
+    household is one enterprise's relationship type, never the framework's.
+    """
+    offenders = [
+        _rel(path)
+        for path in _scan_files()
+        if HOUSEHOLD.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"framework files name a household: {offenders}"
+
+
+def test_framework_names_no_test_resolver():
+    """The stub resolver is a test double; framework code never names it."""
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in STUB_RESOLVER_TOKENS.finditer(text)})
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, f"framework code names the stub resolver: {offenders}"
+
+
+def test_no_member_keeps_a_private_subject_namespace():
+    """A reasoner's subject namespace lives in its registration (DR-32).
+
+    The passthrough resolver derives a reasoner's subject ids from the
+    native namespaces its registration declares; a namespace constant kept
+    privately in a member's event module would be a second source the
+    ledger cannot see.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _member_src_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in FORMER_IDENTITY_TOKENS.finditer(text)})
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, f"members keep a private subject namespace: {offenders}"
 
 
 def test_framework_ddl_creates_no_extension():

@@ -1,8 +1,8 @@
 """Behavioral tests for GateRequest — what the framework hands a gate.
 
 GateRequest is the gate's whole view of a decision: the decision id, the
-reasoner's ``Submission``, the GateContext addressed to the gate, and a
-positive budget.
+reasoner's ``Submission``, the GateContext addressed to the gate, a positive
+budget, and the decision's subject as the ledger resolved it (DR-32).
 """
 
 from __future__ import annotations
@@ -75,3 +75,38 @@ def test_gate_request_is_frozen(gated_submission, gate_context):
     )
     with pytest.raises(ValidationError):
         request.decision_id = "other"
+
+
+def test_gate_request_carries_the_resolved_subject(gated_submission, gate_context):
+    from datetime import UTC, datetime
+
+    from core.identity import IdentityProvenance, ResolvedIdentity
+
+    identity = ResolvedIdentity(
+        entity_id=gated_submission.entity_id,
+        entity_type=gated_submission.entity_type,
+        provenance=IdentityProvenance(
+            resolved_by="passthrough",
+            method="unresolved",
+            resolved_at=datetime(2024, 1, 15, tzinfo=UTC),
+            reason="no identity resolver is active (passthrough)",
+        ),
+    )
+    request = GateRequest(
+        decision_id="dec-001",
+        submission=gated_submission,
+        gate_context=gate_context,
+        budget_ms=1_000,
+        identity=identity,
+    )
+    assert request.identity == identity
+    # Optional for a request built from a bundle that predates DR-32.
+    assert (
+        GateRequest(
+            decision_id="dec-001",
+            submission=gated_submission,
+            gate_context=gate_context,
+            budget_ms=1_000,
+        ).identity
+        is None
+    )

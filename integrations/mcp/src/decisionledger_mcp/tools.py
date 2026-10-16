@@ -120,7 +120,12 @@ decision."""
 
 _ENTITY_DESCRIPTION = """\
 List the decisions about one subject (`entity_id`, a UUID), newest first: \
-its timeline in the ledger. Each item has `decision_id`, `reasoner_id`, \
+its timeline in the ledger, including decisions filed under ids the \
+ledger's identity journal merged with it. Set `include_related` to a \
+relationship type your deployment's identity resolver emits to add the \
+decisions about subjects one such relationship away (a group's members, or \
+a member's group). Each item has `decision_id`, `reasoner_id`, `entity_id` \
+(the subject it is about), `relationship_type` (set for a related subject), \
 `created_at`, `decision_action`, `mode`, and `event_id`; call \
 `lookup_decision` for a full record. Page with `before` and `before_id` \
 (the `created_at` and `decision_id` of the last item you have)."""
@@ -267,6 +272,7 @@ def ledger_tools(client: LedgerClient) -> list[Tool]:
                 limit=int(arguments.get("limit", 50)),
                 before=moment,
                 before_id=arguments.get("before_id"),
+                include_related=arguments.get("include_related"),
             )
         except LedgerError as err:
             raise _problem(err) from err
@@ -354,6 +360,14 @@ def ledger_tools(client: LedgerClient) -> list[Tool]:
                     "before_id": {
                         **_UUID,
                         "description": "The decision_id of that last decision.",
+                    },
+                    "include_related": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "A relationship type: also list the decisions about "
+                            "subjects one such relationship away."
+                        ),
                     },
                 },
                 "required": ["entity_id"],

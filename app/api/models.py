@@ -82,7 +82,9 @@ class DecisionReceipt(_Response):
         decision_id: The new decision.
         reasoner_id: The submitting reasoner.
         event_id: The submission's event id.
-        entity_id: The decision subject.
+        entity_id: The decision's subject, as the ledger resolved it (DR-32):
+            the timeline it is filed under.
+        entity_type: That subject's type.
         mode: ``record`` or ``gate``.
         decision_action: The action the ledger decided.
         decision_level_rule: The decision-level rule that fired, if any.
@@ -101,6 +103,7 @@ class DecisionReceipt(_Response):
     reasoner_id: str
     event_id: str
     entity_id: str
+    entity_type: str | None = None
     mode: SubmissionMode
     decision_action: DecisionAction
     decision_level_rule: str | None
@@ -120,7 +123,8 @@ class DecisionReceipt(_Response):
             decision_id=bundle.decision_id,
             reasoner_id=submission.reasoner_id,
             event_id=submission.event_id,
-            entity_id=str(submission.entity_id),
+            entity_id=str(bundle.entity_id),
+            entity_type=bundle.entity_type,
             mode=submission.mode,
             decision_action=bundle.decision_action,
             decision_level_rule=bundle.decision_level_rule,
@@ -209,6 +213,21 @@ class EntityDecision(_Response):
 
     ``mode``, ``event_id``, and ``entity_type`` are ``None`` for a decision
     stored before schema version 2.
+
+    Attributes:
+        decision_id: The decision.
+        reasoner_id: The reasoner that made it.
+        created_at: When its bundle was written.
+        decision_action: The action it produced.
+        schema_version: Its bundle's schema version.
+        mode: ``record`` or ``gate``.
+        event_id: Its submission's event id.
+        entity_type: Its subject's type.
+        entity_id: Its subject: the timeline's subject, an id merged with it,
+            or (with ``include_related``) a related subject (DR-32).
+        relationship_type: ``None`` when ``entity_id`` is the timeline's
+            subject or merged with it; the requested relationship type when
+            it is a related subject.
     """
 
     decision_id: str
@@ -219,12 +238,23 @@ class EntityDecision(_Response):
     mode: str | None
     event_id: str | None
     entity_type: str | None
+    entity_id: str | None = None
+    relationship_type: str | None = None
 
 
 class EntityDecisions(_Response):
-    """A subject's decisions, newest first."""
+    """A subject's decisions, newest first.
+
+    Attributes:
+        entity_id: The subject asked about.
+        include_related: The relationship type whose subjects' decisions
+            were included, if any.
+        decisions: The decisions about the subject, every id merged with it,
+            and the included related subjects.
+    """
 
     entity_id: str
+    include_related: str | None = None
     decisions: list[EntityDecision]
 
 

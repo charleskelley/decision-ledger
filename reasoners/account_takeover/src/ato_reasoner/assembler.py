@@ -31,6 +31,13 @@ Translation mapping:
                                 domain-owned query travels in its gate_config
         corpus_version        = the corpus version stamp from AtoSettings
 
+    LoginEvent → subject (DR-32)
+        native_subject        = (ato-account, account_id): the account ATO
+                                scored, which the ledger resolves to the
+                                decision's subject
+        entity_id, entity_type = the account's id under ATO's declared
+                                namespace, and "account"
+
     ReasonerContext → mode (DR-30)
         ``matching_bypass_rule`` checks ATO's registered bypass rules
         (``allow-band``, ``block-band``) against the reasoner context. When
@@ -245,8 +252,9 @@ def build_submission(
     Returns:
         A ``record`` submission (``proposed_action`` and a version-pinned
         ``bypass`` citation) when a bypass rule holds; otherwise a ``gate``
-        submission with no proposal. Both carry the policy gate's context
-        and the event as ``raw_event``.
+        submission with no proposal. Both name the account as their native
+        subject and carry the policy gate's context and the event as
+        ``raw_event``.
     """
     reasoner_context = _build_reasoner_context(features, scorer)
     gate_context = _build_gate_context(
@@ -259,6 +267,7 @@ def build_submission(
         timestamp=event.timestamp,
         entity_id=event.entity_id,
         entity_type=event.entity_type,
+        native_subject=event.native_subject,
         mode="record" if rule is not None else "gate",
         proposed_action=rule.action if rule is not None else None,
         bypass=(

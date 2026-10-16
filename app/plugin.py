@@ -16,9 +16,10 @@ Two types make up the seam:
   built once per process by ``app/bootstrap.py:build_framework_services``:
   Postgres, the bundle store, the resolution journal, the reasoner registry
   (every registration, plugin or file), the composed reasoner plugins, and
-  the composed gates (``app/gates.py``). Gates own their own infrastructure
-  (DR-28), so nothing gate-specific lives here. ``LocalClient`` and the HTTP
-  routes both operate on it.
+  the composed gates (``app/gates.py``), and the identity step with the
+  deployment's active resolver (``app/identity``, DR-32). Gates own their own
+  infrastructure (DR-28), so nothing gate-specific lives here.
+  ``LocalClient`` and the HTTP routes both operate on it.
 - ``ReasonerPlugin`` — the plugin object itself: the registration record and
   the prompt and corpus directories a gate may read. Replay needs no
   reasoner code: a bundle stores the reasoner's ``Submission``, a concrete
@@ -32,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from app.gates import close_gates
+from app.identity import IdentityService
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -72,6 +74,9 @@ class FrameworkServices:
         journal: The append-only resolution journal (human resolutions of
             held decisions), or ``None`` when the services were assembled
             without one (a test double).
+        identity: The identity step: the deployment's active resolver
+            (``DECISIONLEDGER_IDENTITY_RESOLVER``) with its budget and the
+            passthrough fallback. The passthrough alone by default.
     """
 
     settings: FrameworkSettings
@@ -81,17 +86,22 @@ class FrameworkServices:
     reasoners: tuple[ReasonerPlugin, ...] = ()
     gates: Mapping[str, ComposedGate] = field(default_factory=dict)
     journal: ResolutionJournal | None = None
+    identity: IdentityService = field(default_factory=IdentityService)
 
     def close(self) -> None:
-        """Close every composed gate, then the framework's own connection.
+        """Close every composed gate, the resolver, then the connection.
 
-        The connection is closed even when a gate's ``close()`` raises; the
-        gate error then propagates.
+        The resolver and the connection are closed even when a gate's
+        ``close()`` raises, and the connection even when the resolver's does;
+        the first error then propagates.
         """
         try:
             close_gates(self.gates)
         finally:
-            self.pg_conn.close()
+            try:
+                self.identity.close()
+            finally:
+                self.pg_conn.close()
 
 
 @runtime_checkable
