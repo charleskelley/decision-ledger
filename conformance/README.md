@@ -24,6 +24,19 @@ The payloads under `examples/` are the example reasoner's
 Each test sends a copy with a fresh `event_id` and subject (`entity_id`),
 so runs never collide.
 
+| Test file | What it checks |
+| --- | --- |
+| `test_health.py` | `GET /health` answers without a key |
+| `test_decisions.py` | A record is written (201, receipt, `Location`); the bundle at that location is schema version 2 and holds the submission as sent; replay reproduces it; a gated submission runs the policy gate; an unknown decision is 404 |
+| `test_refusals.py` | A body that is not a submission, a record without its citation, and an unregistered bypass rule are 422; no key or an unknown key is 401; another reasoner's key cannot write or read; the operator key writes no decision; errors outside the API are problem documents too |
+| `test_batch_and_entities.py` | A batch records its records and rejects its gated line (`BATCH_RECORD_ONLY`); an empty batch is 422; the timeline lists the recorded decisions and needs a UUID |
+| `test_resources_and_resolutions.py` | The registrations resource serves the version every receipt names; the gates resource describes each composed gate; the operator resolves a held decision once, and only a held or challenged one |
+| `test_identity.py` | `GET /api/v1/identity/resolve` is 404 `IDENTITY_UNRESOLVED` for a subject nobody knows and 422 without both parameters; a decision that names a native subject records it in the identity's provenance, and one that names none is recorded too, both unresolved under the reasoner's own `entity_id`; the timeline says which subject each decision is about, and `include_related` with a type nothing emits adds nothing |
+
+`test_identity.py` is deployment-agnostic: its native namespaces are fresh
+random names that no identity resolver matches and no registration declares,
+so it passes on any instance, with or without an enterprise resolver.
+
 ## The instance
 
 The instance must register the example reasoner and give it an API key:

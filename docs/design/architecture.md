@@ -1,161 +1,273 @@
 # Architecture
 
-DecisionLedger uses C4-model-based architecture. 
+DecisionLedger is a decision system of record with a gating service (DR-27).
+Reasoners decide, or propose, actions about subjects and submit them to the
+ledger. The ledger validates each submission, establishes its subject through
+the enterprise's identity resolver, runs the decision's gates, enforces
+deterministically, and writes an immutable Decision Bundle that it can replay.
+Reasoners, gates, and identity resolvers are plugins or clients; the framework
+imports none of them. The diagrams follow the C4 model, from the system's
+context down to the ledger's components.
 
 ## System Diagram - Level 1
 
-![C4 system context: domain reasoners send scores and context to DecisionLedger, which asks an LLM or ML service for a recommended verdict on ambiguous cases, decides the final action, returns it with a decision ID, and answers analyst queries](../assets/diagrams/system-context.svg)
+![C4 system context: domain reasoners (Account Takeover shipped, others illustrative) submit decisions to DecisionLedger to record or to gate and get back a decision id and the final action; DecisionLedger runs its gates, and for ambiguous cases its RAG policy gate asks an LLM service for a recommended verdict while deterministic enforcement decides the final action; the enterprise's identity resolver tells DecisionLedger who each decision's subject is; the decision analyst reads a subject's decisions, replays them, and resolves held ones](../assets/diagrams/system-context.svg)
 
-Every reasoner submits an *observation* (its scores plus the context behind them) through the same contract, and DecisionLedger returns the final action to whichever reasoner submitted it. Account Takeover is the shipped reference reasoner; Content Moderation, Customer Lifetime Value, and the dashed "+ Next Reasoner" are illustrative. The LLM or ML service only recommends a verdict; deterministic enforcement inside DecisionLedger makes the call. At runtime that service is OpenAI GPT-4o. Arrow color marks the element that starts each exchange.
+Every reasoner submits through the same contract, the wire `Submission`, in
+one of two modes: it *records* a decision it made, citing one of its
+registered bypass rules, or asks the ledger to *gate* one (DR-30). The ledger
+answers with a receipt that carries the decision id and the final action.
+Account Takeover (ATO) is the shipped reference reasoner; the other reasoners
+drawn are illustrative. The LLM service only recommends a verdict to the RAG
+policy gate; deterministic enforcement inside the ledger makes the call. The
+enterprise's identity resolver (its master data or crosswalk) maps the subject
+a reasoner scored to the enterprise's subject, and the ledger records that
+mapping on every bundle (DR-32; see [Identity](identity.md)). The decision
+analyst reads a subject's decisions, replays them, and resolves held ones.
 
 ## Containers Diagram - Level 2
 
-![C4 containers: the Decision API runs the mounted Account Takeover reasoner in-process (other reasoners shown are illustrative) and, through the mounted Account Takeover code, reads and writes that reasoner's feature state in its own Redis, drawn outside the DecisionLedger boundary; for gate-routed cases it searches policy chunks in PostgreSQL (pgvector) and Elasticsearch and asks the LLM or ML service for a verdict; it records every decision bundle in PostgreSQL, returns the final action and decision ID, and serves bundle lookup and replay to the decision analyst](../assets/diagrams/containers.svg)
+![C4 containers: inside the DecisionLedger boundary, the Ledger API (a FastAPI app that loads gate plugins and the identity resolver plugin in process) and PostgreSQL (schema decisionledger: bundles, registrations, resolution attempts, the entity journal and membership); the RAG policy gate owns Elasticsearch and its policy_rag schema on the same Postgres server; outside the boundary, the Account Takeover service (port 8001, with its own Redis) submits over HTTP or runs the ledger in its own process, agent reasoners call the ledger through the MCP server, the RAG gate calls the LLM service, the enterprise identity resolver is an installed plugin, and the decision analyst uses the API](../assets/diagrams/containers.svg)
 
-DecisionLedger runs as one process, the Decision API (`uv run uvicorn --factory app.main:create_app`), next to three datastores from `docker compose`. PostgreSQL and Elasticsearch are the framework's and shared by every reasoner; Redis belongs to Account Takeover and comes from its own `reasoners/account_takeover/compose.yaml`, which the root compose file pulls in with `include:`. Reasoners are not separate containers: `create_app` discovers each installed reasoner plugin through its entry point and mounts its router and pipeline into the Decision API, and Account Takeover receives login events at `POST /api/v1/ato/decisions` before handing its observation to the framework in-process. Policy retrieval and the LLM call (OpenAI GPT-4o) happen only for cases routed to the gate; every decision writes a bundle to PostgreSQL. The offline tools (corpus loader, eval harness, scorer trainer, scenario generator, and baseline capture) run on demand and are not shown, because the system does not need them running to make decisions. Gate-routed retrieval does depend on one of them: it reads the policy chunks that the corpus loader (`make build-policy-index`) writes to PostgreSQL and Elasticsearch. The eval harness also calls Anthropic Claude for its faithfulness and citation judges. As at Level 1, arrow color marks the element that starts each exchange, and grey arrows come from the illustrative reasoners. Ochre cylinders hold policy data and the decision ledger; the cyan one holds Account Takeover feature state and sits outside the DecisionLedger boundary because the reasoner owns it, so its edge is indigo: Account Takeover code running inside the API process initiates it.
+The ledger runs as one process, the Ledger API (`make serve`:
+`uv run uvicorn --factory app.main:create_app`, port 8000). At startup
+`create_app` discovers the installed gate plugins (`decisionledger.gates`
+entry points) and reasoner plugins (`decisionledger.reasoners`, filtered by
+`DECISIONLEDGER_REASONERS`), and its lifespan builds the shared services once
+(`app/bootstrap.py`), including the identity resolver the deployment names
+(`DECISIONLEDGER_IDENTITY_RESOLVER`, loaded from the
+`decisionledger.identity_resolvers` group; the built-in passthrough when
+none). It mounts no reasoner router and runs no reasoner code (DR-31).
 
-## Component Diagram - Level 3 (Decision Pipeline)
+The framework's only infrastructure is PostgreSQL. Its `decisionledger`
+schema holds the decision bundles, the replay logs, the resolution attempts,
+the registration snapshots, and the identity journal and its membership
+projection (`app/audit/sql/`). The RAG policy gate (`gates/policy_rag`) owns
+its own stores: Elasticsearch for BM25 search (its `compose.yaml`) and the
+`policy_rag` schema with the pgvector extension, which its own DDL creates on
+the same Postgres server. That is why the root `docker-compose.yml` runs the
+`pgvector/pgvector` image; the framework's DDL creates no extension (DR-28).
 
-![Component Diagram - Level 3](../assets/diagrams/components.svg)
+Outside the boundary:
 
-Level 3 zooms into one decision. The indigo half (features, scorer, assembler, and Redis state) is Account Takeover code in `ato_reasoner`; the teal half (routing, retrieval, gate, enforcement, audit) is framework code in `app/`. The assembler's `Observation` is the only thing that crosses from one half to the other.
+- **Account Takeover** runs as its own FastAPI service
+  (`make serve-account_takeover`, port 8001) with its own Redis, from
+  `reasoners/account_takeover/compose.yaml`. It submits to the Ledger API
+  over HTTP (`HttpClient`, when `ATO_LEDGER_URL` is set) or runs the ledger in
+  its own process (`LocalClient`, the default), writing to the same Postgres.
+- **The MCP server** (`decisionledger-mcp`, stdio) lets agent reasoners call
+  the ledger over HTTP as tools (`integrations/mcp`; reference:
+  [`decisionledger_mcp`](../reference/integrations/mcp.md)).
+- **The LLM service** is called by the RAG policy gate only.
+- **The enterprise identity resolver** is an installed plugin
+  (`decisionledger.identity_resolvers`); none ships with this repository.
+- **The decision analyst** uses the ledger's routes (lookup, replay, the
+  subject timeline, resolutions).
+
+The offline tools (each reasoner's scorer trainer, scenario generator, and
+eval adapter; the RAG gate's corpus loader; the two eval harnesses) run on
+demand and are not drawn. The RAG gate's retrieval depends on one of them:
+it reads the policy chunks its corpus loader writes
+(`make build-policy-index-<reasoner_id>`).
+
+## Component Diagram - Level 3 (Ledger API)
+
+![C4 components of the Ledger API: the routes and the key ring call the operations (create_decision, record_batch, lookup, replay, resolve, the entity timeline), which call decide and submit: intake validation, the identity step (resolver or passthrough), the gate set, gate invocation (mandatory gates concurrently, then advisory), gate-level enforcement, the decision-level rules and the combinator, and the bundle store write to PostgreSQL; side paths are replay (re-enforcing stored gate outputs under the registration snapshot), registrations and their snapshots, and the entity journal and timelines; LocalClient enters at the operations](../assets/diagrams/components.svg)
+
+Level 3 zooms into the Ledger API. A route authenticates its caller by the
+`X-DecisionLedger-Key` header (`app/auth.py`) and calls an *operation*
+(`app/api/`): `create_decision`, `record_batch`, `lookup_decision`,
+`replay_decision`, `resolve_decision`, `entity_decisions`, and the read-only
+resources. `LocalClient` (`app/client.py`) calls the same operations in
+process as the trusted principal, so an HTTP request and an in-process call
+run identical code. A decision goes through `app/submit.py`: intake
+validation, the identity step (`app/identity/`), the gate set, gate
+invocation (`app.gates.invoke_gate`; mandatory gates concurrently, then
+advisory ones), gate-level enforcement, the decision-level rules and the
+combinator (`app/enforcement/resolver.py`), and the bundle write
+(`app/audit/store.py`). Replay re-enforces a bundle's stored gate outputs
+under the snapshot of the registration version it cites, without invoking a
+gate. [Pipeline](pipeline.md) walks the same path step by step.
 
 ---
 
 ## Directory Layout
 
-The repository is a uv workspace. The root project, `decision-ledger`, is the framework: `core/`, `app/`, and `eval/`. Each reasoner is a workspace member under `reasoners/<name>/` with its own `pyproject.toml` and import package, discovered at runtime through entry points (DR-26).
+The repository is a uv workspace. The root project, `decision-ledger`, is the
+framework: `core/`, `app/`, and `eval/`. Everything else that runs is a
+workspace member with its own `pyproject.toml` and import package (members:
+`reasoners/*`, `gates/*`, `integrations/*`), discovered at runtime through
+entry points (DR-26, DR-28) or acting as a client of the ledger (DR-31).
 
 ```
 decision-ledger/
-├── pyproject.toml            Framework project + workspace root; the `reasoners` dependency group composes the deployment
-├── docker-compose.yml        Shared Postgres + Elasticsearch; `include:` pulls in each reasoner's compose.yaml
-├── Makefile                  Framework targets; `-include` of every reasoners/*/reasoner.mk
+├── pyproject.toml            Framework project + workspace root; dependency groups reasoners, gates, integrations compose the checkout
+├── docker-compose.yml        Postgres (pgvector image); `include:` pulls in ATO's Redis and the RAG gate's Elasticsearch
+├── Makefile                  Framework targets; `-include` of every reasoners/*/reasoner.mk and gates/*/gate.mk
+├── justfile                  Convenience recipes (`just diagrams`)
 │
-├── core/                     Framework contracts — domain-agnostic, no infrastructure dependencies
-│   ├── observation/              Observation protocol, ReasonerContext, GateContext, ReasonerRegistration, intake validation
-│   ├── gate/                     Universal gate contracts; gate/policy/ holds the LLM policy-gate contracts (prompts, citations, corpus model)
-│   ├── resolution/               Append-only resolution attempts (human review, SLA default)
+├── core/                     Framework contracts: Pydantic models, protocols, pure functions; no infrastructure
+│   ├── actions.py                DecisionAction (ALLOW, CHALLENGE, HOLD, BLOCK)
+│   ├── submission.py             Submission (wire schema v2), BypassCitation, BypassCheck, intake and bypass-rule checks
+│   ├── identity.py               The identity contract (NativeSubject, ResolvedIdentity, IdentityResolver, journal types); a leaf of core
+│   ├── bundle.py                 DecisionBundle (schema version 2) and GateRecord
+│   ├── gate_request.py           GateRequest: what the ledger hands a gate
+│   ├── enforcement.py            EnforcementDecision
+│   ├── exceptions.py             Framework exceptions, including LedgerError (status + stable code)
+│   ├── observation/              ReasonerContext, GateContext, and the registration (GateBinding, BypassRule, ReasonerRegistration)
+│   ├── gate/                     GateInput, the open GateOutput and EvidenceRef, GateVerdict, the predicate language, the combinator
+│   ├── resolution/               Append-only resolution attempts (human, SLA default)
 │   ├── llm/                      SDK-agnostic LLMClient protocol (DR-23)
-│   ├── eval/                     Eval metric contracts
-│   └── bundle.py, actions.py, enforcement.py, routes.py, snippet.py, exceptions.py
+│   └── eval/                     Eval dimension and metric contracts, EvalReport
 │
-├── app/                      Framework runtime — imports from core/, adds infrastructure, never imports a reasoner
-│   ├── main.py                   create_app() factory: discovers plugins, mounts their routers, serves health/lookup/replay
-│   ├── plugin.py                 ReasonerPlugin protocol, FrameworkServices, ReasonerServices
-│   ├── plugins.py                Entry-point discovery, DECISIONLEDGER_REASONERS allowlist, registry builder
-│   ├── bootstrap.py              build_framework_services — the one place infrastructure clients are built
-│   ├── decide.py                 execute_decision: framework half of the handoff (validate → retrieval → gate → enforcement → audit)
-│   ├── retrieval/                Hybrid retriever, corpus loader, es/policy-chunks.json (index mapping)
-│   ├── gate/policy/              LLM policy gate + YAML prompt registry (loads each plugin's prompts directory)
-│   ├── enforcement/              Deterministic rule application, final action resolution
-│   ├── audit/                    Bundle construction, store + replay, resolution journal, sql/ (canonical DDL)
-│   ├── llm/                      LLMClient adapters (OpenAI, Anthropic) — only files allowed to import an LLM SDK
-│   ├── monitoring/               Structured logging, latency tracking
-│   ├── reasoner_registry.py      StaticReasonerRegistry (built from the discovered plugins)
-│   └── settings.py               FrameworkSettings (.env-driven)
+├── app/                      Framework runtime: imports core/, owns Postgres, names no reasoner or gate
+│   ├── main.py                   create_app(): discovers plugins, builds services in the lifespan, serves /health and /api/v1
+│   ├── api/                      The ledger's routes and operations; wire models; RFC 9457 problem documents
+│   ├── auth.py                   API keys to principals (reasoner, operator, trusted in-process)
+│   ├── client.py                 LedgerClient: LocalClient (in process) and HttpClient (httpx)
+│   ├── submit.py                 decide() and submit(): validate → identity → gate set → gates → enforce → write
+│   ├── gates.py                  Gate seam: GateKind, Gate, GatePlugin, ConfigAuthorizer, ReasonerScope, discovery, invoke_gate
+│   ├── identity/                 The identity step: resolver plugin seam and discovery, the passthrough
+│   ├── enforcement/              Gate-level tiers, decision-level rules, the combinator
+│   ├── audit/                    Bundle assembly, BundleStore and replay, registration snapshots, resolution and entity journals, sql/ (canonical DDL)
+│   ├── plugin.py                 ReasonerPlugin protocol, FrameworkServices
+│   ├── plugins.py                Reasoner plugin discovery, the registration file, build_registry
+│   ├── reasoner_registry.py      StaticReasonerRegistry
+│   ├── bootstrap.py              build_framework_services: the one place the shared services are built
+│   ├── schemas.py                Exports schemas/submission-v2.json and bundle-v2.json (`make schemas`)
+│   ├── monitoring/               Structured logging, duration_ms
+│   └── settings.py               FrameworkSettings (no prefix: POSTGRES_*, LOG_*, DECISIONLEDGER_*)
 │
-├── eval/                     Reasoner-agnostic evaluation harness
+├── eval/                     Framework eval harness (reasoner- and gate-agnostic)
 │   ├── adapter.py                EvalAdapter / EvalDriver protocols, entry-point loader
-│   ├── dimensions/               One module per dimension (retrieval, faithfulness, consistency, citation, robustness)
-│   ├── clients/                  RAGAS adapter
-│   ├── judge.py                  LLM-as-judge primitive
-│   ├── runners/                  harness.py — `--reasoner-id` selects the reasoner's adapter
-│   └── prompts/                  Judge prompt templates
+│   ├── dimensions/               consistency, robustness, shadow (plus the shared base and the skipped-dimension result)
+│   └── runners/                  harness.py: `--reasoner-id` selects the reasoner's adapter
 │
-├── reasoners/                Reasoner plugins — one uv workspace member per domain
-│   └── account_takeover/         The reference reasoner (distribution ato-reasoner, import package ato_reasoner)
-│       ├── pyproject.toml            Dependencies (xgboost, redis, ...) + the two entry points
-│       ├── ruff.toml                 Extends the root Ruff config
-│       ├── reasoner.mk               Suffixed Make targets (train-account_takeover, prepare-account_takeover, ...)
-│       ├── compose.yaml              Redis (feature windows, dedup, login-event stream)
-│       ├── src/ato_reasoner/
-│       │   ├── plugin.py                 PLUGIN — the runtime entry-point target
-│       │   ├── events.py, features.py    LoginEvent, AtoFeatureVector
-│       │   ├── feature_service.py        Online feature computation over Redis
-│       │   ├── ingestion/                Redis Streams consumer + dedup
-│       │   ├── scorer/                   XGBoost scorer, trainer, model card; models/ holds the artifact
-│       │   ├── assembler.py              build_observation() — the framework handoff
-│       │   ├── pipeline.py               run_ato_decision (calls app/decide.py:execute_decision)
-│       │   ├── api.py                    FastAPI router (POST /api/v1/ato/decisions)
-│       │   ├── registry.py               ATO_REGISTRATION (identity, allowed resources, enforcement profile)
-│       │   ├── settings.py               AtoSettings (ATO_ prefix)
-│       │   ├── retrieval_query.py, policy.py
-│       │   ├── prompts/                  ato-v1/v2/v3.yaml
-│       │   ├── corpus/                   Policy documents (Markdown + YAML frontmatter)
-│       │   ├── generator/                Synthetic scenario generator
-│       │   └── eval/                     adapter.py (ADAPTER), driver.py, capture_baselines.py, datasets/
-│       └── tests/                    Member tests (collected by the root pytest run)
+├── gates/                    Gate plugins, one workspace member each (DR-28)
+│   ├── rules/                    decisionledger-gate-rules (rules_gate, gate_id rules): declarative rule sets, no infrastructure
+│   └── policy_rag/               decisionledger-gate-policy-rag (policy_rag_gate, gate_id policy): retrieval, prompts, LLM adapters, its own sql/, es/, compose.yaml, eval/
 │
-├── tests/                    Framework tests; _stub_reasoner/ is a test-only second reasoner
+├── reasoners/                Reasoner plugins, one workspace member per domain (DR-26)
+│   ├── account_takeover/         ato-reasoner (ato_reasoner): the reference reasoner, its own service, Redis, XGBoost scorer
+│   └── example/                  example-reasoner (example_reasoner): a minimal documented reasoner (widgets)
 │
-└── docs/                     Design documentation
-    ├── design/                   Architecture, pipeline, data, interface, evaluation, infrastructure
+├── integrations/
+│   └── mcp/                      decisionledger-mcp (decisionledger_mcp): the ledger as six MCP tools over HttpClient
+│
+├── conformance/              Black-box HTTP pytest suite and example payloads, run against any instance (`make conformance`)
+├── schemas/                  submission-v2.json, bundle-v2.json: exported from the models; tests/test_schemas.py fails on drift
+├── tests/                    Framework tests; test-only doubles _stub_reasoner/, _fake_gate/, _stub_resolver/
+├── outputs/                  Eval baselines (outputs/eval/, tracked); staged reports (outputs/stage/, gitignored)
+│
+└── docs/                     This site: design/, reference/ (API reference), operations/, development/
     └── assets/diagrams/          Rendered SVGs (committed; regenerate with `just diagrams`)
 ```
 
-### The `core/`, `app/`, and `reasoners/` Boundaries
+Each reasoner member owns its whole domain (for ATO: events, ingestion,
+features, model, assembler, service, settings, prompts, policy corpus, eval
+adapter and datasets) and any infrastructure only it uses. Each gate member owns its infrastructure and
+its eval. Their layouts are in their own READMEs and in
+[Reasoners](reasoners/index.md) and [Gates](gates/index.md).
 
-`core/` is intentionally free of infrastructure dependencies — no Redis clients, no database drivers, no LLM SDK imports, no FastAPI. It contains the framework's Pydantic contracts, protocols, action space definitions, bundle structure, and evaluation metric interfaces. `core/` imports from nothing internal.
+---
 
-`app/` is the framework runtime. It owns the shared infrastructure (PostgreSQL, Elasticsearch, the LLM providers) and everything after the handoff: retrieval, the policy gate, enforcement, and the audit store. It imports from `core/` and never from a reasoner, `app/main.py` included: reasoners arrive as plugin objects through the `decisionledger.reasoners` entry-point group.
+## Boundaries and Dependency Rules
 
-`reasoners/<name>/` holds one domain each. A reasoner owns everything up to and including `build_observation()`: its event types, features, model, ingestion, pipeline, router, settings, prompts, policy corpus, eval adapter and datasets, and any infrastructure only it uses (ATO's Redis). It imports from `core/` and `app/`; neither imports from it.
+```
+reasoners/<member>    ──→ core/, app/            (its pyproject depends on decision-ledger)
+gates/<member>        ──→ core/, app/            reasoner-agnostic
+integrations/<member> ──→ core/, app.client, app.api.models
+eval/                 ──→ core/, app/
+app/                  ──→ core/, PostgreSQL
+core/                 ──→ the standard library and Pydantic only
 
-These boundaries enforce: (1) testability — `core/` is unit-testable without Docker running, and framework tests run against a stub reasoner rather than ATO; (2) modularity — adding a second reasoner domain is a new workspace member with zero changes to `core/`, `app/`, or `eval/`; (3) legibility — a reader can understand the complete decision model by reading `core/` without encountering any ATO-specific types.
+app/, eval/           ··→ plugins                entry points only, never an import:
+                                                 decisionledger.reasoners           (app/plugins.py)
+                                                 decisionledger.gates               (app/gates.py)
+                                                 decisionledger.identity_resolvers  (app/identity/resolvers.py)
+                                                 decisionledger.eval_adapters       (eval/adapter.py)
+conformance/          ··→ a running ledger       over HTTP only
+```
+
+`tests/test_framework_boundary.py` and `tests/core/test_import_boundary.py`
+make these rules build failures:
+
+- **The framework names no plugin.** No module under `core/`, `app/`, or
+  `eval/` imports a workspace member (reasoner, gate, or integration, read
+  from the members' pyprojects) or anything under `tests/`, and no framework
+  `.py`, `.yaml`, `.sql`, or `.json` file names a reasoner's symbols, ids,
+  templates, features, or jurisdictions, a gate member's vocabulary, or the
+  infrastructure a gate owns. The framework mounts no reasoner router and
+  builds no reasoner services.
+- **`core/` is pure.** It imports nothing from `app/` or a reasoner; in
+  practice it imports only the standard library and Pydantic (DR-8). The test
+  for `core/`: can this code be unit-tested without Docker running? If not,
+  it does not belong there.
+- **Inside `core/`** (DR-11): `core/gate/` does not import `core/observation/`
+  (so `GateRequest`, which carries the submission into the gate layer, lives
+  at `core/gate_request.py`), `core/observation/` does not import
+  `core.gate.output`, and `core/identity.py` is a leaf that imports nothing
+  from the rest of `core`.
+- **Gates are reasoner-agnostic.** A gate member imports no reasoner and names
+  no ATO token in its source, DDL, or index mapping, and its DDL never touches
+  the framework's `decisionledger` schema. The framework never defines or
+  imports a `GateOutput`, `GateInput`, or `GateVerdict` subclass.
+- **Integrations are clients.** An integration member imports from `app` only
+  `app.client` and `app.api.models`, imports no other member, and publishes no
+  plugin.
+- **The conformance suite is a black box.** It imports only the standard
+  library, `pytest`, `httpx`, `yaml`, and its own helpers.
+- **LLM SDKs are confined** (DR-23). `openai` and `anthropic` are imported only
+  by the RAG policy gate's `llm/` adapters, in every tree; the CI `boundary`
+  job repeats the check with a grep.
+- **The framework's infrastructure is Postgres.** The framework DDL creates no
+  extension.
+- **Build metadata.** The root package depends on exactly the framework set
+  (pydantic, fastapi, starlette, uvicorn, httpx, psycopg, pyyaml, orjson,
+  pydantic-settings, structlog), declares no optional extras and no entry
+  points, and its wheel ships only `core`, `app`, and `eval`. Each reasoner
+  member declares its own `decisionledger.reasoners` and
+  `decisionledger.eval_adapters` entry points, and each gate member its own
+  `decisionledger.gates` entry point. The workspace members are exactly
+  `reasoners/*`, `gates/*`, and `integrations/*`.
+
+Which plugins a checkout installs is a deployment choice, recorded in the root
+`reasoners`, `gates`, and `integrations` dependency groups, which `uv sync`
+installs by default. These boundaries buy testability (framework tests run
+against test doubles, with no Docker for unit tests), modularity (a new
+reasoner or gate is a new member with no framework change; `tests/_stub_reasoner`
+and `tests/_fake_gate` prove it), and legibility (`core/` reads as the whole
+decision model without any reasoner's types).
 
 ---
 
 ## Component Overview
 
-Twelve components across the pipeline, organized by phase. `ato_reasoner/` paths are relative to `reasoners/account_takeover/src/`.
+Framework components (the ledger):
 
-| ID | Component | Layer | Phase |
-|----|-----------|-------|-------|
-| C1 | Scenario Generator | `ato_reasoner/generator/` | Foundation |
-| C2 | Policy Corpus | `ato_reasoner/corpus/`, `app/retrieval/corpus_loader.py` | Foundation |
-| C2b | Reasoner Assembler | `ato_reasoner/assembler.py` | Foundation |
-| C3 | Idempotent Ingestion | `ato_reasoner/ingestion/` | Foundation |
-| C4 | Online Feature Computation | `ato_reasoner/feature_service.py` | Core |
-| C5 | Fast ML Scorer | `ato_reasoner/scorer/` | Core |
-| C6 | Policy RAG Retriever | `app/retrieval/` | Foundation → Core |
-| C7 | LLM Policy Gate | `app/gate/policy/` | Core |
-| C8 | Deterministic Enforcement | `app/enforcement/` | Core |
-| C9 | Decision Bundle + Replay | `app/audit/` | Core |
-| C10 | Evaluation Harness | `eval/` (+ `ato_reasoner/eval/` adapter, driver, datasets) | Eval |
-| C11 | CI Gate | `.github/workflows/` | Eval |
-| C12 | Monitoring | `app/monitoring/` | Eval |
+| Component | Location | Role |
+|-----------|----------|------|
+| Ledger API | `app/main.py`, `app/api/` | Routes, operations, problem documents |
+| Auth | `app/auth.py` | API keys to principals; tenant-scoped reads |
+| Clients | `app/client.py` | `LocalClient` and `HttpClient`, one `LedgerClient` protocol |
+| Intake and orchestration | `app/submit.py`, `core/submission.py` | Validation, gate set, mandatory then advisory gates |
+| Identity step | `app/identity/`, `core/identity.py` | Resolver plugin or passthrough; the subject on every bundle |
+| Gate seam | `app/gates.py` | Discovery, build, fail-closed invocation |
+| Deterministic enforcement | `app/enforcement/`, `core/gate/combinator.py` | Gate-level tiers, decision-level rules, most restrictive action |
+| Bundle store and replay | `app/audit/` | Version-2 bundles, replay, registration snapshots, journals |
+| Contract artifacts | `app/schemas.py`, `schemas/`, `conformance/` | JSON schemas and the black-box HTTP suite |
+| Eval harness | `eval/` | Consistency, robustness, and shadow dimensions per reasoner |
+| Monitoring | `app/monitoring/` | Structured JSON logging, `duration_ms` |
 
----
+Members (plugins and clients the framework never imports):
 
-## C4 Container Diagram
-
-See [Containers Diagram - Level 2](#containers-diagram-level-2) above.
-
-D2 source: [`docs/design/diagrams/containers.d2`](diagrams/containers.d2)
-
----
-
-## Dependency Rules
-
-The dependency graph is strictly layered:
-
-```
-reasoners/<member> ──→ core/, app/        (its pyproject depends on decision-ledger)
-reasoners/<member> ──→ its own infrastructure (ATO: Redis, XGBoost)
-eval/              ──→ core/, app/
-app/               ──→ core/
-app/               ──→ shared infrastructure (PostgreSQL, Elasticsearch, LLM providers)
-core/              ──→ [nothing internal]
-
-app/, eval/        ··→ reasoners          entry points only, never an import:
-                                          decisionledger.reasoners      (app/plugins.py)
-                                          decisionledger.eval_adapters  (eval/adapter.py)
-```
-
-The root project never depends on a member: its `[project] dependencies` and wheel name no reasoner. Which reasoners a checkout installs is a deployment choice, recorded in the root `reasoners` dependency group, which `uv sync` installs by default.
-
-`tests/test_framework_boundary.py` makes the rules hard build failures. It fails when anything under `app/`, `core/`, or `eval/` imports a reasoner package or names an ATO symbol, id, template, feature, or jurisdiction (in `.py`, `.yaml`, `.sql`, or the ES mapping); when `core/` imports `app/`; when the root `pyproject.toml` lists a reasoner dependency or entry point; and when a member under `reasoners/` does not declare its own entry points. `core/` additionally may not import an infrastructure SDK; for LLM SDKs the CI `boundary` job enforces that anywhere outside `app/llm/`. The test for `core/`: can this code be unit-tested without Docker running? If no, it does not belong there.
+| Component | Location | Role |
+|-----------|----------|------|
+| Rules gate | `gates/rules/` | Declarative rule sets over a reasoner's evidence |
+| RAG policy gate | `gates/policy_rag/` | Hybrid retrieval, prompt rendering, LLM verdict; its own eval |
+| Account Takeover | `reasoners/account_takeover/` | Reference reasoner: ingestion, features, scorer, assembler, its own service |
+| Example reasoner | `reasoners/example/` | Minimal documented reasoner for the conformance suite and new teams |
+| MCP server | `integrations/mcp/` | Six tools for agent reasoners over `HttpClient` |
 
 ---
 
@@ -163,11 +275,17 @@ The root project never depends on a member: its `[project] dependencies` and whe
 
 | Context | Form | Example |
 |---------|------|---------|
-| Repo slug | kebab-case | `decision-ledger` |
-| Python package / imports | snake_case | `decision_ledger` |
-| Class / type references | PascalCase | `DecisionBundle`, `PolicyGateOutput` |
-| Prose / documentation | two words | "Decision Ledger" |
-| CLI tool | kebab-case | `decision-ledger replay` |
-| Pydantic models | PascalCase | `LoginEvent`, `FeatureVector` |
-| Enums | UPPER_SNAKE_CASE | `DecisionAction.HOLD` |
-| Feature names | snake_case strings | `"velocity_1min"`, `"geo_novelty_score"` |
+| Product and prose | one word | "DecisionLedger" |
+| Repository, root distribution | kebab-case | `decision-ledger` |
+| Framework import packages | snake_case | `core`, `app`, `eval` |
+| Member distribution | kebab-case | `ato-reasoner`, `decisionledger-gate-rules`, `decisionledger-mcp` |
+| Member import package | snake_case | `ato_reasoner`, `policy_rag_gate`, `decisionledger_mcp` |
+| Reasoner id (entry-point name) | kebab-case | `ato-reasoner`, `example-reasoner` |
+| Gate id (entry-point name) | lowercase | `policy`, `rules` |
+| Entry-point groups | dotted | `decisionledger.gates` |
+| Environment variables | UPPER_SNAKE_CASE; a member's settings carry its prefix | `DECISIONLEDGER_API_KEYS` (framework), `ATO_LEDGER_URL`, `POLICY_RAG_GATE_ELASTICSEARCH_URL`, `RULES_GATE_RULESETS_DIR` |
+| Classes and Pydantic models | PascalCase | `DecisionBundle`, `GateOutput` |
+| Enum members | UPPER_SNAKE_CASE | `DecisionAction.HOLD` |
+| Problem codes | UPPER_SNAKE_CASE | `BYPASS_RULE_UNREGISTERED` |
+| Feature names | snake_case strings | `"velocity_1min"` (ATO) |
+| Make targets of a member | suffixed by member | `serve-account_takeover`, `eval-gate-policy_rag` |
