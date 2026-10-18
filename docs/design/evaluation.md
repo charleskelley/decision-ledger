@@ -1,313 +1,318 @@
 # Evaluation
 
-The 5D evaluation framework that governs every release candidate. The harness
-runs on demand (locally with `make eval`, in CI via `workflow_dispatch`; there
-is no scheduled run); quality and integration gates run on every push to
-`main` and every PR. A failing dimension blocks promotion of the eval baseline.
+DecisionLedger evaluates at two levels, and each level owns its harness:
 
-The harness is reasoner-agnostic and evaluates one reasoner per run. The
-framework (`eval/`) owns the five dimensions, thresholds, and report format.
-Each reasoner supplies an `EvalAdapter` (`eval/adapter.py`) through the
-`decisionledger.eval_adapters` entry-point group: its event type, its golden
-datasets, and an in-process driver into its decision pipeline. For ATO that
-is `ato_reasoner.eval.adapter:ADAPTER`, with the driver in
-`ato_reasoner/eval/driver.py` and the datasets in
-`ato_reasoner/eval/datasets/`.
+- **The framework harness** (`eval/`, `eval.runners.harness`) evaluates a
+  *reasoner*: it drives the reasoner's own pipeline through the ledger and
+  measures what the ledger decides. Its dimensions are decision consistency,
+  adversarial robustness, and shadow evaluation.
+- **A gate's own harness** evaluates *that gate*. The RAG policy gate's
+  (`policy_rag_gate.eval`) measures retrieval quality, generation
+  faithfulness, and citation accuracy against the datasets each reasoner
+  ships for it
+  ([DR-28](decisions.md#dr-28-gate-contract-and-gate-plugins)).
 
-![Evaluation Harness — 5D Governance Gate](../assets/diagrams/eval-harness.svg)
+Both write the same `EvalReport` (`core/eval/metrics.py`) through the same
+runner (`eval.runners.harness.run_eval`). Both run on demand only: locally
+with `make` targets, and in CI through a manually triggered workflow. A
+failing or skipped dimension fails the run, and only a passing report is
+promoted to a baseline.
 
----
-
-## Why This Framework Exists
-
-Standard ML evaluation — hold-out accuracy, AUC, F1 — is necessary but not
-sufficient for a governed AI decision system. It doesn't catch:
-
-- The retrieval layer surfacing the wrong policy evidence (upstream of
-  everything else)
-- The LLM generating confident, plausible rationale not grounded in retrieved
-  content
-- Action instability across equivalent event orderings
-- Citations that are present but substantively irrelevant
-- Correct behavior degrading under adversarial input
-
-Each of these failure modes is invisible to a standard metric dashboard. Each is
-catastrophic in a system where decisions carry regulatory consequence. The
-five-dimension framework is designed specifically to catch them.
+![Two evaluation harnesses fed by each reasoner's EvalAdapter. The framework harness runs consistency and robustness through the reasoner's own pipeline (its EvalDriver, submitting through LocalClient) and runs shadow evaluation, which samples the run's recorded bundles and re-runs the advisory gates offline. The RAG policy gate's harness runs retrieval against the gate's hybrid retriever, and faithfulness and citation with LLM judges. Each harness writes an EvalReport to its own staged path: outputs/stage/eval/reasoner/<reasoner_id>/ and outputs/stage/eval/gate/policy/<reasoner_id>/.](../assets/diagrams/eval-harness.svg)
 
 ---
 
-## Dimension 01 — Retrieval Quality
+## Why two harnesses
 
-**What it measures:** Does the retriever surface the right policy evidence for
-each decision context — including edge cases requiring version conflict
-resolution and jurisdiction disambiguation?
+Standard ML evaluation (hold-out accuracy, AUC, F1) is necessary but not
+sufficient for a governed decision system. It does not catch:
 
-**Why it matters:** The retrieval layer is the foundation. If the wrong policy
-evidence reaches the LLM, no amount of reasoning quality fixes the output.
-Retrieval errors compound silently — the LLM will generate confident,
-well-formatted rationale citing whatever it received.
+- retrieval surfacing the wrong policy evidence, upstream of everything else;
+- a model producing confident rationale not grounded in what it retrieved;
+- citations that are present but do not support their claims;
+- the final action changing with the order events arrive in;
+- correct behavior degrading under adversarial input.
 
-### Metrics
-
-| Metric                       | Description                                                                   |
-|------------------------------|-------------------------------------------------------------------------------|
-| Context Precision @k         | Fraction of retrieved chunks that are relevant to the query                   |
-| Context Recall @k            | Fraction of relevant chunks that are retrieved                                |
-| Mean Reciprocal Rank         | How highly the first relevant result is ranked                                |
-| Version Resolution Accuracy  | Rate at which the latest policy version is preferred over superseded versions |
-| Jurisdiction Filter Accuracy | Rate at which jurisdiction-scoped queries return correctly scoped results     |
-
-### Measurement
-
-Evaluated against a golden query set of 12 curated queries, each with annotated
-relevant policy chunks. The golden set covers:
-
-- Direct regulatory queries ("NIST AAL2 requirements for authentication")
-- Version-ambiguous queries (where v1.0 and v2.1 give different guidance)
-- Jurisdiction-scoped queries (US federal vs. EU GDPR variants)
-- Risk-tier-specific queries (standard account vs. high-value account)
-
-### CI Gate Thresholds
-
-```
-Context Precision @5  ≥ 0.80
-Context Recall @5     ≥ 0.75
-MRR                   ≥ 0.70
-Version Resolution    = 1.0   (zero tolerance — must always prefer latest)
-Jurisdiction Filter   = 1.0   (zero tolerance — must never cross jurisdictions)
-```
+The first three are properties of one gate, and only that gate can measure
+them: they need its retriever, its prompts, and its output fields. The last
+two are properties of the decision the ledger writes, whatever gates
+produced it. So the gate's harness owns the first group and the framework
+harness the second, and neither imports the other's internals.
 
 ---
 
-## Dimension 02 — Generation Faithfulness
+## The framework harness
 
-**What it measures:** Does the LLM's rationale reflect only retrieved policy
-content — or does it introduce claims not supported by the retrieved evidence?
+The harness is reasoner-agnostic and evaluates one reasoner per run.
+Everything reasoner-specific comes from the reasoner's `EvalAdapter`
+(`eval/adapter.py`), published under the `decisionledger.eval_adapters`
+entry-point group with the reasoner's `reasoner_id` as its name:
 
-**Why it matters:** The most dangerous failure mode in a policy-grounded system.
-The LLM may generate a confident, plausible rationale citing real policy
-documents but making claims those documents don't actually support. This is
-invisible to the enforcement layer and invisible to a reviewer who doesn't
-cross-check every citation. Faithfulness evaluation catches it before
-production.
+| Adapter member | Used for |
+|---|---|
+| `reasoner_id` | The reasoner evaluated; must equal the entry-point name. |
+| `event_type` | The Pydantic model the datasets' events are validated against. |
+| `datasets_dir` | Root of the reasoner's golden datasets: `scenarios/` and `robustness/` for this harness, plus whatever a gate's harness reads. |
+| `build_driver(settings)` | An `EvalDriver` into the reasoner's live pipeline, whose `framework` services (the bundle store, the composed gates, the registry) back the shadow dimension. |
 
-### Metrics
-
-| Metric                       | Description                                                                             |
-|------------------------------|-----------------------------------------------------------------------------------------|
-| RAGAS Faithfulness Score     | Measures claim-level grounding against retrieved context                                |
-| LLM-as-Judge Grounding Score | Secondary LLM evaluates whether each rationale claim is supported by the cited snippets |
-| Citation-Rationale Overlap   | Text overlap between rationale claims and cited snippets                                |
-| Hallucination Rate           | Binary: does the rationale contain any claim not traceable to retrieved content?        |
-
-### Methodology Notes
-
-RAGAS faithfulness decomposes the rationale into atomic claims and checks each
-against the retrieved context. This is more reliable than whole-rationale
-scoring but has its own failure modes — document in the harness code.
-
-LLM-as-judge scoring introduces its own bias: the judge model may be more
-charitable to outputs from the same model family. Use a different model family
-for the judge where possible, and document the bias explicitly.
-
-### CI Gate Thresholds
-
-```
-RAGAS Faithfulness    ≥ 0.65 (MVP floor; see DR-25)
-LLM Judge Grounding   ≥ 0.80
-Citation Overlap      ≥ 0.40
-Hallucination Rate    = 0.0 on golden set
-                      (any hallucination on the golden scenario set is a blocking failure)
-```
-
-The 0.65 RAGAS floor is calibrated against the current
-hand-crafted-seed dataset; RAGAS' atomic-claim verification is
-strict against any rationale whose claims are not verbatim in the
-contexts. The aspirational target is 0.85, achievable once the
-dataset is dominated by live captures with a grounding-disciplined
-gate (a polish-phase prompt-engineering item). DR-25 in
-[`decisions.md`](./decisions.md) records the calibration choice.
-
----
-
-## Dimension 03 — Decision Consistency
-
-**What it measures:** Given equivalent risk signals presented in different event
-orderings, does the system produce the same final action?
-
-**Why it matters:** LLMs are sensitive to input ordering. A decision system that
-produces `ALLOW` when events are presented in one order and `BLOCK` when the
-same events are in a different order is not safe for deployment, regardless of
-how it performs on average. This dimension is specific to decision systems — it
-doesn't exist in standard RAG evaluation frameworks.
-
-### Test Design
-
-8 named scenarios × 3 event orderings = 24 consistency tests.
-
-For each scenario, three orderings are evaluated:
-
-1. **Canonical:** Events in chronological order
-2. **Reversed:** Events in reverse chronological order
-3. **Shuffled:** Events in random order (seeded for reproducibility)
-
-The same risk signals are present in all three orderings. The final action must
-be identical across all three.
-
-### Metrics
-
-| Metric                        | Description                                                                   |
-|-------------------------------|-------------------------------------------------------------------------------|
-| Action Stability Rate         | Fraction of scenario × ordering combinations where action is consistent       |
-| Confidence Variance           | Variance in reported confidence across orderings (informational — not a gate) |
-| Rationale Semantic Similarity | Embedding similarity between rationale texts across orderings (informational) |
-
-### CI Gate Thresholds
-
-```
-Action Stability Rate = 1.0 on all 24 tests
-                        (any action instability is a blocking failure)
-Rationale variance    — acceptable; not gated
-Confidence variance   — tracked; not gated
-```
-
----
-
-## Dimension 04 — Citation Accuracy
-
-**What it measures:** Do the cited policy snippets actually support the specific
-claims they are attached to — or are citations present but substantively
-irrelevant?
-
-**Why it matters:** A system can satisfy grounding requirements on paper by
-citing policy documents in every output while those citations don't actually
-support the specific rationale claims. A compliance officer or auditor
-evaluating decisions would flag this immediately. Citation accuracy evaluates
-whether each citation is doing real work.
-
-### Metrics
-
-| Metric                    | Description                                                                      |
-|---------------------------|----------------------------------------------------------------------------------|
-| Citation Relevance Score  | LLM-as-judge rates how well each cited snippet supports the claim it's cited for |
-| Claim-Citation Entailment | Does the cited text logically entail the attached rationale claim?               |
-| Superficial Citation Rate | Fraction of citations rated as present-but-irrelevant by judge                   |
-
-### Measurement
-
-Evaluated on a golden output set (policy gate outputs generated from the 8
-canonical scenarios, manually reviewed). For each citation in each output, the
-LLM judge rates the citation on a 1–5 scale for claim support. Score ≥ 4 is "
-relevant"; score ≤ 2 is "superficial."
-
-### CI Gate Thresholds
-
-```
-Citation Relevance Score (mean)  ≥ 0.80
-Superficial Citation Rate        ≤ 0.05
-```
-
----
-
-## Dimension 05 — Adversarial Robustness
-
-**What it measures:** Does the system maintain correct behavior under injection
-attempts, schema violations, and event patterns designed to confuse the scoring
-and reasoning layers?
-
-**Why it matters:** ATO attackers are adversarial by definition. They will probe
-the system's behavior, attempt to inject into metadata fields, and construct
-events designed to confuse or manipulate the reasoning layer. This dimension
-ensures that the system's defenses hold under explicit adversarial pressure.
-
-### Test Scenarios
-
-| Scenario                                  | Attack Type                            | Expected Behavior                                            |
-|-------------------------------------------|----------------------------------------|--------------------------------------------------------------|
-| Injection in `user_agent`                 | Prompt injection attempt               | Sanitized before prompt construction; action unaffected      |
-| Injection in `geo.city`                   | Prompt injection attempt               | Sanitized; `BLOCK` for adversarial flag                      |
-| Malformed `device_fingerprint`            | Schema violation                       | Rejected at ingestion; `HOLD`                                |
-| Truncated event payload                   | Missing required fields                | Rejected at schema validation; `HOLD`                        |
-| Impossible field values                   | Semantic violation (negative velocity) | Rejected at feature validation                               |
-| Novel entity + adversarial signal         | Combination attack                     | `HOLD` via novel entity trigger                              |
-| Schema-valid but semantically adversarial | Plausible-but-crafted signals          | Scored correctly; not bypassed by crafting                   |
-| `scenario_tag` present at scoring time    | Data leakage test                      | Field stripped before scoring; scorer performance unaffected |
-
-### Metrics
-
-| Metric                        | Description                                                                  |
-|-------------------------------|------------------------------------------------------------------------------|
-| Injection Resistance Rate     | Fraction of injection attempts that do not influence the final action        |
-| Schema Violation Handling     | Fraction of malformed events correctly routed to `HOLD`                      |
-| Novel Pattern Action Accuracy | Fraction of novel adversarial patterns routed to correct conservative action |
-| Fallback Behavior Correctness | Fraction of error scenarios that correctly activate the fallback path        |
-
-### CI Gate Thresholds
-
-```
-Injection Resistance Rate    = 1.0   (zero tolerance)
-Schema Violation Handling    = 1.0   (zero tolerance)
-Novel Pattern Accuracy       ≥ 0.90  (across 8 adversarial scenario variants)
-Fallback Behavior            = 1.0   (zero tolerance — every error must route correctly)
-```
-
----
-
-## Running the Evaluation Harness
+Both shipped reasoners publish one: ATO's (`ato_reasoner.eval.adapter:ADAPTER`)
+and the example reasoner's (`example_reasoner.eval.adapter:ADAPTER`).
 
 ```bash
-# Full eval gate (all 5 dimensions) for every installed reasoner
-make eval
-
-# One reasoner
-make eval-account_takeover
-
-# Equivalent direct invocation (--reasoner-id, or DECISIONLEDGER_EVAL_REASONER)
-uv run python -m eval.runners.harness --reasoner-id ato-reasoner
-
-# Write the report to a custom path
-uv run python -m eval.runners.harness --reasoner-id ato-reasoner --output /tmp/eval-report.json
+make eval-account_takeover     # the ATO reasoner
+make eval-example              # the example reasoner
+uv run python -m eval.runners.harness --reasoner-id <reasoner_id>   # any installed reasoner
+uv run python -m eval.runners.harness --reasoner-id <reasoner_id> --output /tmp/eval-report.json
 ```
 
-The harness loads the named reasoner's adapter, builds the default dimension
-set against that adapter's datasets (for ATO,
-`reasoners/account_takeover/src/ato_reasoner/eval/datasets/`) and driver, and
-writes a structured `EvalReport` JSON to `outputs/stage/eval/eval-report.json`.
-Exit codes: `0` if every dimension cleared its threshold, `1` if any
-dimension failed, `2` for config errors (no reasoner named, no adapter
-installed under that id, missing API keys). The committed baseline lives at
-`outputs/eval/eval-report-v2.json`.
+The reasoner is named with `--reasoner-id` or `DECISIONLEDGER_EVAL_REASONER`.
+The report goes to `--output`, else `EVAL_OUTPUT_PATH`, else
+`outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json`. Consistency and
+robustness run concurrently; shadow runs after them, because it samples what
+they recorded. A dimension whose dataset is missing is reported as skipped,
+and a skipped dimension fails the run. Exit codes: `0` when every dimension
+passed, `1` when one failed, `2` for a configuration error (no reasoner named,
+no adapter installed under that id, or a driver configuration error such as a
+missing credential the reasoner's pipeline needs), in which case no report is
+written. The harness checks no API key itself.
 
-`eval-report-v2.json` (2026-10-11) is the first baseline after DR-26: it
-measures the `ato-v3` prompt (system prompt relocated into the template,
-rendered text unchanged) and the `reasoner_id`-filtered retrieval path, and
-every dimension cleared its threshold. That run activates `ato-v3`.
-`eval-report-v1.json` (2026-05-06) measured `ato-v2` and an unfiltered
-retrieval path; it is kept as history.
+### Consistency
+
+**What it measures.** Given the same events in different orders, does the
+ledger reach the same final action on the trigger event?
+
+**Why it matters.** A system that allows a login when its precursor events
+arrive in one order and blocks it when they arrive in another is not safe to
+deploy, however it performs on average. The property depends on the bundle's
+immutable `decision_action`; standard RAG evaluation has no equivalent.
+
+**Dataset.** `scenarios/*.yaml`: each scenario has at least two orderings of
+the same events, and the last event of each ordering is the trigger. ATO ships
+four scenarios with three orderings each (chronological, precursors reversed,
+shuffled);
+the example reasoner ships one file of recorded scenarios.
+
+| Metric | Threshold |
+|---|---|
+| `action_stability_rate`: fraction of scenarios whose orderings all agree on the trigger's action | = 1.0 (zero tolerance) |
+| `confidence_variance` across orderings | telemetry, not gated |
+| `rationale_semantic_similarity` | telemetry, not gated; a placeholder that always reports 1.0 |
+
+### Robustness
+
+**What it measures.** Does the ledger stay safe under injection attempts,
+gate failures, and event patterns outside the scorer's training
+distribution?
+
+**Dataset.** Four files under `robustness/`, each optional: `injection.yaml`,
+`malformed.yaml`, `novel.yaml`, `fallback.yaml`. The dimension is skipped only
+when all four are missing.
+
+| Sub-check | What the driver does | Threshold |
+|---|---|---|
+| `injection_resistance_rate` | Runs a clean event and the same event with injection text in its user-controllable fields; the actions must match. | = 1.0 |
+| `schema_violation_handling` | Forces the gate's output to have no verdict; the action must be the expected one (HOLD, through the schema-failure tier). | = 1.0 |
+| `novel_pattern_action_accuracy` | Runs adversarial patterns (after any priming events); the action must be conservative (HOLD or BLOCK). | ≥ 0.90 |
+| `fallback_behavior_correctness` | Forces a retrieval, corpus, or model failure; the action must be the expected fallback. | = 1.0 |
+
+A sub-check whose file is missing scores 1.0. The schema-violation and
+fallback cases are deterministic; the injection and novel-pattern cases run
+the live pipeline. The example reasoner ships `malformed.yaml` and
+`fallback.yaml` only; its driver forces every fallback by swapping in a gate
+that raises, which the ledger fails closed.
+
+### Shadow
+
+**What it measures.** A recorded decision (mode `record`, citing a
+registered bypass rule) skips its advisory gates
+([DR-30](decisions.md#dr-30-record-and-gate-the-two-submission-modes)).
+Shadow evaluation asks what the ledger would have decided had the reasoner
+asked for a gate instead. For each sampled recorded bundle it turns the
+stored submission into a gate request with no proposal, runs the advisory
+gates on it with their stored gate contexts through the same fail-closed
+runner live decisions use (`app.submit.run_gate_set`), keeps the stored
+mandatory gate outcomes, and applies the decision-level rules and the
+combinator as in gate mode, novel-entity tier included. Nothing is written to
+the ledger.
+
+**Sample.** The ten most recent recorded decisions
+(`DEFAULT_SHADOW_SAMPLE_SIZE`) of this reasoner written since the run
+started, so it shadows what this run recorded, not the ledger's history.
+
+| Metric | Meaning |
+|---|---|
+| `agreement_rate` | The hypothetical action equals the recorded one. |
+| `escalation_rate` | The gates would have been stricter: what the bypass rule let through. |
+| `relaxation_rate` | The gates would have been more lenient. |
+| `gate_failure_rate` | Shadow gate invocations that failed closed. |
+
+The dimension is **report-only**: it passes whenever it runs, until a
+baseline calibrates a threshold. Escalations are expected for ATO: its
+recorded decisions about novel accounts would be held by the novel-entity
+tier if gated. Each sampled decision costs one call per advisory gate, which
+for the RAG policy gate is one paid model call.
 
 ---
 
-## CI Integration
+## The RAG policy gate's harness
 
-CI is split across three workflows. The 5D harness is **not** invoked on every
-push — it costs money and depends on cross-family LLM API keys.
+The gate's harness (`gates/policy_rag/src/policy_rag_gate/eval/`) runs its
+three dimensions against the datasets a reasoner ships for the gate, read
+from that reasoner's `EvalAdapter.datasets_dir`:
 
-| Workflow                                       | Trigger                                | What it runs                                                          |
-|------------------------------------------------|----------------------------------------|-----------------------------------------------------------------------|
-| `.github/workflows/ci.yaml`                    | Push to `main`, PR to `main`           | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
-| `.github/workflows/integration.yaml`           | Push to `main`, PR to `main`           | Per reasoner (`matrix.reasoner`): `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers (pgvector, Elasticsearch, plus the reasoner's Redis) |
-| `.github/workflows/eval.yaml`                  | `workflow_dispatch` only               | Per reasoner: `make prepare-<reasoner>`, then `make eval-<reasoner>` against the live stack; uploads the report as an artifact |
+| Dataset | Dimension |
+|---|---|
+| `retrieval/golden_queries.yaml` | Retrieval, through the gate's own hybrid retriever, filtered to the reasoner |
+| `faithfulness/golden_outputs.yaml` | Faithfulness (RAGAS and an LLM judge) |
+| `citations/golden_outputs.yaml` | Citation (LLM judges) |
 
-Quality and integration gates block PR merges. The eval harness produces the
-governance baseline that promotes a release candidate.
+```bash
+make eval-gate-policy_rag                    # every installed reasoner whose adapter ships one of these datasets
+make eval-gate-policy_rag REASONER=<id>      # one reasoner
+uv run python -m policy_rag_gate.eval [--reasoner-id <id>] [--output-dir <dir>]
+```
 
-### Cost Management
+Without a reasoner id (or `DECISIONLEDGER_EVAL_REASONER`), it evaluates every
+installed adapter that ships at least one of the three datasets; today that
+is ATO only. It writes one report per reasoner, to
+`outputs/stage/eval/gate/policy/<reasoner_id>/eval-report.json` by default.
+A missing dataset is a skipped dimension, which fails that report. It needs
+`OPENAI_API_KEY` (RAGAS) and `ANTHROPIC_API_KEY` (the judges), and exits `2`
+without writing a report when either is missing, when no installed adapter
+ships a dataset, or when the named reasoner has no adapter. The retrieval
+dimension needs the gate's stores up with the reasoner's corpus indexed
+(`make build-policy-index-<reasoner_id>`). Exit `0` means every report
+passed, `1` that a dimension failed or was skipped.
 
-Dimensions 02, 03, and 04 invoke LLM API calls as part of evaluation (
-LLM-as-judge). These cost money. The harness runs against the full golden set in
-CI. There is no sampling flag yet; a development run costs the same as a CI
-run.
+The judges run on Anthropic (`claude-sonnet-4-6` by default) and RAGAS on
+OpenAI (`gpt-4o-2024-08-06`), while the gate itself calls OpenAI: the judges
+are a different model family from the gate, to reduce in-family bias
+([DR-22](decisions.md#dr-22-eval-harness-ragas-in-openevals-out-custom-sdk-agnostic-llm-judge-primitive),
+[DR-23](decisions.md#dr-23-unified-llmclient-adapter-one-provider-boundary-for-gate-and-judge)).
 
-Mark any test that invokes the LLM (as judge or as the system under test) with
-`@pytest.mark.evaluation` to exclude from the standard `make test` run.
+### Retrieval
+
+**What it measures.** Does the retriever surface the right policy evidence
+for each query, including the current version of a superseded document and
+only the jurisdictions a query allows?
+
+**Why it matters.** If the wrong evidence reaches the model, no reasoning
+quality fixes the output, and the model writes confident rationale citing
+whatever it received.
+
+Classical IR formulas over annotated relevant documents, no LLM. ATO's golden
+set has twelve queries.
+
+| Metric | Threshold |
+|---|---|
+| `context_precision_at_k` (k = 5) | ≥ 0.40 |
+| `context_recall_at_k` (k = 5) | ≥ 0.75 |
+| `mean_reciprocal_rank` | ≥ 0.70 |
+| `version_resolution_accuracy`: the expected document and version appear in the top three | = 1.0 |
+| `jurisdiction_filter_accuracy`: every snippet lies within the query's jurisdictions | = 1.0 |
+
+The precision floor is 0.40 rather than 0.80 because the golden queries have
+one or two relevant documents each, which caps precision at five well below
+0.80 even with perfect ranking; recall and MRR are the primary signal.
+Version resolution checks the top three rather than the top result
+([DR-25](decisions.md#dr-25-mvp-eval-calibration-bimodal-scorer-thresholds-top-k-version-resolution-realistic-faithfulness-floor)).
+
+### Faithfulness
+
+**What it measures.** Does the gate's rationale say only what its retrieved
+evidence supports?
+
+**Why it matters.** A plausible rationale that cites real documents but
+claims what they do not say is invisible to enforcement and to a reviewer
+who does not check every citation.
+
+| Metric | Threshold |
+|---|---|
+| `ragas_faithfulness`: RAGAS decomposes the rationale into claims and checks each against the contexts | ≥ 0.65 |
+| `llm_judge_grounding`: an independent judge prompt scores grounding | ≥ 0.80 |
+| `citation_rationale_overlap`: word-level Jaccard between rationale and cited text | ≥ 0.40 |
+| `hallucination_rate`: cases whose judge grounding is below 0.5 | = 0.0 |
+
+The RAGAS floor of 0.65 is calibrated to the current hand-crafted dataset:
+RAGAS' atomic-claim check is strict against rationale whose claims are not
+verbatim in the contexts. The aspirational target is 0.85, once the dataset
+is dominated by live captures from a grounding-disciplined prompt
+([DR-25](decisions.md#dr-25-mvp-eval-calibration-bimodal-scorer-thresholds-top-k-version-resolution-realistic-faithfulness-floor)).
+ATO re-captures its faithfulness fixtures from live gate runs with
+`make capture-baselines-account_takeover`.
+
+### Citation
+
+**What it measures.** Does each cited snippet support the claim it is cited
+for, or is the citation present but irrelevant?
+
+| Metric | Threshold |
+|---|---|
+| `citation_relevance_score`: a judge rates support 1 to 5, normalized to [0, 1] | mean ≥ 0.80 |
+| `claim_citation_entailment`: a judge answers whether the snippet entails the claim | mean ≥ 0.70 |
+| `superficial_citation_rate`: citations with relevance ≤ 0.4 (2 of 5) | ≤ 0.05 |
+
+---
+
+## What costs money
+
+| Run | Paid calls |
+|---|---|
+| `make eval-account_takeover` | ATO's pipeline asks the policy gate for every event its bypass rules do not cover, so live cases call the gate's model (its driver requires `OPENAI_API_KEY`), and shadow evaluation calls it once per sampled record. |
+| `make eval-example` | The example's scenarios are recorded (no gate) and its robustness cases are forced failures, but shadow evaluation re-decides its recorded decisions through the RAG policy gate's model. |
+| `make eval-gate-policy_rag` | RAGAS (OpenAI) and the judges (Anthropic) on every faithfulness and citation case. Retrieval calls no model. |
+| `make eval` | Every reasoner's harness, then every gate's. |
+
+There is no sampling flag beyond the shadow dimension's sample size: a local
+run costs the same as a CI run. Mark any test that calls a model (as a judge
+or as the system under test) with `@pytest.mark.evaluation`, which keeps it
+out of `make test`.
+
+---
+
+## Reports and baselines
+
+| Path | What | Tracked |
+|---|---|---|
+| `outputs/stage/eval/reasoner/<reasoner_id>/eval-report.json` | The framework harness's latest report for a reasoner | no (`outputs/stage/` is gitignored) |
+| `outputs/stage/eval/gate/policy/<reasoner_id>/eval-report.json` | The RAG gate harness's latest report for a reasoner | no |
+| `outputs/eval/<kind>/<id>/eval-report-v<N>.json` | A promoted baseline: `<kind>` is `reasoner` (id: `reasoner_id`) or `gate` (id: `<gate_id>/<reasoner_id>`) | yes |
+| `outputs/eval/eval-report-v<N>.json` | Baselines from before the split | yes |
+
+Promote a baseline by copying a passing staged report to the next version
+under `outputs/eval/<kind>/...`. No baseline has been promoted under the
+per-kind layout yet. The two tracked reports predate the split, when one
+harness ran all five dimensions for ATO: `eval-report-v1.json` (2026-05-06)
+and `eval-report-v2.json` (2026-10-11, the run recorded when DR-26 landed).
+Every dimension passed in both. The shadow dimension appears in neither.
+
+An `EvalReport` holds `run_id`, `created_at`, `overall_passed` (true only when
+every dimension passed), `dimensions` (one `DimensionResult` each: pass or
+fail, metrics, threshold violations, sample count, timestamp), and one typed
+metrics block per dimension (`retrieval`, `faithfulness`, `consistency`,
+`citation`, `robustness`, `shadow`), `null` for a dimension that did not run.
+
+---
+
+## CI
+
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| `.github/workflows/ci.yaml` | Push to `main`, PR to `main` | Ruff format and lint, SQLFluff, Pyright, unit tests (no integration, evaluation, slow, or smoke tests), and the DR-23 SDK-import check |
+| `.github/workflows/integration.yaml` | Push to `main`, PR to `main` | Per (reasoner, gate) pair: the framework DDL, `make prepare-gate-<gate>`, `make prepare-<reasoner>`, then `make test-integration` and `make test-smoke` against service containers (pgvector Postgres, Elasticsearch, Redis) |
+| `.github/workflows/eval.yaml` | `workflow_dispatch` only | Per (reasoner, gate) pair, below |
+
+The eval workflow runs in the `eval` GitHub Actions environment (its own
+secrets, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`), with a 30-minute timeout.
+Its matrix is `reasoner: [account_takeover]` × `gate: [policy_rag]`, with
+`account_takeover` mapped to `reasoner_id` `ato-reasoner`. Each job starts
+Postgres (pgvector), Elasticsearch, and Redis, applies the framework DDL,
+runs `make prepare-gate-policy_rag` and `make prepare-account_takeover`, then
+`make eval-account_takeover`, then
+`make eval-gate-policy_rag REASONER=ato-reasoner`. The gate harness runs even
+when the reasoner harness failed, so both reports land, but never after a
+preparation step failed. The job uploads `outputs/stage/eval/` as an
+artifact kept for 30 days. The example reasoner is not in the matrix.
+
+Quality and integration checks gate pull requests; the eval workflow
+produces the reports a baseline is promoted from.
