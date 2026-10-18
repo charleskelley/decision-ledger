@@ -1,7 +1,8 @@
 # `eval`
 
-The framework's evaluation harness — decision consistency and
-adversarial robustness, driven through a reasoner's own pipeline. It is
+The framework's evaluation harness — decision consistency, adversarial
+robustness, and the shadow dimension (the advisory gates run offline on a
+sample of recorded decisions), driven through a reasoner's own pipeline. It is
 reasoner-agnostic: each reasoner's event type, golden datasets, and
 pipeline driver arrive through an [`EvalAdapter`][eval.adapter.EvalAdapter]
 discovered under the `decisionledger.eval_adapters` entry point group.

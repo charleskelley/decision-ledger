@@ -1,25 +1,32 @@
 ###############################################################################
-# DecisionLedger — Reasoner ↔ Framework Handoff
+# DecisionLedger — Submission Flow
 #
-# The single integration boundary. Domain-side: raw event + features +
-# scorer output → build_observation(). Handoff payload: Observation
-# (ReasonerContext + GateContext + optional fast_path_rationale).
-# Framework-side: validate → route → (retrieval + gate) | fast path →
-# enforcement → bundle.
+# The single integration boundary between a reasoner and the ledger.
+# Reasoner side: event → features → score → build_submission(), which
+# records under the strictest registered bypass rule that holds
+# (core.submission.matching_bypass_rule) or asks the ledger to gate the
+# decision. The handoff payload is the Submission (wire schema version 2,
+# schemas/submission-v2.json), sent through LocalClient (in process) or
+# HttpClient (over HTTP, POST /api/v1/decisions). Ledger side
+# (app/submit.py): validate → identity → mandatory gates → advisory gates
+# (gate mode only; skipped once a mandatory gate blocks) → enforcement and
+# the combinator → the version-2 bundle is written → the receipt goes back to
+# the reasoner. In record mode the advisory gates are recorded as skipped and
+# the cited bypass rule is checked against the submission's evidence.
 #
-# Composition: the framework never imports the domain package. create_app()
-# discovers it through the decisionledger.reasoners entry point
-# (ato-reasoner = "ato_reasoner.plugin:PLUGIN") and builds the reasoner
-# registry that validate_observation() checks against (dashed grey edges).
+# The reasoner nodes name ATO's types as the example: they are the reference
+# reasoner's (reasoners/account_takeover), not framework types. The framework
+# never imports a reasoner; it sees only the Submission.
 #
 # Render:  d2 --theme 0 --layout elk reasoner-handoff.d2 ../../assets/diagrams/reasoner-handoff.svg
-# Ref:     docs/design/reasoners/reasoner-handoff.md, DR-26
+# Ref:     docs/design/reasoners/reasoner-handoff.md, app/submit.py,
+#          core/submission.py, DR-29 to DR-32
 ###############################################################################
 
-title: Reasoner ↔ Framework Handoff {
+title: Submission Flow {
   near: top-center
   shape: text
-  style.font-size: 28
+  style.font-size: 34
   style.bold: true
 }
 
@@ -29,186 +36,168 @@ direction: down
 # Palette (matches the rest of the diagram set)
 #   Domain          fill #e8eef9 / stroke #5b6abf  (indigo)
 #   Framework       fill #e8f5f3 / stroke #0d9488  (teal)
-#   Handoff payload fill #f9f9f9 / stroke #1c2024  (neutral)
-#   Fast-path       fill #fef3e8 / stroke #c9622e  (burnt orange)
-#   Diamond         filled coloured / white text
+#   Handoff payload fill #fafafa / stroke #1c2024  (neutral)
+#   Identity        fill #fef3e8 / stroke #c9622e  (burnt orange)
+#   Datastore       fill #fbf3e6 / stroke #8c6d3f  (ochre)
+#   Diamond         filled colored / white text
+# Gate-mode edges are solid; record-mode edges are dashed.
 ###############################################################################
 
-###############################################################################
-# Domain Layer (left)
-###############################################################################
+# Node text 22px and edge text 20px keep the labels legible at the docs
+# column width
+classes: {
+  domain: {style: {fill: "#e8eef9"; stroke: "#5b6abf"; stroke-width: 2; font-size: 22}}
+  framework: {style: {fill: "#e8f5f3"; stroke: "#0d9488"; stroke-width: 2; font-size: 22}}
+  field: {style: {fill: "#ffffff"; stroke: "#1c2024"; stroke-width: 1; font-size: 20}}
+  identity: {style: {fill: "#fef3e8"; stroke: "#c9622e"; stroke-width: 2; font-size: 22}}
+  bundle: {style: {fill: "#fbf3e6"; stroke: "#8c6d3f"; stroke-width: 2; font-size: 22}}
 
-domain: Domain Layer  ·  ato_reasoner (reasoners/account_takeover) {
-  style.fill: "#eff3fb"
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
-
-  evt: LoginEvent {
-    style.fill: "#e8eef9"
-    style.stroke: "#5b6abf"
-    tooltip: "Raw authentication event. Schema lives entirely in the domain."
-  }
-  feats: AtoFeatureVector {
-    style.fill: "#e8eef9"
-    style.stroke: "#5b6abf"
-    tooltip: "Sliding-window behavioural features (velocity, novelty, geo, device consistency)."
-  }
-  score: ScorerOutput {
-    style.fill: "#e8eef9"
-    style.stroke: "#5b6abf"
-    tooltip: "XGBoost risk_score + top SHAP signals + GateRoute decision."
-  }
-  asm: build_observation() {
-    shape: diamond
-    style.fill: "#5b6abf"
-    style.stroke: "#5b6abf"
-    style.font-color: "#ffffff"
-    style.bold: true
-    tooltip: "The only function crossing the domain → framework boundary. Translates the three domain artifacts into the framework Observation contract."
-  }
-
-  evt -> asm
-  feats -> asm
-  score -> asm
+  domain-flow: {style: {stroke: "#5b6abf"; stroke-width: 2; font-size: 20}}
+  flow: {style: {stroke: "#0d9488"; stroke-width: 2; font-size: 20}}
+  record-flow: {style: {stroke: "#0d9488"; stroke-width: 2; stroke-dash: 5; font-size: 20}}
+  handoff: {style: {stroke: "#1c2024"; stroke-width: 2; font-size: 20}}
 }
 
 ###############################################################################
-# Handoff payload — Observation (centre)
+# Reasoner (top)
 ###############################################################################
 
-obs: Observation {
-  style.fill: "#fafafa"
-  style.stroke: "#1c2024"
-  style.stroke-width: 2
+reasoner: "Reasoner  ·  e.g. ato_reasoner (reasoners/account_takeover)" {
+  style: {fill: "#eff3fb"; stroke: "#5b6abf"; stroke-width: 2; font-size: 24}
 
-  rc: ReasonerContext {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "Domain-agnostic ML evidence: reasoner_id, model_version, inference_latency_ms, label_type/name/value, full feature_set (replay-self-contained), attribution."
+  # One row of domain artifacts keeps the canvas short (elk ignores a
+  # container's direction, so a grid lays the row out). The dashed frame
+  # shows that the edge to build_submission() leaves the whole row.
+  inputs: "" {
+    grid-columns: 3
+    grid-gap: 16
+    horizontal-gap: 48
+    style: {fill: transparent; stroke: "#5b6abf"; stroke-dash: 4; border-radius: 8}
+
+    evt: "Event\n(ATO: LoginEvent)" {
+      class: domain
+      tooltip: "The domain's raw event. It crosses to the ledger only as opaque raw_event JSON."
+    }
+    feats: "Features\n(ATO: AtoFeatureVector)" {
+      class: domain
+      tooltip: "Every feature the model consumed; it travels as reasoner_context.feature_set, which bypass rules and replay read."
+    }
+    score: "Score\n(ATO: ScorerOutput)" {
+      class: domain
+      tooltip: "ATO's XGBoost risk score and top signals; it travels as reasoner_context.label_value and attribution."
+    }
+
+    evt -> feats: {class: domain-flow}
+    feats -> score: {class: domain-flow}
   }
-  gc: GateContext {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "Gate dispatch envelope: gate_id + gate_config (template_id, template_vars, jurisdictions, risk_tier). Required on EVERY observation, including fast-path (enables shadow evaluation)."
+
+  asm: "build_submission()\nrecords under the strictest registered\nbypass rule that holds, or asks for a gate" {
+    style: {fill: "#5b6abf"; stroke: "#5b6abf"; font-color: "#ffffff"; font-size: 22}
+    tooltip: "The reasoner's assembler. core.submission.matching_bypass_rule returns the strictest registered bypass rule that holds: the submission records that rule's action and cites it (mode record); when none holds it asks for a gate (mode gate). ATO's rules are allow-band (label_value < 0.20, ALLOW) and block-band (label_value > 0.95, BLOCK)."
   }
-  fpr: fast_path_rationale {
-    style.fill: "#fef3e8"
-    style.stroke: "#c9622e"
-    tooltip: "Required iff route is FAST_PATH_ALLOW or FAST_PATH_BLOCK. Human-readable string explaining the confidence-band rule that fired (e.g., 'risk_score=0.97 > 0.95 → FAST_PATH_BLOCK')."
-  }
-  rt: route  ·  GateRoute {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "FAST_PATH_ALLOW | FAST_PATH_BLOCK | ROUTE_TO_GATE. Determines the framework-side path."
-  }
+
+  inputs -> asm: {class: domain-flow}
 }
 
 ###############################################################################
-# Framework Layer (right)
+# Handoff payload — the Submission (middle)
 ###############################################################################
 
-framework: Framework Layer  ·  core/ + app/ {
-  style.fill: "#f3faf8"
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
+sub: "Submission  ·  wire schema v2" {
+  style: {fill: "#fafafa"; stroke: "#1c2024"; stroke-width: 2; font-size: 24}
+  grid-columns: 3
+  grid-gap: 16
 
-  discover: create_app()  ·  plugin discovery {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "app/plugins.py:discover_plugins loads every decisionledger.reasoners entry point (entry-point name must equal registration.reasoner_id), mounts each plugin's router, and builds the reasoner registry, prompt registry (plugin prompts_dir), and bundle-store deserializers (plugin raw_event_factory)."
+  # The fields carry no tooltips: their info icons would sit on the
+  # container's label.
+  #   mode         record (the reasoner decided and cites a bypass rule) or
+  #                gate (the ledger gates it; proposed_action optional)
+  #   bypass       BypassCitation: a registered rule id pinned to its
+  #                version; required if and only if mode is record
+  #   subject      the native subject the reasoner scored, in a namespace
+  #                its registration declares (ATO: ato-account); the ledger
+  #                resolves it to the decision's subject
+  #   gate_contexts required on every submission, recorded ones too, so a
+  #                recorded decision can be shadow-evaluated later
+  mode: "mode: record | gate\nproposed_action" {class: field}
+  bypass: "bypass\n(record only: the cited rule)" {class: field}
+  subject: "native_subject\nentity_id · entity_type" {class: field}
+  rc: "reasoner_context\n(evidence, full feature_set)" {class: field}
+  gcs: "gate_contexts\n(one per bound gate)" {class: field}
+  raw: "raw_event\n(opaque JSON)" {class: field}
+}
+
+###############################################################################
+# Clients
+###############################################################################
+
+local: "LocalClient\nin process:\ncreate_decision" {
+  class: framework
+  tooltip: "app/client.py — runs the ledger in the reasoner's process and calls create_decision, the operation the HTTP route runs."
+}
+http: "HttpClient\nover HTTP: POST\n/api/v1/decisions" {
+  class: framework
+  tooltip: "app/client.py — POST /api/v1/decisions with the reasoner's key in X-DecisionLedger-Key."
+}
+
+###############################################################################
+# Ledger (bottom)
+###############################################################################
+
+ledger: "Ledger\napp/submit.py" {
+  style: {fill: "#f3faf8"; stroke: "#0d9488"; stroke-width: 2; font-size: 24}
+  # Top-left, on two lines, keeps the label clear of the client edges
+  # entering at the top and the receipt edge leaving at the bottom
+  label.near: top-left
+
+  validate: "1 Validate\nregistration · citation · gate configs" {
+    class: framework
+    tooltip: "Any failure raises SubmissionContractError (a 422 problem) before a gate runs; nothing is persisted."
   }
-  validate: validate_observation() {
+  identity: "2 Identity\nresolver or passthrough" {
+    class: identity
+    tooltip: "IdentityService.identify, under a 50 ms default budget. Any failure records the passthrough subject, unresolved, with the reason; a decision is never refused over its identity."
+  }
+  mandatory: "3 Mandatory gates\n(every decision, concurrently)" {
+    class: framework
+  }
+  mode: "mode?" {
     shape: diamond
-    style.fill: "#0d9488"
-    style.stroke: "#0d9488"
-    style.font-color: "#ffffff"
-    style.bold: true
-    tooltip: "Framework intake gate, first step of execute_decision. Enforces: reasoner_context populated; fast_path_rationale populated iff route is fast-path; reasoner registered; gate_id, template_id, and jurisdictions allowed by its registration. Raises ObservationContractError naming the responsible reasoner (UnregisteredReasonerError if unknown)."
+    style: {fill: "#0d9488"; stroke: "#0d9488"; font-color: "#ffffff"; bold: true; font-size: 22}
   }
-  router: route dispatch {
-    shape: diamond
-    style.fill: "#0d9488"
-    style.stroke: "#0d9488"
-    style.font-color: "#ffffff"
-    tooltip: "ROUTE_TO_GATE → retrieval + gate.  FAST_PATH_* → fast_path."
+  advisory: "4 Advisory gates\n(concurrently; skipped once\na mandatory gate blocks)" {
+    class: framework
   }
-  retr_gate: Retrieval + Policy Gate {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "Hybrid retrieval (pgvector + ES + rerank) → LLM policy gate (rendered template + structured-output JSON verdict)."
+  enforce: "5 Enforcement + combinator\nmost restrictive action wins" {
+    class: framework
+    tooltip: "Gate-level tiers per gate output, then the decision-level rules and the combinator over ALLOW < CHALLENGE < HOLD < BLOCK. A failing gate fails closed (HOLD). The bypass checks are snapshotted into the bundle."
   }
-  fp: Fast Path {
-    style.fill: "#fef3e8"
-    style.stroke: "#c9622e"
-    tooltip: "Skip retrieval and live gate. Enforce ALLOW or BLOCK directly. GateContext is preserved on the bundle so the gate can be replayed offline (shadow evaluation)."
-  }
-  enf: Enforcement {
-    style.fill: "#e8f5f3"
-    style.stroke: "#0d9488"
-    tooltip: "Pure deterministic resolver — re-runnable byte-identically against the cached gate verdict. The replay guarantee."
-  }
-  bundle: DecisionBundle {
-    style.fill: "#fbf3e6"
-    style.stroke: "#8c6d3f"
-    tooltip: "Append-only audit record: raw_event (Observation), retrieval results, gate_input/gate_output, enforcement decision, latency breakdown."
+  write: "6 Version-2 bundle written\nstamped with registration_version" {
+    class: bundle
   }
 
-  discover -> validate: "reasoner registry" {
-    style.stroke: "#8c93a3"
-    style.stroke-dash: 4
-  }
-  validate -> router
-  router -> retr_gate: "ROUTE_TO_GATE" {
-    style.stroke: "#0d9488"
-  }
-  router -> fp: "FAST_PATH_*" {
-    style.stroke: "#c9622e"
-  }
-  retr_gate -> enf
-  fp -> enf
-  enf -> bundle
+  validate -> identity: {class: flow}
+  identity -> mandatory: {class: flow}
+  mandatory -> mode: {class: flow}
+  mode -> advisory: "gate" {class: flow}
+  advisory -> enforce: {class: flow}
+  mode -> enforce: "record: advisory gates\nrecorded skipped; cited\nbypass rule checked" {class: record-flow}
+  enforce -> write: {class: flow}
+}
+
+# What the reasoner gets back
+receipt: "DecisionReceipt, back to the reasoner\ndecision_id · decision_action · mode · gates" {
+  class: domain
+  tooltip: "app/api/models.py — the decision's outcome (the resolved entity_id and entity_type, the bypass rule and whether it held, the registration_version, every gate's status, the latency breakdown), not its full record; the bundle is at GET /api/v1/decisions/{decision_id}."
 }
 
 ###############################################################################
 # Cross-boundary flows
 ###############################################################################
 
-domain.asm -> obs: "assembled Observation" {
-  style.stroke: "#1c2024"
-  style.stroke-width: 2
-}
-
-domain -> framework.discover: "entry point\ndecisionledger.reasoners\n(ato_reasoner.plugin:PLUGIN)" {
-  style.stroke: "#8c93a3"
-  style.stroke-dash: 4
-}
-
-obs -> framework.validate: "submitted to framework" {
-  style.stroke: "#1c2024"
-  style.stroke-width: 2
-}
-
-###############################################################################
-# What each Observation field powers (dashed, semantic)
-###############################################################################
-
-obs.rc -> framework.bundle: "stored verbatim\n(replay self-contained)" {
-  style.stroke: "#0d9488"
-  style.stroke-dash: 4
-}
-obs.gc -> framework.retr_gate: "jurisdictions + risk_tier → retrieval filters\ntemplate_vars → prompt render" {
-  style.stroke: "#0d9488"
-  style.stroke-dash: 4
-}
-obs.gc -> framework.fp: "preserved for\nshadow evaluation" {
-  style.stroke: "#c9622e"
-  style.stroke-dash: 4
-}
-obs.fpr -> framework.bundle: "stored verbatim\n(fast-path only)" {
-  style.stroke: "#c9622e"
-  style.stroke-dash: 4
-}
-obs.rt -> framework.router: "drives dispatch" {
-  style.stroke: "#0d9488"
-  style.stroke-dash: 4
-}
+reasoner.asm -> sub: {class: handoff}
+sub -> local: {class: handoff}
+sub -> http: {class: handoff}
+local -> ledger.validate: {class: flow}
+http -> ledger.validate: {class: flow}
+ledger.write -> receipt: {class: flow}

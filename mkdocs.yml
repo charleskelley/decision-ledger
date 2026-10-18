@@ -59,6 +59,7 @@ nav:
     - Architecture: design/architecture.md
     - Pipeline: design/pipeline.md
     - Interfaces: design/core.md
+    - Identity: design/identity.md
     - Infrastructure: design/infrastructure.md
     - Gates:
       - design/gates/index.md
@@ -68,7 +69,7 @@ nav:
         - Corpus: design/gates/policy/policy-corpus.md
     - Reasoners:
       - design/reasoners/index.md
-      - Handoff: design/reasoners/reasoner-handoff.md
+      - Submission Contract: design/reasoners/reasoner-handoff.md
       - Account Takeover:
         - Overview: design/reasoners/account-takeover/account-takeover.md
         - Data Model: design/reasoners/account-takeover/data.md
@@ -79,8 +80,16 @@ nav:
     - reference/index.md
     - core: reference/core.md
     - app: reference/app.md
-    - ato_reasoner: reference/reasoners/account-takeover.md
     - eval: reference/eval.md
+    - Identity: reference/identity.md
+    - Reasoners:
+      - ato_reasoner: reference/reasoners/account-takeover.md
+      - example_reasoner: reference/reasoners/example.md
+    - Gates:
+      - policy_rag_gate: reference/gates/policy-rag.md
+      - rules_gate: reference/gates/rules.md
+    - Integrations:
+      - decisionledger_mcp: reference/integrations/mcp.md
   - Operations:
     - Secrets: operations/secrets.md
   - Development:

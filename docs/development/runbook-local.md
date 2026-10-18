@@ -10,7 +10,7 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 - Docker Desktop running (or Docker Engine on Linux) with Compose 2.20 or later (the root compose file uses `include:`)
 - `uv` installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- `.env` file created from `.env.example` (optional — defaults work for local dev; `OPENAI_API_KEY` is needed for gate-routed decisions, `ANTHROPIC_API_KEY` for `make eval`)
+- `.env` file created from `.env.example` (optional — defaults work for local dev; `OPENAI_API_KEY` is needed for decisions the RAG policy gate runs on, `ANTHROPIC_API_KEY` for that gate's eval, `make eval-gate-policy_rag`)
 
 ---
 
@@ -117,9 +117,9 @@ DECISIONLEDGER_OTHER_KEY=ato-key DECISIONLEDGER_OPERATOR_KEY=op-key make conform
 # Publish 10 baseline_normal events to the ATO Redis stream
 make scenario-account_takeover
 
-# Eval for this reasoner (slow; calls OpenAI): the framework's consistency and
-# robustness dimensions, then the RAG policy gate's retrieval, faithfulness,
-# and citation dimensions on ATO's datasets (also calls Anthropic)
+# Eval for this reasoner (slow; calls OpenAI): the framework's consistency,
+# robustness, and shadow dimensions, then the RAG policy gate's retrieval,
+# faithfulness, and citation dimensions on ATO's datasets (also calls Anthropic)
 make eval-account_takeover
 make eval-gate-policy_rag REASONER=ato-reasoner
 ```
@@ -166,7 +166,8 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 # Framework tables
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dt decisionledger.*'
-# Expected: decision_bundles, decision_resolution_attempts, replay_logs
+# Expected: decision_bundles, decision_resolution_attempts, entity_events,
+#   entity_membership, reasoner_registrations, replay_logs
 
 # RAG policy gate: the vector extension and its chunk table
 make prepare-gate-policy_rag   # idempotent; the API and the corpus loader run it too
@@ -192,7 +193,7 @@ docker compose down -v       # Full reset — destroys all data
 
 ## 2. Policy Corpus
 
-The corpus must be loaded before the retrieval layer can serve queries. This is a prerequisite for any pipeline run that touches policy retrieval.
+A reasoner's corpus must be loaded before the RAG policy gate can retrieve for it. This is a prerequisite for any decision that gate runs on.
 
 ### Load
 
@@ -232,7 +233,7 @@ curl -s 'localhost:9200/policy-chunks/_search?size=1' | python3 -m json.tool | h
 # Safe re-run — deletes per policy_id before inserting, no duplicates
 uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 
-# Full wipe and reload
+# Wipe this reasoner's chunks from both stores, then reload
 uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --wipe
 ```
 
@@ -269,7 +270,7 @@ uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 5
 Check the output:
 - `scenario_tag` — matches the scenario name (stripped by ingestion consumer before pipeline sees it)
 - `device_fingerprint` — colon-separated tokens (e.g. `abc123:def456:...`)
-- `geo.country` — should be consistent across events for STATIC geo scenarios
+- `geolocation.country` — should be consistent across events for STATIC geo scenarios
 - `outcome` — weighted by scenario config
 
 ```bash
@@ -358,8 +359,9 @@ Push the same event twice, then consume once — first delivery accepted, second
 import json
 import redis
 from ato_reasoner.ingestion.consumer import IngestionConsumer
-from ato_reasoner.events import AuthMethod, AuthOutcome,
-    GeoLocation, LoginEvent
+from ato_reasoner.events import (
+    AuthMethod, AuthOutcome, Geolocation, LoginEvent,
+)
 from datetime import datetime, UTC
 
 r = redis.Redis(decode_responses=True)
@@ -370,8 +372,8 @@ event = LoginEvent(
     account_id="acc-manual-001",
     session_id="sess-001",
     ip_address="203.0.113.1",
-    geo=GeoLocation(latitude=37.77, longitude=-122.42, country="US",
-                    city="San Francisco", asn="AS7922"),
+    geolocation=Geolocation(latitude=37.77, longitude=-122.42, country="US",
+                            city="San Francisco", asn="AS7922"),
     device_fingerprint="fp-test",
     user_agent="Mozilla/5.0",
     auth_method=AuthMethod.PASSWORD,
@@ -423,7 +425,7 @@ print(f"DLQ reason: {dlq2[0][1]['reason']}")  # lateness
 
 ## 5. Hybrid Retrieval
 
-Query the policy corpus after loading.
+Query the RAG policy gate's retriever directly, after loading a corpus.
 
 ### Interactive retrieval (Python REPL)
 
@@ -436,11 +438,10 @@ import psycopg
 from elasticsearch import Elasticsearch
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
+from app.settings import FrameworkSettings
 from policy_rag_gate.retriever import PolicyRetriever
 
-pg = psycopg.connect(
-    "host=localhost dbname=decisionledger user=decisionledger password=decisionledger"
-)
+pg = psycopg.connect(FrameworkSettings().postgres_dsn)  # the POSTGRES_* settings
 register_vector(pg)
 es = Elasticsearch("http://localhost:9200")
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -476,7 +477,7 @@ for s in snippets:
     print(f"  {s.document_id:30s} | {s.relevance_score:.4f} | {s.section_path}")
 ```
 
-Expected: `path = "rrf_only"` here, because this retriever was built without a cross-encoder (the API's `build_framework_services` passes one, giving `"reranked"` unless the latency budget is exceeded). Geographic risk and ATO detection policy chunks should surface.
+Expected: `path = "rrf_only"` here, because this retriever was built without a cross-encoder (the gate's own `policy_rag_gate.plugin.open_retriever` passes one, giving `"reranked"` unless the latency budget is exceeded). Geographic risk and ATO detection policy chunks should surface.
 
 ---
 
@@ -489,7 +490,7 @@ make test
 # Integration tests (requires docker compose up -d and make prepare-account_takeover)
 make test-integration
 
-# Smoke tests (bundle replay + the ATO scenario smoke run)
+# Smoke tests (bundle replay and the ledger API, plus the ATO scenario smoke run)
 make test-smoke
 
 # Lint and format
@@ -532,11 +533,21 @@ docker compose exec redis redis-cli XPENDING ato:login-events ato-reasoner - + 1
 ```bash
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c "TRUNCATE decisionledger.decision_bundles, decisionledger.replay_logs CASCADE;"
+# CASCADE also empties decision_resolution_attempts (it references the bundles).
+
+# The identity graph: clear the entity journal and its projection together
+# (the projection is rebuilt from the journal and the bundles, so emptying one
+# alone leaves it inconsistent). Registration snapshots
+# (decisionledger.reasoner_registrations) can stay: startup re-writes every
+# served version.
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "TRUNCATE decisionledger.entity_events, decisionledger.entity_membership;"
 
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c "TRUNCATE policy_rag.policy_chunks;"
 # Note: this empties the RAG policy gate's dense store only; reload each corpus
-# with the loader's --wipe, which clears both stores (Postgres and the ES index)
+# with the loader's --wipe, which clears that reasoner's chunks from both stores
+# (Postgres and the ES index)
 ```
 
 ### Full environment reset
@@ -558,4 +569,4 @@ make capture-baselines-account_takeover   # re-capture faithfulness fixtures fro
 make eval                          # every reasoner's eval, then every gate's (slow, paid)
 ```
 
-The committed eval report (`outputs/eval/eval-report-v1.json`) predates the switch to the `ato-v3` prompt; see [Evaluation](../design/evaluation.md).
+The latest committed eval report (`outputs/eval/eval-report-v2.json`, 2026-10-11) measures the `ato-v3` prompt and predates the split into the framework's and the RAG policy gate's harnesses; `eval-report-v1.json` is kept as history. New runs are staged under `outputs/stage/eval/reasoner/<reasoner_id>/` and `outputs/stage/eval/gate/policy/<reasoner_id>/`; see [Evaluation](../design/evaluation.md).

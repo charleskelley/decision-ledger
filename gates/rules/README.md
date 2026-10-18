@@ -2,18 +2,20 @@
 
 The zero-infrastructure rules gate for DecisionLedger, packaged as a uv
 workspace member. Import package: `rules_gate`; distribution:
-`decisionledger-gate-rules`; `gate_id`: `rules`.
+`decisionledger-gate-rules`; `gate_id`: `rules`; kind: `rules`.
 
 It evaluates deployment-registered rule sets of declarative predicates over
 a reasoner's evidence (`reasoner_context.label_value` and
 `reasoner_context.feature_set`), using the framework's closed predicate
-language (`core.gate.predicate`: `Compare`, `AllOf`, `AnyOf`, `Not`). It is
-deterministic (`deterministic=True`), so enforcement skips the
-adversarial-probe and low-confidence tiers for it, and its evidence carries
-no jurisdictions, so the jurisdiction-conflict tier is skipped too. The
-framework (`decision-ledger`) never imports or depends on it.
+language (`core.gate.predicate`: `Compare`, `AllOf`, `AnyOf`, `Not`, written
+as `kind: compare | all | any | not`), the same language registered bypass
+rules use. It is deterministic (`deterministic=True`), so enforcement skips
+the adversarial-probe and low-confidence tiers for it, and its evidence
+carries no jurisdictions, so the jurisdiction-conflict tier is skipped too.
+The framework (`decision-ledger`) never imports or depends on it.
 
-See DR-28 in `docs/design/decisions.md` for the gate contract.
+See [How to implement a gate](../../docs/design/gates/implementation.md) for
+the contract (DR-28 in `docs/design/decisions.md`).
 
 ## How it plugs in
 
@@ -28,14 +30,20 @@ default group), so a bare `uv sync` at the repo root is enough. Entry points
 refresh only on reinstall: re-run `uv sync` after editing this
 `pyproject.toml`.
 
-Infrastructure: none. No compose file, no database, no index.
+Infrastructure: none. No compose file, no database, no index, no `gate.mk`.
+`build` ignores the framework services.
 
 ## Rule sets
 
-Rule sets are YAML files in the directory named by `RULES_GATE_RULESETS_DIR`
-(one rule set per file). Each belongs to one reasoner (`reasoner_id`), and
-the gate refuses — fails closed with no verdict, which enforcement holds —
-when another reasoner selects it:
+Rule sets are YAML files (`*.yaml` or `*.yml`, one rule set per file) in the
+directory named by `RULES_GATE_RULESETS_DIR`, loaded once when the gate is
+built. A directory that does not exist, a malformed file, or two files with
+one `ruleset_id` fails the build, so the deployment refuses to start. A blank
+setting (the default) registers no rule sets, and every decision addressed to
+the gate then fails closed with `unknown_ruleset`.
+
+Each rule set belongs to one reasoner (`reasoner_id`). Rules are evaluated in
+order; rule ids are unique within a set, and a set has at least one rule:
 
 ```yaml
 ruleset_id: widget-guardrails
@@ -53,19 +61,40 @@ rules:
     action: BLOCK
 ```
 
-A reasoner routes a decision to the gate with a gate context naming a
-registered rule set:
+The example is illustrative: neither shipped reasoner binds the rules gate
+today. A reasoner that does binds it in its registration
+(`GateBinding(gate_id="rules")`) and addresses it with a gate context naming
+a registered rule set:
 
 ```python
 GateContext(gate_id="rules", gate_config={"ruleset_id": "widget-guardrails"})
 ```
 
-The framework validates `gate_config` against `RulesGateConfig` at intake.
-The verdict permits the actions of every matching rule (enforcement takes
-the most conservative) or the rule set's `default_action` when none matches.
-The bundle's `gate_output.evidence_snapshot` records the rule set as
-evaluated, the matching rule ids, and the observed values of every field the
-rules reference.
+The framework validates `gate_config` against `RulesGateConfig` (exactly one
+key, `ruleset_id`) at intake. A reasoner selects a rule set; it never submits
+rules, so the rules a decision is held to are the deployment's. Because the
+gate needs a `ruleset_id`, it cannot be mandated
+(`DECISIONLEDGER_MANDATORY_GATES`) for a reasoner that does not bind it:
+startup refuses a mandated gate that rejects the empty configuration.
+
+## The output
+
+- **Verdict.** It permits the actions of every matching rule (enforcement
+  takes the most conservative), or the rule set's `default_action` when none
+  matches, with the matching rules' `required_controls` and confidence 1.0.
+- **Evidence.** One reference per matching rule (`source_id`
+  `<ruleset_id>@<version>`, `locator` the rule id), or one with `locator`
+  `default_action` when none matched.
+- **Snapshot.** `evidence_snapshot` is a `RulesGateSnapshot`: the rule set as
+  evaluated, the matching rule ids, whether the default applied, and the
+  observed value of every field the rules reference, so the bundle is
+  auditable without the rule files.
+- **No verdict.** An unknown rule set (`unknown_ruleset`), a rule set
+  registered for another reasoner (`ruleset_reasoner_mismatch`; its rules are
+  not copied into this tenant's bundle), or a predicate that cannot evaluate,
+  such as a feature the submission does not carry (`predicate_error`),
+  returns `verdict=None` with `extra = {"failure": ..., "detail": ...}`.
+  Enforcement holds the decision.
 
 ## Tests
 

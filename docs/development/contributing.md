@@ -12,7 +12,7 @@
 - [uv](https://docs.astral.sh/uv/) — Python package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 - Docker Desktop with Compose V2 (`docker compose` — no hyphen)
 - Apple Silicon (M1/M2/M3) or x86_64 Linux
-- An OpenAI API key (for the LLM policy gate)
+- An OpenAI API key (for the RAG policy gate) and, for that gate's eval judges, an Anthropic API key
 
 ### Setup
 
@@ -25,17 +25,20 @@ cd decision-ledger
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Sync all dependencies (creates .venv; installs the framework plus every
-# reasoner workspace member through the default `reasoners` dependency group)
+# workspace reasoner, gate, and integration through the default `reasoners`,
+# `gates`, and `integrations` dependency groups; add --all-groups for docs)
 uv sync
 
 # Copy environment template and add your API key
 cp .env.example .env
 # Edit .env to add OPENAI_API_KEY
 
-# Start infra (Postgres + Elasticsearch, plus each reasoner's compose.yaml via include:)
+# Start infra (the framework's Postgres, plus the RAG policy gate's Elasticsearch
+# and ATO's Redis from their own compose.yaml files via include:)
 docker compose up -d
 
-# Index the reference reasoner's corpus and train its scorer if missing
+# Index the reference reasoner's corpus into the RAG policy gate and train its
+# scorer if missing
 make prepare-account_takeover
 
 # Verify everything is running
@@ -45,22 +48,31 @@ make check
 ### Running the Pipeline
 
 ```bash
-# Run the API (application factory; mounts every discovered reasoner plugin)
-uv run uvicorn --factory app.main:create_app --reload
+# Run the ledger API (application factory; composes every installed reasoner's
+# registration and every installed gate, and serves the ledger's own routes).
+# Every /api/v1 route needs a key: set DECISIONLEDGER_API_KEYS first.
+uv run uvicorn --factory app.main:create_app --reload     # or: make serve
+
+# Run ATO as its own service (port 8001); without ATO_LEDGER_URL it runs the
+# ledger in its own process
+make serve-account_takeover
 
 # Publish synthetic events for one ATO scenario to the reasoner's Redis stream
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 50
 make scenario-account_takeover          # 10 baseline_normal events
 
-# Run the eval harness (one reasoner, or every installed reasoner)
+# Run the eval harnesses: the framework's for one reasoner, the RAG policy
+# gate's on one reasoner's datasets, or every reasoner's and every gate's
 make eval-account_takeover
+make eval-gate-policy_rag REASONER=ato-reasoner
 make eval
 
-# Replay a specific decision (API running)
-curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay
+# Replay a specific decision (API running; the reasoner's or the operator's key)
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay \
+  -H 'X-DecisionLedger-Key: <key>'
 ```
 
-Per-reasoner targets come from each `reasoners/<name>/reasoner.mk`; `make help` lists them.
+Per-reasoner targets come from each `reasoners/<name>/reasoner.mk` and per-gate targets from each `gates/<name>/gate.mk`; `make help` lists them. The [local runbook](runbook-local.md) walks through the whole API.
 
 > **Note:** `make` targets use `uv run` internally. If running Python commands
 > directly, prefix with `uv run` to ensure the correct virtualenv and
@@ -75,7 +87,7 @@ Per-reasoner targets come from each `reasoners/<name>/reasoner.mk`; `make help` 
 
 1. Read `docs/development/style.md` — it covers formatting, naming, Pydantic conventions, commit messages, and all the style guides we follow.
 2. Read `docs/design/decisions.md` — it explains *why* the system is designed the way it is.
-3. Understand the `core/` boundary — `core/` has no infrastructure dependencies. If your change needs to import a database driver, an LLM SDK, or FastAPI, it belongs in `app/`, not `core/`. If it is specific to one domain (its events, features, model, Redis, prompts, corpus), it belongs in that reasoner's workspace member under `reasoners/`, not in the framework.
+3. Understand the `core/` boundary — `core/` has no infrastructure dependencies. If your change needs to import a database driver or FastAPI, it belongs in `app/`, not `core/`; an LLM SDK belongs only in the RAG policy gate's `llm/` adapters (DR-23). If it is specific to one domain (its events, features, model, Redis, prompts, corpus), it belongs in that reasoner's workspace member under `reasoners/`; if it is how one gate reaches its verdict (retrieval, a model client, its schema), it belongs in that gate's member under `gates/`. Neither belongs in the framework.
 
 ### Making Changes
 
@@ -100,7 +112,7 @@ Per-reasoner targets come from each `reasoners/<name>/reasoner.mk`; `make help` 
    feat(scorer): add SHAP value extraction to scorer output
    ```
 
-5. **Push and open a PR** against `main`. CI runs lint, typecheck, unit tests, and integration/smoke against service containers on every push and PR. The 5D eval harness runs only on demand via `workflow_dispatch` — invoke it manually before a release candidate.
+5. **Push and open a PR** against `main`. CI runs lint, typecheck, and unit tests on every push to `main` and every PR to `main`, and integration/smoke against service containers on pushes to `main` and same-repository PRs. The eval harnesses run only on demand via `workflow_dispatch` — invoke them manually before a release candidate.
 
 ### What Makes a Good PR
 
@@ -134,25 +146,33 @@ decision-ledger/
 ├── core/                    # Framework contracts — no infrastructure dependencies
 │   ├── submission.py        # Submission — the wire contract a reasoner hands the ledger
 │   ├── bundle.py            # DecisionBundle (schema version 2), GateRecord
+│   ├── identity.py          # NativeSubject, ResolvedIdentity, the entity journal's types
 │   ├── observation/         # ReasonerContext, GateContext, registration (GateBinding, BypassRule)
 │   ├── gate/                # Universal gate contracts (GateOutput, GateVerdict, EvidenceRef, predicates, combinator)
 │   ├── resolution/          # Resolution attempt log
 │   ├── llm/                 # LLMClient protocol
 │   └── eval/                # Eval metric contracts
-├── app/                     # Framework runtime — imports from core/, never from a reasoner
+├── app/                     # Framework runtime — imports from core/, never from a reasoner or gate
 │   ├── main.py, plugin.py, plugins.py, bootstrap.py   # create_app factory + plugin seam
-│   ├── submit.py            # submit (framework half of the handoff: gate set, enforcement, bundle)
+│   ├── api/                 # The ledger's HTTP routes and operations (/api/v1), problem documents
+│   ├── auth.py, client.py   # API keys → principals; LocalClient / HttpClient
+│   ├── submit.py            # decide / submit: validation, identity, gate set, enforcement, bundle
 │   ├── gates.py             # GatePlugin / Gate / ConfigAuthorizer seam, gate discovery
+│   ├── identity/            # The identity step: resolver discovery and the passthrough
 │   ├── enforcement/         # Deterministic rule-based action resolution
-│   ├── audit/               # Decision Bundle construction + replay, canonical DDL (sql/)
+│   ├── audit/               # Bundle store, registrations, journals, canonical DDL (sql/)
 │   └── monitoring/          # Structured logging, latency tracking
-├── eval/                    # Reasoner-agnostic evaluation harness (consistency, robustness; EvalAdapter)
+├── eval/                    # Reasoner-agnostic evaluation harness (consistency, robustness, shadow; EvalAdapter)
 ├── gates/                   # One uv workspace member per gate
 │   ├── rules/               # Zero-infrastructure rules gate (rules_gate)
 │   └── policy_rag/          # RAG policy gate (policy_rag_gate): retrieval, prompts, LLM adapters, own schema, eval, gate.mk, compose.yaml
 ├── reasoners/               # One uv workspace member per reasoner
-│   └── account_takeover/    # pyproject.toml, reasoner.mk, compose.yaml, src/ato_reasoner/, tests/
-├── tests/                   # Framework tests (+ _stub_reasoner/, a test-only second reasoner)
+│   ├── account_takeover/    # pyproject.toml, reasoner.mk, compose.yaml, src/ato_reasoner/, tests/
+│   └── example/             # The minimal example reasoner (widgets), src/example_reasoner/
+├── integrations/mcp/        # The MCP server (decisionledger-mcp), a client of the ledger
+├── schemas/                 # submission-v2.json, bundle-v2.json (exported by make schemas)
+├── conformance/             # Black-box HTTP contract suite (make conformance)
+├── tests/                   # Framework tests (+ _stub_reasoner/, _fake_gate/, _stub_resolver/: test-only doubles)
 ├── docs/                    # MkDocs site: design docs, decision records, D2 diagrams
 └── README.md                # Project overview, quickstart, architecture diagram
 ```
@@ -168,7 +188,7 @@ The style guide is [`docs/development/style.md`](style.md) and the decision reco
 - ❌ `import redis`, `import psycopg`, `import openai`, `import fastapi`
 - ❌ Any network calls, file I/O to external systems, or database queries
 
-Everything else (`app/`, `eval/`, every reasoner under `reasoners/`) imports from `core/`. `core/`, `app/`, and `eval/` never import from a reasoner; reasoners are discovered through entry points, and `tests/test_framework_boundary.py` fails the build on any leak.
+Everything else (`app/`, `eval/`, every reasoner under `reasoners/`, every gate under `gates/`) imports from `core/`. `core/`, `app/`, and `eval/` never import from a reasoner or a gate; both are discovered through entry points, and `tests/test_framework_boundary.py` fails the build on any leak.
 
 **If you're unsure whether something belongs in `core/` or `app/`:** ask whether it can be unit-tested without Docker running. If yes → `core/`. If no → `app/`. If it names a domain concept → the reasoner.
 
@@ -178,11 +198,13 @@ Everything else (`app/`, `eval/`, every reasoner under `reasoners/`) imports fro
 
 ### Test Organization
 
-Framework tests mirror the framework tree and run against the test-only stub reasoner, never ATO; each reasoner's tests live in its own member:
+Framework tests mirror the framework tree and run against the test-only doubles (a stub reasoner, fake gates, a stub identity resolver), never ATO or a real gate; each member's tests live in that member:
 
 ```
 tests/
-├── _stub_reasoner/                 # minimal second reasoner used only by framework tests
+├── _stub_reasoner/                 # minimal reasoner used only by framework tests
+├── _fake_gate/                     # fake gates used only by framework tests
+├── _stub_resolver/                 # stub identity resolver used only by framework tests
 ├── core/
 │   ├── observation/test_registration.py
 │   └── test_bundle.py
@@ -193,16 +215,19 @@ tests/
 │   └── test_consistency_dimension.py
 ├── integration/
 │   └── test_bundle_store.py
-└── test_framework_boundary.py
+├── test_framework_boundary.py
+└── test_schemas.py                 # fails when schemas/*.json drift from the models
 reasoners/account_takeover/tests/   # ATO unit, integration, generator, and eval-driver tests
+gates/policy_rag/tests/             # RAG gate unit and integration tests (eval/: its harness's unit tests)
+conformance/                        # the HTTP contract suite (marker `conformance`; make conformance)
 ```
 
 ### Test Categories
 
 - **Unit tests** (`tests/core/`, `tests/app/`, `tests/eval/`, and the member's unit tests): Pure logic, no infrastructure. Fast. Run on every commit.
 - **Smoke tests**: Minimal end-to-end sanity check — one happy path, one error path, one replay through the full pipeline. Subset of integration, but fast enough to run during development for quick confidence. Mark with `@pytest.mark.smoke`.
-- **Integration tests** (`tests/integration/`, `reasoners/<name>/tests/integration/`): Require Docker services. Run in CI and before PRs. Mark with `@pytest.mark.integration`.
-- **Evaluation tests** (`tests/eval/` and `eval/`): Full pipeline evaluation. Slow, makes LLM calls, costs money. Run before PRs and in CI release gates. Mark with `@pytest.mark.evaluation`.
+- **Integration tests** (`tests/integration/`, `reasoners/<name>/tests/integration/`, `gates/<name>/tests/integration/`): Require Docker services. Run in CI and before PRs. Mark with `@pytest.mark.integration`.
+- **Evaluation tests**: any test that calls a live model. Slow, makes LLM calls, costs money. Mark with `@pytest.mark.evaluation`: `make test` excludes it and `make test-all` runs it. No test carries the mark today: the eval harnesses themselves (`make eval-<reasoner>`, `make eval-gate-policy_rag`) are the LLM test suite, and `tests/eval/` and `gates/policy_rag/tests/eval/` hold the harnesses' unit tests, which stub every model.
 
 ### Running Tests
 
@@ -210,8 +235,9 @@ reasoners/account_takeover/tests/   # ATO unit, integration, generator, and eval
 make test                    # Unit tests only (fast)
 make test-smoke              # Smoke tests (quick end-to-end sanity check, requires Docker)
 make test-integration        # Integration tests (requires Docker)
-make eval                    # Full evaluation harness (slow, costs money)
+make eval                    # Every reasoner's eval, then every gate's (slow, costs money)
 make test-all                # Everything
+make conformance             # HTTP contract suite against a running ledger (DECISIONLEDGER_URL + keys)
 ```
 
 ### Writing Tests
@@ -230,17 +256,21 @@ The eval harness is a first-class component, not an afterthought. Changes that a
 
 ### Five Dimensions
 
-| # | Dimension | What It Tests | CI Gate |
-|---|-----------|---------------|---------|
-| 01 | Retrieval Quality | Right policy evidence retrieved | Precision ≥0.80, Recall ≥0.75 |
-| 02 | Generation Faithfulness | Rationale grounded in retrieved evidence | RAGAS ≥0.65 (MVP), Hallucination = 0 |
-| 03 | Decision Consistency | Same input → same action across orderings | Action Stability = 1.0 |
-| 04 | Citation Accuracy | Citations actually support claims | Relevance ≥0.80 |
-| 05 | Adversarial Robustness | Correct behavior under attack | Injection Resistance = 1.0 |
+Two harnesses run them. The framework's (`eval/`, `make eval-<reasoner>`) drives each reasoner's own pipeline through its `EvalAdapter`; the RAG policy gate's (`policy_rag_gate.eval`, `make eval-gate-policy_rag`) runs on the datasets each reasoner ships for that gate.
+
+| # | Dimension | Harness | What It Tests | CI Gate |
+|---|-----------|---------|---------------|---------|
+| 01 | Retrieval Quality | RAG policy gate | Right policy evidence retrieved | Precision@5 ≥0.40, Recall@5 ≥0.75, MRR ≥0.70 |
+| 02 | Generation Faithfulness | RAG policy gate | Rationale grounded in retrieved evidence | RAGAS ≥0.65 (MVP), Hallucination = 0 |
+| 03 | Decision Consistency | Framework | Same input → same action across orderings | Action Stability = 1.0 |
+| 04 | Citation Accuracy | RAG policy gate | Citations actually support claims | Relevance ≥0.80 |
+| 05 | Adversarial Robustness | Framework | Correct behavior under attack | Injection Resistance = 1.0 |
+
+The framework's harness also runs the **shadow** dimension (DR-30): it re-decides a sample of the run's recorded decisions with the reasoner's advisory gates and reports agreement. It is report-only until a baseline calibrates a threshold.
 
 ### Golden Sets
 
-Golden sets belong to the reasoner they evaluate and ship with its eval adapter. For ATO they live under `reasoners/account_takeover/src/ato_reasoner/eval/datasets/`:
+Golden sets belong to the reasoner they evaluate and ship with its eval adapter; the retrieval, faithfulness, and citation sets are the ones the RAG policy gate's harness reads. For ATO they live under `reasoners/account_takeover/src/ato_reasoner/eval/datasets/`:
 
 - `retrieval/golden_queries.yaml` — 12 curated retrieval queries with annotated relevant policy chunks
 - `scenarios/*.yaml` — 4 scenarios × 3 orderings with expected actions
@@ -254,18 +284,21 @@ Golden set changes are high-impact and require careful review.
 
 ## CI Pipeline
 
-GitHub Actions runs three workflows:
+GitHub Actions runs four workflows:
 
 | Workflow             | Trigger                            | What it runs                                                                     |
 |----------------------|------------------------------------|----------------------------------------------------------------------------------|
 | `ci.yaml`            | Push to `main`, PR to `main`       | Lint (Ruff + sqlfluff) → typecheck (pyright) → unit tests → DR-23 boundary check |
-| `integration.yaml`   | Push to `main`, PR to `main`       | Per (reasoner, gate) pair (`matrix.reasoner`, `matrix.gate`): `make prepare-gate-<gate>`, `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers |
+| `integration.yaml`   | Push to `main`, same-repository PR to `main` | Per (reasoner, gate) pair (`matrix.reasoner`, `matrix.gate`): `make prepare-gate-<gate>`, `make prepare-<reasoner>`, then `make test-integration` + `make test-smoke` against service containers |
 | `eval.yaml`          | `workflow_dispatch` only           | Per (reasoner, gate) pair: prepare both, then `make eval-<reasoner>` (framework harness) and `make eval-gate-<gate>` on that reasoner's datasets; uploads the reports as a workflow artifact |
+| `docs.yaml`          | Push or PR to `main` touching the docs, `workflow_dispatch` | `mkdocs build --strict`; deploys to GitHub Pages on push to `main` |
 
 - **Gate check.** The eval harness compares each dimension's score against its
   threshold. Any regression below threshold fails the workflow.
-- **Replay test** (part of integration tests): loads N Decision Bundles and
-  replays them. Output must be byte-identical to the original.
+- **Replay tests** (part of the integration suite): write decisions, replay
+  them from the stored bundles, and require `matched`: the decision action,
+  every gate's enforced action, and a record's bypass-rule checks are
+  reproduced.
 - **Pre-push hook.** `make install-hooks` wires `make verify-push` as a
   pre-push hook, so locally validated state matches what CI sees.
 
@@ -284,7 +317,7 @@ candidate before promoting a new baseline.
 All development runs locally via Docker Compose. No cloud dependency during iteration.
 
 ```bash
-docker compose up -d          # Start PostgreSQL+pgvector, Elasticsearch, and ATO's Redis (included)
+docker compose up -d          # Start Postgres (pgvector image), plus the RAG gate's Elasticsearch and ATO's Redis (included)
 docker compose down           # Stop everything
 docker compose down -v        # Stop and remove volumes (full reset)
 ```
@@ -302,7 +335,7 @@ Cloud deployment (AWS: ECS + ElastiCache + RDS + OpenSearch) is a planned stretc
 
 - **Never commit secrets.** API keys, database passwords, Terraform state — none of these belong in git.
 - `.env` is gitignored. Use `.env.example` as a committed template with placeholder values.
-- Two external secrets are used during MVP: `OPENAI_API_KEY` (policy gate) and `ANTHROPIC_API_KEY` (eval judges). Pass them via environment variables; see [Secrets](../operations/secrets.md).
+- Two external secrets are used during MVP: `OPENAI_API_KEY` (the RAG policy gate) and `ANTHROPIC_API_KEY` (its eval judges). The ledger's own API keys (`DECISIONLEDGER_API_KEYS`, `DECISIONLEDGER_OPERATOR_KEY`) are secrets too. Pass them via environment variables; see [Secrets](../operations/secrets.md).
 - If you discover a committed secret, rotate it immediately and force-push to remove it from history.
 
 ---
