@@ -1,25 +1,32 @@
 ###############################################################################
-# DecisionLedger — C4 Level 3: Decision Pipeline Components
+# DecisionLedger — C4 Level 3: Ledger API Components
 #
-# Zooms into the Decision API container (app/main.py:create_app mounts the
-# ATO plugin's router; the request runs ato_reasoner.pipeline.run_ato_decision
-# and then app/decide.py:execute_decision). Shows domain assembly → intake
-# validation + routing → retrieval + gate (or fast path) → enforcement →
-# audit. The Reasoner Assembler is the single handoff point between the
-# domain and framework layers (the upper/lower halves of the diagram,
-# distinguished by indigo vs teal). Indigo components are code in the ATO
-# workspace member (reasoners/account_takeover/src/ato_reasoner/); teal
-# components are framework code in app/.
+# Zooms into the Ledger API container (app/main.py:create_app). A request
+# enters through the routes and the key ring (app/api/, app/auth.py), which
+# map the X-DecisionLedger-Key header to a principal, and reaches one of the
+# ledger's operations; LocalClient (app/client.py) enters at the same
+# operations in process, as the trusted caller. A decision write runs
+# decide()/submit() (app/submit.py), the framework half of every decision:
+# intake validation → the identity step → the gate set → gate invocation
+# (mandatory gates concurrently, then advisory ones) → gate-level enforcement
+# → the decision-level rules and the combinator → the bundle store write.
+# Side paths: replay re-enforces a bundle's stored gate outputs under its
+# registration snapshot and logs the outcome to replay_logs; the registry
+# snapshots every registration version; the entity journal and the timeline
+# query serve a subject's decisions.
+# Teal components are framework code; dashed ones are plugins the framework
+# loads but does not implement (gate plugins, the identity resolver).
 #
 # Render:  d2 --theme 0 components.d2 ../../assets/diagrams/components.svg
 #          (uses dagre — see justfile for the special-case)
-# Ref:     docs/design/architecture.md, docs/design/pipeline.md, docs/design/reasoner-handoff.md
+# Ref:     docs/design/architecture.md, docs/design/pipeline.md,
+#          docs/design/identity.md
 ###############################################################################
 
-title: Components — Decision Pipeline {
+title: Components — Ledger API {
   near: top-center
   shape: text
-  style.font-size: 28
+  style.font-size: 34
   style.bold: true
 }
 
@@ -27,207 +34,161 @@ direction: down
 
 ###############################################################################
 # Palette
-#   Domain layer       fill #e8eef9 / stroke #5b6abf  (indigo)
-#   Framework layer    fill #e8f5f3 / stroke #0d9488  (teal)
-#   Routing diamond    filled teal / white text
-#   Fast-path branch   fill #fef3e8 / stroke #c9622e  (burnt orange)
-#   Datastore          fill #fbf3e6 / stroke #8c6d3f  (ochre)
-#   Streaming state    fill #e8f5f5 / stroke #2e8b8b  (cyan)
-#   LLM provider       fill #f5e8f5 / stroke #b45dc9  (violet)
+#   Framework        fill #e8f5f3 / stroke #0d9488  (teal)
+#   Decision steps   fill #ffffff / stroke #0d9488  (teal outline, in the
+#                    decide/submit container)
+#   Gate plugin      fill #ffffff / stroke #0d9488, dashed
+#   Identity         fill #fef3e8 / stroke #c9622e, dashed  (burnt orange:
+#                    the enterprise's resolver plugin or the passthrough)
+#   Datastore        fill #fbf3e6 / stroke #8c6d3f  (ochre)
+#   Caller           fill #f0f0f0 / stroke #1c2024  (neutral)
 ###############################################################################
 
-###############################################################################
-# Inputs
-###############################################################################
+# Node text 22px and edge text 20px keep the labels legible at the docs
+# column width
+classes: {
+  caller: {style: {fill: "#f0f0f0"; stroke: "#1c2024"; stroke-width: 2; font-size: 22}}
+  framework: {style: {fill: "#e8f5f3"; stroke: "#0d9488"; stroke-width: 2; font-size: 22}}
+  step: {style: {fill: "#ffffff"; stroke: "#0d9488"; stroke-width: 2; font-size: 22}}
+  plugin: {style: {fill: "#ffffff"; stroke: "#0d9488"; stroke-width: 2; stroke-dash: 4; font-size: 22}}
+  identity: {style: {fill: "#fef3e8"; stroke: "#c9622e"; stroke-width: 2; stroke-dash: 4; font-size: 22}}
+  datastore: {shape: cylinder; style: {fill: "#fbf3e6"; stroke: "#8c6d3f"; stroke-width: 2; font-size: 22}}
 
-input: LoginEvent {
-  shape: rectangle
-  style.fill: "#f0f0f0"
-  style.stroke: "#1c2024"
-  tooltip: "Validated LoginEvent — entered via POST /api/v1/ato/decisions (ato_reasoner/api.py) or the in-process eval driver (ato_reasoner/eval/driver.py)."
-}
-
-###############################################################################
-# Domain layer (indigo) — pre-handoff
-###############################################################################
-
-features: Feature Engine {
-  style.fill: "#e8eef9"
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
-  tooltip: "FeatureService.compute() — sliding-window velocity + novelty + impossible-travel features over Redis state. ato_reasoner/feature_service.py."
-}
-
-redis_state: Redis  ·  feature state {
-  shape: cylinder
-  style.fill: "#e8f5f5"
-  style.stroke: "#2e8b8b"
-  style.stroke-width: 2
-  tooltip: "Per-account ato:* hashes, sets, and sorted sets for sliding windows. TTL-managed. Owned by the ATO reasoner (reasoners/account_takeover/compose.yaml; ATO_REDIS_URL), not the framework."
-}
-
-scorer: ATO Scorer {
-  style.fill: "#e8eef9"
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
-  tooltip: "AtoScorer.score() — XGBoost over AtoFeatureVector → ScorerOutput (risk_score, top SHAP signals, GateRoute). ato_reasoner/scorer/."
-}
-
-assembler: Reasoner Assembler {
-  style.fill: "#5b6abf"
-  style.stroke: "#5b6abf"
-  style.font-color: "#ffffff"
-  style.bold: true
-  style.stroke-width: 2
-  tooltip: "build_observation() — the only function crossing the domain → framework boundary. Translates (LoginEvent, AtoFeatureVector, ScorerOutput) into an Observation with ReasonerContext + GateContext + (fast_path_rationale on fast path). ato_reasoner/assembler.py."
+  flow: {style: {stroke: "#0d9488"; stroke-width: 2; font-size: 20}}
+  side: {style: {stroke: "#0d9488"; stroke-dash: 4; font-size: 20}}
+  to-plugin: {style: {stroke: "#0d9488"; stroke-dash: 4; font-size: 20}}
+  to-identity: {style: {stroke: "#c9622e"; stroke-dash: 4; font-size: 20}}
+  to-store: {style: {stroke: "#8c6d3f"; font-size: 20}}
+  from-caller: {style: {stroke: "#1c2024"; font-size: 20}}
 }
 
 ###############################################################################
-# Routing diamond
+# Entry: callers, routes, operations
 ###############################################################################
 
-route: Route? {
-  shape: diamond
-  style.fill: "#0d9488"
-  style.stroke: "#0d9488"
-  style.font-color: "#ffffff"
-  style.bold: true
-  style.stroke-width: 2
-  tooltip: "execute_decision first runs validate_observation against the reasoner registry (registered reasoner, allowed gate / template / jurisdictions), then inspects observation.route. ATO thresholds: FAST_PATH_ALLOW < 0.20; FAST_PATH_BLOCK > 0.95; otherwise ROUTE_TO_GATE. app/decide.py."
+http: "HTTP callers\n(reasoner services, MCP server, analyst)" {
+  class: caller
 }
 
-###############################################################################
-# Framework layer (teal) — post-handoff
-###############################################################################
-
-retrieval: Hybrid Retrieval {
-  style.fill: "#e8f5f3"
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-  tooltip: "PolicyRetriever.retrieve() — pgvector HNSW (dense) + Elasticsearch BM25 (sparse) → RRF fusion → cross-encoder rerank (latency-budget bypass falls back to RRF-only). Filters: reasoner_id (tenant) and jurisdictions on both stores; risk_tier on pgvector only. app/retrieval/."
+local: "LocalClient\n(in-process caller)" {
+  class: framework
+  tooltip: "app/client.py — runs the ledger in the caller's process and calls the same operations the HTTP routes call, as the trusted in-process principal. Eval drivers, tests, and a reasoner that embeds the ledger use it."
 }
 
-gate: Policy Gate {
-  style.fill: "#e8f5f3"
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-  tooltip: "PolicyGate.evaluate() — resolves the reasoner's YAML prompt template (from its plugin prompts_dir) via gate_config template_id, sends the template's system text, renders with template_vars + retrieved snippets, calls the LLM with a structured-output schema, returns PolicyGateOutput (verdict + rationale + citations) or None on validation failure. app/gate/policy/."
+routes: "Routes + KeyRing\napp/api/ · app/auth.py" {
+  class: framework
+  tooltip: "GET /health and the /api/v1 routes. KeyRing maps X-DecisionLedger-Key to a principal: a reasoner (bound to its reasoner_id) or the operator. Errors are RFC 9457 problem documents with a stable code (app/api/errors.py)."
 }
 
-fast_path: Fast Path {
-  style.fill: "#fef3e8"
-  style.stroke: "#c9622e"
-  style.stroke-width: 2
-  tooltip: "Bypasses retrieval + LLM. fast_path_rationale records why. GateContext is still preserved on the bundle for retrospective shadow evaluation."
-}
-
-enforcement: Enforcement Resolver {
-  style.fill: "#e8f5f3"
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-  tooltip: "resolve(obs, verdict, snippets, decision_id, registration) — pure deterministic rule application. Schema-failure / novel-entity (registration.novel_entity_feature) / low-confidence / jurisdiction-conflict (registration.jurisdiction_conflict_groups) → HOLD; adversarial probe → BLOCK. Severity ladder ALLOW < CHALLENGE < HOLD < BLOCK. Re-runnable byte-identically for replay. app/enforcement/."
-}
-
-audit: Audit Builder + Store {
-  style.fill: "#e8f5f3"
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-  tooltip: "build_bundle() composes the immutable DecisionBundle (raw_event Observation, retrieval results, gate_input/gate_output, enforcement decision, latency breakdown). BundleStore.write() persists JSONB to Postgres. app/audit/."
+ops: "Operations\ncreate_decision · record_batch\nlookup_decision · replay_decision\nresolve_decision · entity_decisions" {
+  class: framework
+  tooltip: "app/api/decisions.py and app/api/entities.py: the functions the routes and LocalClient both call."
 }
 
 ###############################################################################
-# External datastores + LLM
+# decide() / submit() — the framework half of every decision
 ###############################################################################
 
-pg_vec: PostgreSQL  ·  pgvector HNSW {
-  shape: cylinder
-  style.fill: "#fbf3e6"
-  style.stroke: "#8c6d3f"
-  style.stroke-width: 2
-  tooltip: "Dense policy embeddings (384-dim, cosine, HNSW)."
+submit: "decide() / submit()\napp/submit.py" {
+  style: {fill: "#f3faf8"; stroke: "#0d9488"; stroke-width: 2; font-size: 26}
+  # Bottom-right, on two lines, keeps the label clear of the edges entering
+  # at the top and the bundle edge leaving at the bottom
+  label.near: bottom-right
+
+  validate: "Intake validation\nregistration · submission · gate configs" {
+    class: step
+    tooltip: "The reasoner must be registered; validate_submission checks the record's bypass citation, the native subject, and the gate contexts; each composed gate checks its own config_model (and ConfigAuthorizer). A failure raises SubmissionContractError before any gate runs."
+  }
+  identity: "Identity step\nIdentityService.identify" {
+    class: step
+    tooltip: "Resolves the submission's native subject through the active resolver in a worker thread under a 50 ms budget (DEFAULT_IDENTITY_BUDGET_MS). Any failure gives the passthrough subject, unresolved, with the reason. It never refuses a decision."
+  }
+  gateset: "Gate set\nregistration bindings + deployment mandates" {
+    class: step
+  }
+  invoke: "Gate invocation · invoke_gate\nmandatory gates concurrently, then advisory\n(gate mode only); a failing gate fails closed" {
+    class: step
+    tooltip: "Advisory gates run only on a gated decision, and are skipped (recorded with the reason) once a mandatory gate blocks. A gate that raises, outlives its budget (45 s default), returns an unusable output, or is not composed is recorded failed and holds the decision."
+  }
+  gatelevel: "Gate-level enforcement\nresolve_gate_output" {
+    class: step
+  }
+  decisionlevel: "Decision-level rules + combinator\nresolver.resolve_decision" {
+    class: step
+    tooltip: "app/enforcement/resolver.py — the decision-level rules, the bypass checks (snapshotted into the bundle), and the most-restrictive combinator over ALLOW < CHALLENGE < HOLD < BLOCK."
+  }
+
+  validate -> identity: {class: flow}
+  identity -> gateset: {class: flow}
+  gateset -> invoke: {class: flow}
+  invoke -> gatelevel: "GateOutput per gate" {class: flow}
+  gatelevel -> decisionlevel: {class: flow}
 }
 
-es: Elasticsearch  ·  BM25 {
-  shape: cylinder
-  style.fill: "#fbf3e6"
-  style.stroke: "#8c6d3f"
-  style.stroke-width: 2
-  tooltip: "Sparse policy index with jurisdiction + version filters."
-}
-
-llm: LLM Provider {
-  shape: cloud
-  style.fill: "#f5e8f5"
-  style.stroke: "#b45dc9"
-  style.stroke-width: 2
-  tooltip: "OpenAI / Anthropic — structured-output policy-gate calls."
-}
-
-pg_audit: PostgreSQL  ·  decision_bundles {
-  shape: cylinder
-  style.fill: "#fbf3e6"
-  style.stroke: "#8c6d3f"
-  style.stroke-width: 2
-  tooltip: "Append-only audit store in the shared decisionledger schema: decision_bundles JSONB (reasoner_id tenant column) + replay_logs."
-}
-
-###############################################################################
-# Flow — domain side (indigo)
-###############################################################################
-
-input -> features: "validated event" {
-  style.stroke: "#1c2024"
-}
-features -> redis_state: "R/W window state" {
-  style.stroke: "#2e8b8b"
-}
-features -> scorer: "AtoFeatureVector" {
-  style.stroke: "#5b6abf"
-}
-scorer -> assembler: "ScorerOutput" {
-  style.stroke: "#5b6abf"
-}
-assembler -> route: "Observation" {
-  style.stroke: "#5b6abf"
-  style.stroke-width: 2
+store: "Bundle store write\nBundleStore.write" {
+  class: framework
+  tooltip: "app/audit/store.py — writes the version-2 bundle stamped with registration_version, and opens the relationships its identity asserts in the membership projection."
 }
 
 ###############################################################################
-# Flow — framework side (teal / orange)
+# Plugins the framework loads but does not implement
 ###############################################################################
 
-route -> retrieval: "ROUTE_TO_GATE" {
-  style.stroke: "#0d9488"
-  style.stroke-width: 2
-}
-route -> fast_path: "FAST_PATH_ALLOW\n/ FAST_PATH_BLOCK" {
-  style.stroke: "#c9622e"
-  style.stroke-width: 2
+resolver: "Identity resolver plugin\nor the passthrough" {
+  class: identity
+  tooltip: "decisionledger.identity_resolvers entry point named by DECISIONLEDGER_IDENTITY_RESOLVER (app/identity/resolvers.py); the passthrough (app/identity/passthrough.py) when none is configured."
 }
 
-retrieval -> gate: "RetrievedSnippet[]" {
-  style.stroke: "#0d9488"
-}
-gate -> enforcement: "PolicyGateOutput.verdict\n(or None → HOLD)" {
-  style.stroke: "#0d9488"
-}
-fast_path -> enforcement: "fast-path action" {
-  style.stroke: "#c9622e"
-}
-enforcement -> audit: "EnforcementDecision" {
-  style.stroke: "#0d9488"
+gates: "Gate plugins\ndecisionledger.gates" {
+  class: plugin
+  tooltip: "Composed by app/gates.py. Each gate's evaluate(GateRequest) returns a GateOutput; the ledger enforces it."
 }
 
-retrieval -> pg_vec: "HNSW cosine\n+ jurisdiction / risk_tier" {
-  style.stroke: "#8c6d3f"
+###############################################################################
+# Side paths
+###############################################################################
+
+registry: "Registry + registration snapshots\napp/plugins.py · app/audit/registrations.py" {
+  class: framework
+  tooltip: "The plugins' registrations plus the registration file's (DECISIONLEDGER_REGISTRATIONS). Each version is snapshotted to reasoner_registrations before the first decision; intake validates against the current version, replay against the bundle's registration_version."
 }
-retrieval -> es: "BM25\n+ jurisdiction" {
-  style.stroke: "#8c6d3f"
+
+replay: "Replay · BundleStore.replay\nre-enforces stored gate outputs\nunder the registration snapshot" {
+  class: framework
+  tooltip: "app/audit/store.py — replay_bundle re-runs gate-level enforcement on each stored GateOutput, re-evaluates the bypass rules, and re-applies the decision-level rules and the combinator; no gate is invoked. BundleStore.replay appends the outcome to replay_logs."
 }
-gate -> llm: "rendered prompt\n→ JSON verdict" {
-  style.stroke: "#b45dc9"
-  style.stroke-dash: 4
+
+timeline: "Entity journal + timelines\nEntityJournal · entity_decisions" {
+  class: framework
+  tooltip: "app/audit/entity_journal.py (entity_events, append-only; entity_membership, its projection) and BundleStore.entity_decisions (a subject's decisions, unioning merged ids and, on request, related subjects)."
 }
-audit -> pg_audit: "INSERT bundle JSONB\n(append-only)" {
-  style.stroke: "#8c6d3f"
+
+pg: "PostgreSQL · schema decisionledger" {
+  class: datastore
+  tooltip: "decision_bundles, replay_logs, decision_resolution_attempts, reasoner_registrations, entity_events, entity_membership (app/audit/sql/02_tables.sql)."
 }
+
+###############################################################################
+# Flow
+###############################################################################
+
+http -> routes: "X-DecisionLedger-Key" {class: from-caller}
+routes -> ops: "principal" {class: flow}
+local -> ops: "trusted principal" {class: flow}
+
+ops -> submit.validate: {class: flow}
+submit.decisionlevel -> store: "version-2 bundle" {class: flow}
+store -> pg: "INSERT bundle\n(append-only)" {class: to-store}
+
+submit.identity -> resolver: "native subject" {class: to-identity}
+submit.invoke -> gates: "GateRequest" {class: to-plugin}
+
+registry -> submit.validate: "registration" {class: side}
+registry -> pg: {class: to-store}
+
+ops -> replay: "replay_decision" {class: side}
+registry -> replay: {class: side}
+replay -> pg: "stored bundle,\nreplay log" {class: to-store}
+
+ops -> timeline: "entity_decisions" {class: side}
+timeline -> pg: "journal, projection,\nbundles" {class: to-store}

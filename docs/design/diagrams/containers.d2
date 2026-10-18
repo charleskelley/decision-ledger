@@ -1,59 +1,61 @@
 ###############################################################################
 # DecisionLedger — C4 Level 2: Containers
 #
-# The containers that must be running for the system to work: one
-# long-running process (the Decision API) and three datastores. PostgreSQL and
-# Elasticsearch are framework-owned and sit inside the DecisionLedger
-# boundary. Redis is owned by the Account Takeover reasoner (its own
-# reasoners/account_takeover/compose.yaml, pulled into the stack by
-# `include:`), so it sits outside the boundary, under the analyst. Offline tools (corpus loader, eval harness, scorer trainer,
-# scenario generator, baseline capture) run on demand and are left out, per
-# the C4 container definition; see the caption in docs/design/architecture.md.
+# The containers that must be running for the system to work. Inside the
+# DecisionLedger boundary: the Ledger API (the framework's FastAPI app,
+# which loads the gate plugins and the identity resolver plugin in process)
+# and PostgreSQL (schema decisionledger). The RAG policy gate's stores sit in
+# their own gate-owned boundary inside it: Elasticsearch (its own
+# compose.yaml) and the gate's policy_rag schema on the same Postgres server.
+# Outside the boundary: the Account Takeover service with its own Redis; the
+# MCP server agent reasoners call the ledger through; the LLM service the
+# RAG gate calls; the enterprise's identity resolver; the analyst. Offline
+# tools (corpus loader, eval harnesses, scorer trainer, scenario generator,
+# baseline capture) run on demand and are left out, per the C4 container
+# definition; see the caption in docs/design/architecture.md.
 #
-# - People and external systems are the L1 elements, with L1's text.
-#   Account Takeover is the shipped reference reasoner; create_app discovers
-#   its plugin through the decisionledger.reasoners entry point and mounts its
-#   router and pipeline into the Decision API, which hand observations to the
-#   framework in-process. The Redis edge is indigo because ATO code running
-#   inside the API process initiates it. The other reasoners are illustrative (grey edges).
-# - The LLM or ML service is OpenAI GPT-4o at runtime (named in the caption).
+# - Account Takeover is the shipped reference reasoner and its own service.
+#   With no ATO_LEDGER_URL it runs the ledger in its own process
+#   (LocalClient, writing to the same Postgres); with ATO_LEDGER_URL set it
+#   calls the Ledger API over HTTP. The edge names both.
+# - The agent reasoner is illustrative (grey): any MCP client.
+# - Edges from the Ledger API to the gate stores and the LLM are made by the
+#   RAG gate's code running in the API process; the labels say so.
 #
-# Layout: the reasoner band is pinned above everything with
+# Layout: the caller band is pinned above everything with
 # `near: top-center`, as in system-context.d2. The rest is a three-column
-# grid: analyst, the DecisionLedger boundary, LLM. Grid cells stretch their
-# shapes, so the analyst and LLM sit in padding-free two-row wrapper grids
-# whose invisible top spacer sets their height. The right spacer (`lift`)
-# centers the LLM on the Decision API so that edge stays horizontal: lift =
-# API center - LLM height / 2, measured from the boundary's top. Recompute it
-# when the API or LLM text changes line count. Inside the boundary, a 3x2
-# grid puts the API over PostgreSQL in the middle column, Elasticsearch to the
-# lower right, and leaves the lower-left cell empty for the Redis edge. The
-# left column's `rise` spacer drops Redis to roughly the datastore row.
+# grid: analyst, the DecisionLedger boundary, and a right column with the
+# LLM over the identity resolver. Grid cells stretch their shapes, so the
+# side columns sit in padding-free wrapper grids whose invisible spacers set
+# their offsets. Inside the boundary, a 2x2 grid puts the Ledger API over
+# PostgreSQL in the left column, leaves the upper-right cell empty for the
+# LLM and resolver edges, and puts the gate-owned stores lower right.
 #
 # Edge labels: d2 masks an edge only behind its label's text box. Multi-line
 # labels keep the lines an edge crosses shorter than their widest line, and
-# trailing " " lines extend the mask on the hand-off and return labels, so no
-# dash touches the text.
+# trailing " " lines extend the mask, so no dash touches the text.
 #
 # Sources (code paths for maintainers; nothing here renders):
-#   Decision API   app/main.py (create_app, lifespan, routes),
-#                  app/plugins.py (entry-point discovery), app/bootstrap.py,
-#                  app/decide.py,
-#                  ato_reasoner/api.py (mounted router),
-#                  ato_reasoner/pipeline.py (in-process hand-off)
-#   Redis          reasoners/account_takeover/compose.yaml,
-#                  ato_reasoner/feature_service.py, ato_reasoner/plugin.py
-#   PostgreSQL     app/audit/sql/02_tables.sql, app/audit/store.py,
-#                  app/retrieval/retriever.py
-#   Elasticsearch  app/retrieval/es/policy-chunks.json,
-#                  app/retrieval/retriever.py
-#   LLM            app/llm/openai.py, app/gate/policy/gate.py
-#   Tech tags      docker-compose.yml, reasoners/account_takeover/compose.yaml
-#                  (image versions)
-#   (ato_reasoner/ = reasoners/account_takeover/src/ato_reasoner/)
+#   Ledger API     app/main.py (create_app, lifespan, routes), app/api/,
+#                  app/auth.py, app/bootstrap.py, app/gates.py,
+#                  app/identity/, app/submit.py
+#   PostgreSQL     docker-compose.yml, app/audit/sql/02_tables.sql,
+#                  app/audit/store.py, app/audit/entity_journal.py
+#   RAG gate       gates/policy_rag/compose.yaml (Elasticsearch),
+#                  policy_rag_gate/sql/ (policy_rag schema),
+#                  policy_rag_gate/es/policy-chunks.json,
+#                  policy_rag_gate/retriever.py, policy_rag_gate/llm/openai.py
+#   ATO service    ato_reasoner/app.py, reasoners/account_takeover/reasoner.mk
+#                  (serve-account_takeover, port 8001), app/client.py,
+#                  reasoners/account_takeover/compose.yaml (Redis)
+#   MCP server     integrations/mcp/src/decisionledger_mcp/
+#   Resolver       app/identity/resolvers.py (decisionledger.identity_resolvers),
+#                  app/identity/passthrough.py
+#   (ato_reasoner/ = reasoners/account_takeover/src/ato_reasoner/;
+#    policy_rag_gate/ = gates/policy_rag/src/policy_rag_gate/)
 #
 # Render:  d2 --theme 0 --layout elk containers.d2 ../../assets/diagrams/containers.svg
-# Ref:     docs/design/architecture.md
+# Ref:     docs/design/architecture.md, docs/design/infrastructure.md
 ###############################################################################
 
 vars: {
@@ -61,7 +63,7 @@ vars: {
   d2-config: {pad: 16}
 }
 
-# Analyst | DecisionLedger | LLM
+# Analyst | DecisionLedger | LLM over resolver
 grid-columns: 3
 horizontal-gap: 24
 
@@ -72,6 +74,8 @@ horizontal-gap: 24
 #   Datastore     ochre   fill #fbf3e6 / stroke #8c6d3f / text #6e552f
 #   State store   cyan    fill #e8f5f5 / stroke #2e8b8b / text #1f6b6b
 #   LLM or ML     violet  fill #f5e8f5 / stroke #b45dc9 / text #7a3590
+#   Identity      burnt   fill #fef3e8 / stroke #c9622e / text #9a4a22
+#                 orange  (the enterprise's identity resolver)
 #   Person        neutral fill #f0f0f0 / stroke #1c2024 / text #1c2024
 #   Boundary and  grey    fill #ffffff / stroke #8c93a3 / text #5f6670
 #     placeholder
@@ -88,22 +92,23 @@ classes: {
     vertical-gap: 0
   }
   row-name: {
-    width: 310
+    width: 290
     height: 44
     style: {fill: transparent; stroke: transparent; font-size: 28; bold: true}
   }
   row-body: {
-    width: 310
+    width: 290
     style: {fill: transparent; stroke: transparent; font-size: 24; bold: false}
   }
   # Narrower rows for the cells inside the DecisionLedger boundary
-  narrow: {width: 230}
+  narrow: {width: 250}
 
   domain: {style: {fill: "#e8eef9"; stroke: "#5b6abf"; stroke-width: 3; border-radius: 16}}
   container: {style: {fill: "#e8f5f3"; stroke: "#0d9488"; stroke-width: 3; border-radius: 16}}
   datastore: {shape: cylinder; style: {fill: "#fbf3e6"; stroke: "#8c6d3f"; stroke-width: 3}}
   state: {shape: cylinder; style: {fill: "#e8f5f5"; stroke: "#2e8b8b"; stroke-width: 3}}
   llm: {style: {fill: "#f5e8f5"; stroke: "#b45dc9"; stroke-width: 3; border-radius: 16}}
+  identity: {style: {fill: "#fef3e8"; stroke: "#c9622e"; stroke-width: 3; border-radius: 16}}
   person: {shape: c4-person; style: {fill: "#f0f0f0"; stroke: "#1c2024"; stroke-width: 3}}
   placeholder: {style: {fill: "#ffffff"; stroke: "#8c93a3"; stroke-width: 2; stroke-dash: 4; border-radius: 16}}
   boundary: {style: {fill: transparent; stroke: "#8c93a3"; stroke-width: 2; stroke-dash: 4; border-radius: 12; font-size: 28; font-color: "#5f6670"}}
@@ -111,7 +116,6 @@ classes: {
   invisible: {style: {fill: transparent; stroke: transparent}}
   # Padding-free wrapper that keeps a shape at its natural size in a grid cell
   wrapper: {
-    grid-rows: 2
     grid-gap: 0
     style: {fill: transparent; stroke: transparent}
   }
@@ -121,24 +125,24 @@ classes: {
   ink-datastore: {style.font-color: "#6e552f"}
   ink-state: {style.font-color: "#1f6b6b"}
   ink-llm: {style.font-color: "#7a3590"}
+  ink-identity: {style.font-color: "#9a4a22"}
   ink-person: {style.font-color: "#1c2024"}
   ink-placeholder: {style.font-color: "#5f6670"}
 
   from-domain: {style: {stroke: "#5b6abf"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#3f4b96"; italic: false}}
   from-framework: {style: {stroke: "#0d9488"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#0b6e65"; italic: false}}
   from-person: {style: {stroke: "#1c2024"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#1c2024"; italic: false}}
-  # Illustrative reasoners: unlabeled grey edges, no code behind them yet
-  from-illustrative: {style: {stroke: "#8c93a3"; stroke-width: 2; stroke-dash: 5}}
+  from-illustrative: {style: {stroke: "#8c93a3"; stroke-width: 3; stroke-dash: 5; font-size: 24; font-color: "#5f6670"; italic: false}}
 }
 
 ###############################################################################
-# Upper band: title and the domain reasoner group (same cards as L1)
+# Upper band: title and the callers (reasoners and the MCP server)
 ###############################################################################
 
 upper: "" {
   near: top-center
   grid-rows: 3
-  # No side padding, so the band is no wider than the reasoner row
+  # No side padding, so the band is no wider than the caller row
   grid-gap: 0
   vertical-gap: 24
   style: {fill: transparent; stroke: transparent}
@@ -148,62 +152,74 @@ upper: "" {
     style: {fill: transparent; stroke: transparent; font-size: 34; bold: true; font-color: "#1c2024"}
   }
 
-  reasoners: "Decision Domain Reasoners" {
-    class: boundary
-    grid-columns: 5
-    grid-gap: 20
+  callers: "" {
+    class: wrapper
+    grid-columns: 3
     horizontal-gap: 28
 
-    ato: "" {
-      class: [box; domain]
-      n: "Account Takeover" {class: [row-name; ink-domain]}
-      b: "[Software System]\n\nScores login attempts, flags\nclear-cut ones, and collects\ncontext for ambiguous cases" {class: [row-body; ink-domain]}
+    # Account Takeover's service and the Redis it owns
+    ato: "Account Takeover (reasoners/account_takeover)" {
+      class: boundary
+      grid-columns: 2
+      grid-gap: 20
+      horizontal-gap: 28
+
+      redis: "" {
+        class: [box; state]
+        n: "Redis" {class: [row-name; ink-state; narrow]}
+        b: "[Database: Redis 7]\n\nATO's feature windows,\ndedup store, and\nlogin-event stream" {class: [row-body; ink-state; narrow]}
+      }
+      svc: "" {
+        class: [box; domain]
+        n: "ATO Service" {class: [row-name; ink-domain]}
+        b: "[Container: Python,\nFastAPI, port 8001]\n\nScores logins and submits\nthem; runs the ledger in\nprocess (LocalClient) unless\nATO_LEDGER_URL is set" {class: [row-body; ink-domain]}
+      }
     }
 
-    clv: "" {
-      class: [box; domain]
-      n: "Customer Lifetime Value" {class: [row-name; ink-domain]}
-      b: "[ML Model]\n\nEstimates customer lifetime\nvalue in batch runs and\nflags retention candidates" {class: [row-body; ink-domain]}
-    }
-
-    # Final actions flow back into the reasoner group through this cell
-    returns: "Final\naction +\ndecision ID\n[in-process]\n " {
+    # Receipts flow back to the callers through this cell
+    returns: "Receipt:\nfinal action\n+ decision ID\n " {
       class: ink-framework
-      width: 120
+      width: 160
       label.near: bottom-center
       style: {fill: transparent; stroke: transparent; font-size: 24; bold: false}
     }
 
-    cm: "" {
-      class: [box; domain]
-      n: "Content Moderation" {class: [row-name; ink-domain]}
-      b: "[Software System]\n\nScreens forum posts, flags\nclear-cut violations, and\ncollects review context" {class: [row-body; ink-domain]}
-    }
+    agents: "Agent Reasoners" {
+      class: boundary
+      grid-columns: 2
+      grid-gap: 20
+      horizontal-gap: 28
 
-    next: "" {
-      class: [box; placeholder]
-      n: "+ Next Reasoner" {class: [row-name; ink-placeholder]}
-      b: "[Software System]\n\nPlugs into the same\nobservation contract with\nno framework changes" {class: [row-body; ink-placeholder]}
+      mcp: "" {
+        class: [box; container]
+        n: "MCP Server" {class: [row-name; ink-framework; narrow]}
+        b: "[Container: Python,\ndecisionledger-mcp]\n\nSix ledger tools\nover stdio\n(JSON-RPC 2.0)" {class: [row-body; ink-framework; narrow]}
+      }
+      agent: "" {
+        class: [box; placeholder]
+        n: "Agent Reasoner" {class: [row-name; ink-placeholder; narrow]}
+        b: "[Software System]\n\nAn LLM agent that\nrecords or gates\nits decisions" {class: [row-body; ink-placeholder; narrow]}
+      }
     }
   }
 
-  # Vertical room for the fan of reasoner edges and their labels
+  # Vertical room for the caller edges and their labels
   spacer: "" {
-    height: 150
+    height: 170
     class: invisible
   }
 }
 
 ###############################################################################
-# Main row: analyst | DecisionLedger | LLM or ML service
+# Main row: analyst | DecisionLedger | LLM over identity resolver
 # (declared in grid order)
 ###############################################################################
 
 side-l: "" {
   class: wrapper
-  grid-rows: 4
-  # Centers the analyst on the Decision API: API center - person height / 2
-  drop: "" {width: 284; height: 108; class: invisible}
+  grid-rows: 2
+  # Centers the analyst on the Ledger API
+  drop: "" {width: 254; height: 60; class: invisible}
   analyst: "" {
     class: [box; person]
     grid-rows: 3
@@ -212,60 +228,73 @@ side-l: "" {
     n: "Decision Analyst" {class: [row-name; ink-person]; width: 230}
     b: "[Person]\n\nData, risk, or audit\nanalyst who reviews\nbusiness decisions" {class: [row-body; ink-person]; width: 230}
   }
-  # Drops Redis to roughly the datastore row inside the boundary
-  rise: "" {width: 284; height: 150; class: invisible}
-  # Reasoner-owned infrastructure: outside the DecisionLedger boundary
-  redis: "" {
-    class: [box; state]
-    n: "Redis" {class: [row-name; ink-state; narrow]}
-    b: "[Database: Redis 7]\n\nOwned by Account\nTakeover (its own\ncompose.yaml):\nfeature state" {class: [row-body; ink-state; narrow]}
-  }
 }
 
 # The label starts with two U+00A0 no-break spaces and ends with a blank
 # line; both pad it away from the dashed corner (d2 has no escape for them)
-dl: "  DecisionLedger [Software System]\n " {
+dl: "  DecisionLedger [Software System]\n " {
   class: system-boundary
-  # Bottom-left keeps the label clear of the reasoner fan entering at the top
+  # Bottom-left keeps the label clear of the caller edges entering at the top
   label.near: bottom-left
   grid-rows: 2
   grid-columns: 3
   grid-gap: 28
-  horizontal-gap: 48
-  vertical-gap: 120
+  horizontal-gap: 56
+  vertical-gap: 110
 
-  gap-l: "" {class: invisible}
+  # Empty upper-left cell: room for the analyst edge and its label
+  gap-l: "" {width: 120; class: invisible}
   api: "" {
     class: [box; container]
-    n: "Decision API" {class: [row-name; ink-framework; narrow]}
-    b: "[Container: Python,\nFastAPI]\n\nServes Account\nTakeover at POST\n/api/v1/ato/decisions.\nGate-routed cases get\nretrieval and the\nLLM gate; every\ndecision is enforced\nand audited" {class: [row-body; ink-framework; narrow]}
+    n: "Ledger API" {class: [row-name; ink-framework; narrow]}
+    b: "[Container: Python,\nFastAPI]\n\nServes /api/v1:\nvalidates each\nsubmission, resolves\nits subject, runs the\ngate plugins, enforces,\nwrites the bundle" {class: [row-body; ink-framework; narrow]}
   }
-  gap-r: "" {class: invisible}
+  # Empty upper-right cell: the LLM and resolver edges leave through it
+  gap-r: "" {width: 250; class: invisible}
 
-  # Empty bottom-left cell: the Redis edge leaves the boundary through it
-  # Width matches the datastore cards so the column keeps its size
-  gap-b: "" {width: 254; class: invisible}
+  gap-b: "" {width: 120; class: invisible}
   pg: "" {
     class: [box; datastore]
     n: "PostgreSQL" {class: [row-name; ink-datastore; narrow]}
-    b: "[Database: Postgres\n16 + pgvector]\n\nPolicy vectors and\nthe decision ledger" {class: [row-body; ink-datastore; narrow]}
+    b: "[Database: Postgres 16]\n\nSchema decisionledger:\nbundles, registrations,\nresolution attempts,\nentity journal and\nmembership" {class: [row-body; ink-datastore; narrow]}
   }
-  es: "" {
-    class: [box; datastore]
-    n: "Elasticsearch" {class: [row-name; ink-datastore; narrow]}
-    b: "[Database:\nElasticsearch 8.13]\n\nBM25 index of\npolicy chunks" {class: [row-body; ink-datastore; narrow]}
+
+  # Gate-owned infrastructure: the framework owns none of it
+  gate: "RAG Policy Gate stores (gates/policy_rag)" {
+    class: boundary
+    grid-columns: 2
+    grid-gap: 20
+    horizontal-gap: 24
+
+    es: "" {
+      class: [box; datastore]
+      n: "Elasticsearch" {class: [row-name; ink-datastore; narrow]}
+      b: "[Database:\nElasticsearch 8.13]\n\nBM25 index of\npolicy chunks" {class: [row-body; ink-datastore; narrow]}
+    }
+    vec: "" {
+      class: [box; datastore]
+      n: "policy_rag" {class: [row-name; ink-datastore; narrow]}
+      b: "[Schema: pgvector,\non the same\nPostgres server]\n\nDense policy chunks" {class: [row-body; ink-datastore; narrow]}
+    }
   }
 }
 
 side-r: "" {
   class: wrapper
-  # Centers the LLM on the Decision API (see Layout above)
-  lift: "" {width: 294; height: 192; class: invisible}
+  grid-rows: 4
+  # Puts the LLM level with the Ledger API
+  lift: "" {width: 290; height: 30; class: invisible}
   llm: "" {
     class: [box; llm]
-    # 270 rather than 310 keeps the right column narrow; text matches L1
-    n: "LLM or ML Service" {class: [row-name; ink-llm]; width: 270}
-    b: "[Software System]\n\nPowers the decision gate:\nrecommends a verdict for\nambiguous cases" {class: [row-body; ink-llm]; width: 270}
+    n: "LLM Service" {class: [row-name; ink-llm]}
+    b: "[Software System: OpenAI]\n\nRecommends a verdict to\nthe RAG policy gate for\nambiguous cases" {class: [row-body; ink-llm]}
+  }
+  # Drops the resolver to the gate-store row
+  sink: "" {width: 290; height: 60; class: invisible}
+  resolver: "" {
+    class: [box; identity]
+    n: "Identity Resolver" {class: [row-name; ink-identity]}
+    b: "[Plugin: installed by\nthe enterprise]\n\nMaps a native subject to\nthe enterprise's subject;\nthe passthrough when\nnone is installed" {class: [row-body; ink-identity]}
   }
 }
 
@@ -273,14 +302,16 @@ side-r: "" {
 # Relationships
 ###############################################################################
 
-upper.reasoners.ato -> dl.api: "Hands over each\nobservation\n[in-process]\n " {class: from-domain}
-upper.reasoners.clv -> dl.api: "" {class: from-illustrative}
-upper.reasoners.cm -> dl.api: "" {class: from-illustrative}
-dl.api -> upper.reasoners.returns: "" {class: from-framework}
+upper.callers.ato.svc -> dl.api: "Submits decisions\n[HTTP/JSON, or\nthe ledger in\nits own process]\n " {class: from-domain}
+upper.callers.ato.svc -> upper.callers.ato.redis: "" {class: from-domain}
+upper.callers.agents.agent -> upper.callers.agents.mcp: "" {class: from-illustrative}
+upper.callers.agents.mcp -> dl.api: "Tool calls\n[HTTP/JSON]\n " {class: from-framework}
+dl.api -> upper.callers.returns: "" {class: from-framework}
 
-side-l.analyst -> dl.api: "Fetches bundles and\nreplays decisions\n[HTTP/JSON]" {class: from-person}
-dl.api -> side-r.llm: "Gate-routed cases:\nsends prompts,\ngets verdicts\n[HTTPS]" {class: from-framework}
+side-l.analyst -> dl.api: "Reads, replays,\nand resolves\ndecisions\n[HTTP/JSON]" {class: from-person}
 
-dl.api -> side-l.redis: "ATO code in the API:\nreads, writes\nfeatures [RESP]" {class: from-domain}
-dl.api -> dl.pg: "Vector search,\nbundles [SQL]" {class: from-framework}
-dl.api -> dl.es: "BM25 search\n[HTTP]" {class: from-framework}
+dl.api -> side-r.llm: "RAG gate:\nprompts, verdicts\n[HTTPS]" {class: from-framework}
+dl.api -> side-r.resolver: "Resolves\neach subject\n[in process]\n " {class: from-framework}
+
+dl.api -> dl.pg: "Bundles, journals\n[SQL]" {class: from-framework}
+dl.api -> dl.gate: "RAG gate: BM25\n[HTTP], vectors\n[SQL]" {class: from-framework}
