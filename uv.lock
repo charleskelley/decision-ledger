@@ -684,7 +684,7 @@ docs = [
     { name = "griffe-pydantic", specifier = ">=1.0,<2" },
     { name = "mkdocs", specifier = ">=1.6,<2" },
     { name = "mkdocs-material", specifier = ">=9.5,<10" },
-    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.27,<1" },
+    { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0,<2" },
     { name = "ruff", specifier = ">=0.5,<1" },
 ]
 gates = [
@@ -1822,7 +1822,7 @@ wheels = [
 
 [[package]]
 name = "mkdocs-material"
-version = "9.7.5"
+version = "9.7.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "babel" },
@@ -1837,9 +1837,9 @@ dependencies = [
     { name = "pymdown-extensions" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/74/76/5c202fecdc45d53e83e03a85bae70c48b6c81e9f87f0bc19a9e9c723bdc0/mkdocs_material-9.7.5.tar.gz", hash = "sha256:f76bdab532bad1d9c57ca7187b37eccf64dd12e1586909307f8856db3be384ea", size = 4097749, upload-time = "2026-03-10T15:43:22.809Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f1/cd/c05d3a530ba7934f144fb45f7203cd236adc25c7bdcc34673d202f4b0278/mkdocs_material-9.7.7.tar.gz", hash = "sha256:c0649c065b1b0512d60aad8c10f947f8e455284475239b364b610f2deb4d0855", size = 4097923, upload-time = "2026-07-17T16:21:33.156Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/e1/e8080dcfa95cca267662a6f4afe29237452bdeb5a2a6555ac83646d21915/mkdocs_material-9.7.5-py3-none-any.whl", hash = "sha256:7cf9df2ff121fd098ff6e05c732b0be3699afca9642e2dfe4926c40eb5873eec", size = 9305251, upload-time = "2026-03-10T15:43:19.089Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/21/17c1bc9e6f47c972ad66fb2ac2568f99f90f1207eeb6fc3b34d094dba7b5/mkdocs_material-9.7.7-py3-none-any.whl", hash = "sha256:8ea9bb1737a5b524a5f9dcf2e1b4ebda8274ae3008aa7845720a97083bef708f", size = 9305438, upload-time = "2026-07-17T16:21:30.017Z" },
 ]
 
 [[package]]
@@ -1853,7 +1853,7 @@ wheels = [
 
 [[package]]
 name = "mkdocstrings"
-version = "0.30.1"
+version = "1.0.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -1863,9 +1863,9 @@ dependencies = [
     { name = "mkdocs-autorefs" },
     { name = "pymdown-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/33/2fa3243439f794e685d3e694590d28469a9b8ea733af4b48c250a3ffc9a0/mkdocstrings-0.30.1.tar.gz", hash = "sha256:84a007aae9b707fb0aebfc9da23db4b26fc9ab562eb56e335e9ec480cb19744f", size = 106350, upload-time = "2025-09-19T10:49:26.446Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/e8/445b19834bf9559ebbbaa76897e965665b83d2861461eed8d8de4d122057/mkdocstrings-1.0.7.tar.gz", hash = "sha256:0951b147f352118a45a3db85f0f3b660833d34cb5120a2751315b8d08dafd159", size = 103739, upload-time = "2026-10-10T13:50:59.957Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/2c/f0dc4e1ee7f618f5bff7e05898d20bf8b6e7fa612038f768bfa295f136a4/mkdocstrings-0.30.1-py3-none-any.whl", hash = "sha256:41bd71f284ca4d44a668816193e4025c950b002252081e387433656ae9a70a82", size = 36704, upload-time = "2025-09-19T10:49:24.805Z" },
+    { url = "https://files.pythonhosted.org/packages/22/c3/9062531735ff1fd27f3a79c353c4cf4d822eeffd062fd90b2c553a96f4bb/mkdocstrings-1.0.7-py3-none-any.whl", hash = "sha256:9563828667eeb35256f87a6b61fe857676ac628ec1abbce9aea9839a502c9cb1", size = 41597, upload-time = "2026-10-10T13:50:58.43Z" },
 ]
 
 [package.optional-dependencies]

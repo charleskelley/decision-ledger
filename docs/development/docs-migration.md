@@ -1,137 +1,141 @@
 # Documentation Tooling: MkDocs → Zensical Migration
 
-!!! warning "Planned future migration — no action required now"
-    This document describes a migration that is **not happening yet**. The current
-    MkDocs + Material setup is stable and sufficient for the MVP phase. Read this if
-    you are evaluating docs tooling or want to understand the ecosystem situation.
+!!! info "Status 2026-10-18 — migration planned, not yet executed"
+    The site still builds and deploys with MkDocs + Material for MkDocs.
+    Zensical is the chosen successor. A trial build on 2026-10-18 produced the
+    same site with zero warnings, and CI now runs an advisory Zensical build
+    beside the MkDocs one. The switch happens once Zensical 0.1.0 has held
+    for a few months. Read this if you are evaluating docs tooling or need to
+    know what the migration involves.
 
 ---
 
 ## Background
 
-MkDocs, the documentation tool powering this site, collapsed as a maintained
-open-source project in early 2026. The failure was not technical — the software
-still works — but organizational: a decade of maintainer turnover, a prolonged
-conflict between the project's primary maintainer and the author of Material for
-MkDocs (by far the most popular theme), and a v2 redesign that stripped plugin
-support and was developed in a private repository under a corporate umbrella
-against the wishes of the existing community.
+MkDocs stopped moving in 2024 (last release 1.6.1, August 2024; last commit
+October 2025). The ecosystem around it then split:
 
-The crisis came to a head in March 2026, when the ousted former maintainer used
-retained PyPI publishing access to remove all other maintainers from the
-`mkdocs` package and launch a v1 fork called ProperDocs. He reversed course
-within 24 hours, but the episode confirmed what had been building for two
-years: the original repository is effectively stalled, and the ecosystem has
-fragmented into three competing successors:
+| Project | Status (October 2026) |
+|---------|-----------------------|
+| **Material for MkDocs** | Maintenance mode since 9.7.0 (2025-11-11). Critical bug and security fixes only, until **end of life on 2027-05-05**. Latest 9.7.7 (2026-07-17). Former Insiders features are now free. |
+| **mkdocstrings** | Maintenance mode since late November 2025. Its author committed to about a year of maintenance from October 2025 and joined Zensical's core team to build native API documentation there. |
+| **Zensical** | Material's team's ground-up successor. MIT core, commercial Studio product funding a full-time team. Reads `mkdocs.yml` directly. 0.0.71 on 2026-10-16, releasing about twice a week; 0.1.0 expected around 2026-11-05. No stability policy yet. |
+| **ProperDocs** | A faithful MkDocs 1.6 fork by the last active MkDocs maintainer. One primary contributor; last release 1.6.7 (2026-03-20). Keeps MkDocs installable, does not carry a growing project. |
+| **MaterialX** | Community continuation of Material 9.7.1, single author. Same position as ProperDocs, for the theme. |
 
-| Successor | Led by | Approach |
-|-----------|--------|----------|
-| **ProperDocs** | Former MkDocs maintainer (@oprypin) | v1 fork, preserves existing plugin API |
-| **MaterialX** | Community | Material theme continuation |
-| **Zensical** | squidfunk (Material for MkDocs author) | Ground-up rewrite |
+## Why Zensical
 
-## Why Zensical Is the Target
+- **It is where the people went.** The Material for MkDocs team and the
+  mkdocstrings author now work on Zensical full time. Every other option is a
+  fork maintained by one person.
+- **The migration is a command swap, not a rewrite.** Zensical reads
+  `mkdocs.yml`, keeps Python-Markdown and the `pymdownx.*` extensions, and
+  preserves Material's HTML structure under the `classic` theme variant, so
+  `extra.css` and `color-swatches.js` carry over.
+- **The trial build matched.** On 2026-10-18, Zensical 0.0.71 built this site
+  into the same 35 pages as MkDocs, strict mode clean, with the custom
+  stylesheet and script linked, a search index generated, and the API
+  reference rendered with its Attributes, Parameters, Returns, and Raises
+  sections.
+- **It covers the plugins this site uses.** `search` and `mkdocstrings` are
+  native. Arbitrary MkDocs plugins and `hooks` are not run; this site uses
+  neither.
+- **Its roadmap covers what the next projects need.** Versioning (branches,
+  tags, folders) and multi-project composition with cross-project links are
+  planned. A combined site for DecisionLedger and the neobank repositories
+  waits on that; until then each repository publishes its own site on the
+  same theme with explicit cross-links.
 
-Zensical is the successor most worth watching for this project:
+## Why not something else
 
-- It is led by squidfunk, who built Material for MkDocs — the theme this site
-  already uses. The custom CSS, color system, and theme features in this repo
-  were written against Material's token and feature model. Zensical is
-  effectively Material's next host framework rather than a departure from it.
-- As of March 2026 it has over 3,700 GitHub stars and is the most actively
-  developed of the three forks, despite being the newest.
-- ProperDocs preserves the old plugin API but its lead maintainer explicitly
-  cited isolation and burnout as reasons for stepping down from MkDocs — not
-  a strong sustainability signal for a fork he is now running solo.
-- The original MkDocs v2 direction (private development, plugin removal) is
-  the worst outcome for this project's needs and is not being tracked.
+- **Sphinx (MyST, autodoc2, furo or shibuya).** The most durable choice and
+  the only mature cross-repository linking story (intersphinx). It costs a
+  rewrite of every page's Material-flavored Markdown, a new docstring
+  toolchain, and the design system. The fallback if Zensical fails, not the
+  plan.
+- **Starlight, Docusaurus, Fumadocs.** JavaScript toolchains with no native
+  Python docstring story; the API reference becomes a lossy export step.
+- **Antora.** Multi-repository assembly is native, but AsciiDoc only.
+- **Hosted platforms (Mintlify and similar).** Vendor lock-in for an
+  open-source repository, with the same Python reference gap.
 
-## Why We Are Not Migrating Now
+## The clocks
 
-Zensical is too new. A ground-up rewrite that has been public for less than a
-year does not yet have the stability guarantees, plugin ecosystem, or community
-surface area needed to justify migrating a working documentation setup during
-an MVP development phase. The migration cost is not zero:
+1. **mkdocstrings, around end of 2026.** The binding one. Eight reference
+   pages, the Google-docstring rendering, and `griffe-pydantic` depend on it.
+   Under Zensical it keeps working pinned at 1.x (verified in the trial);
+   Zensical's native API documentation may replace it.
+2. **Material for MkDocs, 2027-05-05.** The outer bound.
 
-- **PyMdown Extensions** (`pymdownx.superfences`, `pymdownx.highlight`,
-  `pymdownx.tabbed`, `pymdownx.details`, `pymdownx.snippets`,
-  `pymdownx.inlinehilite`) are a separate dependency from the theme. Zensical
-  needs to document stable compatibility with this extension set before
-  migration is viable.
-- The custom JavaScript (`color-swatches.js`) and CSS (`extra.css`) were
-  written against Material's CSS variable model and theme API. Until Zensical
-  publishes a stable theme API, rewriting these against a moving target is
-  wasteful.
-- MkDocs Material continues to work on the current MkDocs v1 baseline. There
-  is no breakage to fix — this is a proactive migration planning exercise, not
-  an emergency.
+## What changed on 2026-10-18
 
-The right time to migrate is when Zensical has earned trust, not when MkDocs
-has failed enough to force our hand.
+- `mkdocstrings[python]` pinned to `>=1.0,<2` (was `<1`). Zensical requires
+  pymdown-extensions 12, which mkdocstrings 0.30 cannot load; 1.x works with
+  both builders.
+- `mkdocs-material` upgraded in the lock to the latest 9.7.x security-fix
+  release.
+- `.github/workflows/docs.yaml` gained an advisory `zensical` job
+  (`uv run --with zensical zensical build --strict`, `continue-on-error`).
+  It installs the current Zensical release on purpose, so drift against
+  upstream shows up on every docs push without blocking the deploy.
 
-## Stability Targets for Migration
+## Migration gate
 
-Migration becomes reasonable when **all** of the following are true:
+Switch the production build when **all** of these hold:
 
-- [ ] **Zensical 1.0 stable release** — a versioned release with a public
-      changelog and a stated stability policy (no breaking changes without a
-      deprecation period). Pre-1.0 releases do not count.
-- [ ] **PyMdown Extensions compatibility** — official documentation or a
-      confirmed community migration path for the full `pymdownx.*` extension
-      set used in `mkdocs.yml`. Specifically: `superfences`, `highlight`,
-      `tabbed`, `details`, `snippets`, `inlinehilite`.
-- [ ] **Theme customization API** — a documented, stable API for custom CSS
-      variables and JavaScript hooks equivalent to what Material for MkDocs
-      provides today. The color token system in `extra.css` and the
-      `color-swatches.js` hook both depend on this.
-- [ ] **Plugin ecosystem parity** — the `search` plugin (or a first-party
-      equivalent) ships with feature parity including instant navigation,
-      search highlighting, and search sharing.
-- [ ] **3+ months of stable releases** — at least three months between the
-      1.0 release and the migration attempt, with no breaking changes in that
-      window. This gives the community time to surface regressions before
-      we commit migration effort.
+- [ ] **Zensical 0.1.0 released** with a public changelog.
+- [ ] **Three months of releases after 0.1.0** with no change that breaks
+      the advisory CI build.
+- [ ] **Advisory CI build green** on `main` for the same window.
+- [ ] **Visual check** of the `classic` variant against the current site:
+      palette, fonts, navigation tabs, code annotations, swatches.
+- [ ] **mkdocstrings path decided**: stay on mkdocstrings 1.x under Zensical,
+      or adopt Zensical's native API documentation once it covers Google
+      docstrings and Pydantic models.
 
-## Review Schedule
+## Migration steps (when the gate opens)
 
-Check the following at each interval and update this document with findings:
+1. Set `theme.variant: classic` in `mkdocs.yml` (ignored by MkDocs).
+2. Replace `uv run mkdocs build --strict` with `uv run --with zensical
+   zensical build --strict` in the `build` job; drop the advisory job; add
+   `zensical` to the `docs` dependency group and pin it.
+3. Rebuild locally, diff the page set against a MkDocs build, and open the
+   reference pages.
+4. Remove `mkdocs` and `mkdocs-material` from the `docs` group once the
+   Zensical build has deployed cleanly. Keep `mkdocs.yml`; moving to
+   `zensical.toml` is a separate, later change.
+
+## Review schedule
 
 | Date | Check |
 |------|-------|
-| **2026-05-06** | Status check (no migration). Latest Zensical release is **v0.0.40** (2026-05-04); weekly release cadence with ongoing API changes; no public ETA for 1.0. Drop-in compatibility with `mkdocs.yml`, the custom `extra.css` / `color-swatches.js` (HTML structure preserved), and `pymdownx.*` (Python Markdown extensions still work) is confirmed by upstream — so waiting costs nothing. Bar not met: 1.0 missing and no 3-month stability window. Defer per existing schedule; next review 2026-06-01. |
-| **2026-06-01** | Has Zensical published a 1.0 release candidate or roadmap? Has the PyMdown Extensions compatibility story clarified? Is ProperDocs still actively maintained, or has it stalled? |
-| **2026-09-01** | Has Zensical 1.0 shipped? Are any early adopters in the Material community reporting stable migrations? |
-| **2026-12-01** | Full evaluation against all stability targets above. If all targets are met, draft a migration plan for the following quarter. |
+| 2026-05-06 | Zensical v0.0.40; drop-in compatibility confirmed upstream; deferred. |
+| 2026-10-18 | Trial build matched MkDocs output with zero warnings. Pin bump, lock upgrade, advisory CI job added (above). Material end of life corrected to 2027-05-05. Next review after 0.1.0. |
+| **2026-12-01** | Has 0.1.0 shipped? Is the advisory job green? What does the mkdocstrings maintenance notice say now? |
+| **2027-02-01** | Gate check. If open, run the migration steps. If 0.1.0 has slipped, decide between waiting and pinning mkdocstrings 1.x for the remaining Material window. |
 
-If Zensical ships a stable 1.0 with documented PyMdown compatibility before
-the September check, pull the evaluation forward — do not wait for a calendar
-date if the evidence is already there.
+## What to watch
 
-## What to Watch
+- [Zensical releases](https://github.com/zensical/zensical/releases) and
+  [roadmap](https://zensical.org/roadmap/)
+- [Zensical MkDocs plugin support](https://zensical.org/docs/compatibility/mkdocs/plugins/)
+  and [migration guide](https://zensical.org/docs/compatibility/mkdocs/migration/)
+- [Material for MkDocs changelog](https://squidfunk.github.io/mkdocs-material/changelog/)
+  for the end-of-life date and security releases
+- [mkdocstrings](https://mkdocstrings.github.io/) for the maintenance notice
 
-- [Zensical GitHub repository](https://github.com/zensical/zensical) — star
-  trajectory, release cadence, issue closure rate
-- [Material for MkDocs GitHub Discussions](https://github.com/squidfunk/mkdocs-material/discussions) —
-  squidfunk's announcements and migration guidance will appear here before
-  anywhere else
-- [PyMdown Extensions repository](https://github.com/facelessuser/pymdown-extensions) —
-  watch for any compatibility announcements or migration guides targeting
-  Zensical
-- The ProperDocs fork — if it gains significant traction it becomes a lower-
-  risk migration path (same plugin API, no rewrite), but its bus-factor is
-  currently one person
-
-## Current Tooling (Do Not Change Without Review)
-
-For reference, the current docs stack this migration plan applies to:
+## Current tooling (do not change without review)
 
 ```
 mkdocs                     # core site generator — v1 branch
-mkdocs-material            # theme — Material for MkDocs by squidfunk
+mkdocs-material            # theme — maintenance mode, EOL 2027-05-05
+mkdocstrings[python] 1.x   # API reference; also runs under Zensical
+griffe-pydantic            # Pydantic model rendering for mkdocstrings
 pymdownx.*                 # superfences, highlight, tabbed, details,
                            # snippets, inlinehilite
 docs/stylesheets/extra.css # custom theme overrides, color token system
 docs/stylesheets/color-swatches.js  # hex/rgba swatch injection
 ```
 
-The configuration lives in `mkdocs.yml` at the repo root.
+The configuration lives in `mkdocs.yml` at the repo root. The advisory
+Zensical build lives in `.github/workflows/docs.yaml`.

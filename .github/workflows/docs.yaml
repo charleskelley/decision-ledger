@@ -2,8 +2,9 @@ name: Docs
 
 # Build the MkDocs site and deploy to GitHub Pages on every push to main
 # that touches docs/, mkdocs.yml, or this workflow itself. PRs trigger
-# only the build job (no deploy) so broken nav / strict-mode failures
-# surface during review.
+# only the build jobs (no deploy) so broken nav / strict-mode failures
+# surface during review. An advisory Zensical build runs beside the
+# MkDocs one (see docs/development/docs-migration.md).
 
 on:
   push:
@@ -69,6 +70,37 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+  zensical:
+    name: Build (zensical build --strict, advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Tracks whether the site still builds cleanly under Zensical, the
+    # maintained successor to MkDocs + Material (see
+    # docs/development/docs-migration.md). Advisory only: a failure here
+    # never blocks the mkdocs build or the deploy. Zensical is pulled in as
+    # an ephemeral, unpinned overlay on the docs group on purpose, so each run
+    # tests the current release rather than one frozen in uv.lock.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install docs dependencies
+        run: uv sync --frozen --group docs --no-dev
+
+      - name: Build site with Zensical
+        run: uv run --with zensical zensical build --strict
 
   deploy:
     name: Deploy to GitHub Pages
