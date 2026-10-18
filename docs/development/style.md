@@ -93,7 +93,7 @@ ConfigDict(strict=True)` unless there is a documented reason to relax.
 Follow PEP 8 naming plus these project-specific conventions:
 
 - **Modules:** `snake_case.py` — always.
-- **Pydantic models:** `PascalCase` — `LoginEvent`, `DecisionBundle`, `PolicyGateOutput`.
+- **Pydantic models:** `PascalCase` — `LoginEvent`, `DecisionBundle`, `GateOutput`.
 - **Enum members:** `UPPER_SNAKE_CASE` — `Action.ALLOW`, `Action.BLOCK`.
 - **Feature names:** `snake_case` strings — `velocity_1min`, `novelty_device`, `geo_impossible_flag`. These appear in feature vectors and SHAP output; consistency matters for downstream readability.
 - **Configuration keys:** `snake_case` in Python, `UPPER_SNAKE_CASE` for environment variables.
@@ -160,9 +160,9 @@ This is the most important structural convention in the project:
 Follow the [Google API Improvement Proposals (AIP)](https://google.aip.dev/) for naming and structure conventions where applicable. Key patterns:
 
 - **Resource-oriented endpoints:** `/api/v1/decisions`, `/api/v1/decisions/{id}`, `/api/v1/decisions/{id}/replay`.
-- **Consistent error responses:** All errors return a JSON body with `error_code`, `message`, and `details`. Use FastAPI exception handlers to enforce this.
+- **Consistent error responses:** Every error is an RFC 9457 problem document (`application/problem+json`: `type`, `title`, `status`, `detail`, `instance`) with a stable machine-readable `code` (DR-31). Operations raise `core.exceptions.LedgerError`; the handlers in `app/api/errors.py` render it, and render FastAPI's own validation errors, routing errors, and unhandled exceptions the same way.
 - **Versioned API prefix:** `/api/v1/` — even if there's only one version during MVP.
-- **HTTP status codes:** `200` for successful decisions, `201` for created resources, `400` for validation errors, `422` for schema failures, `500` for internal errors. The decision action (ALLOW/BLOCK/etc.) is in the response body, not the status code.
+- **HTTP status codes:** `201` for a written decision or resolution, `200` for reads and replay, `401` / `403` for authentication and authorization, `404` / `409` for state, `413` for an oversized body, `422` for a body or parameter that fails validation or the submission contract, `500` for internal errors. The decision action (ALLOW/BLOCK/etc.) is in the response body, not the status code.
 
 ---
 
@@ -265,7 +265,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Types:** `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`.
 
-**Scopes** (project-specific): `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`. Use `app` for framework runtime changes that span several of its packages (plugin seam, bootstrap, composition) and `reasoners` for changes to a reasoner workspace member that span several of its layers.
+**Scopes** (project-specific): `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`, `gates`, `api`, `client`, `mcp`, `identity`. Use `app` for framework runtime changes that span several of its packages (plugin seam, bootstrap, composition), `reasoners` for changes to a reasoner workspace member that span several of its layers, and `gates` for changes to a gate workspace member or the gate seam that span several of its parts. `api` is the ledger's HTTP surface (`app/api/`), `client` the ledger clients (`app/client.py`), `mcp` the MCP server (`integrations/mcp`), and `identity` the identity contract and step (`core/identity.py`, `app/identity/`).
 
 **Examples:**
 
@@ -325,19 +325,19 @@ def compute_idempotency_key(user_id: str, device_id: str, event_type: str, ts_bu
 
 **Pydantic model field declarations.** Pydantic's own validation is thoroughly tested by the Pydantic project. Testing that `field: str` rejects an `int` is testing Pydantic, not your code. Test your custom validators, your `model_validator` cross-field logic, and your `ConfigDict` constraints — not field type declarations.
 
-**Thin wrappers around infrastructure clients.** If `app/retrieval/dense.py` calls `pgvector` and returns results, the interesting test is the integration test that checks retrieval quality — not a unit test with a mocked database that proves you called the mock correctly.
+**Thin wrappers around infrastructure clients.** If the RAG policy gate's retriever (`policy_rag_gate/retriever.py`) calls `pgvector` and returns results, the interesting test is the integration test that checks retrieval quality — not a unit test with a mocked database that proves you called the mock correctly.
 
 ### Inline Assertions vs. Separate Tests
 
 Use inline assertions for invariants that should hold on every execution:
 
 ```python
-def resolve_action(gate_output: PolicyGateOutput, triggers: list[RoutingTrigger]) -> EnforcementResult:
-    """Apply deterministic enforcement rules to policy gate output."""
-    assert gate_output.permitted_actions, "Policy gate must return at least one permitted action"
+def enforce_verdict(verdict: GateVerdict, registration: ReasonerRegistration) -> EnforcementDecision:
+    """Apply deterministic enforcement rules to one gate's verdict."""
+    assert verdict.permitted_actions, "A gate verdict must permit at least one action"
     # ... enforcement logic ...
-    assert result.action in gate_output.permitted_actions or result.override_applied
-    return result
+    assert decision.decision_action in verdict.permitted_actions or decision.override_log
+    return decision
 ```
 
 These assertions document the contract, catch violations during development, and run on every call path — not just the paths your test suite happens to exercise. They complement tests; they don't replace them. For the enforcement layer, you want _both_: inline assertions for invariants plus exhaustive test cases for routing behavior.
@@ -415,7 +415,7 @@ Each entry should be written as it's built, not retroactively. The goal is inter
 ### README
 
 - Opens with the problem statement, not the solution.
-- Architecture diagram (Mermaid) appears above the fold.
+- An architecture diagram appears above the fold (D2 or a rendered image; DR-15 superseded DR-9's Mermaid).
 - Quickstart (`uv sync && docker compose up -d && make prepare-account_takeover`) within the first screenful.
 - No badges wall. One or two meaningful badges (CI status, Python version) maximum.
 
@@ -427,6 +427,6 @@ Each entry should be written as it's built, not retroactively. The goal is inter
 
 ### Diagrams
 
-- **README:** Mermaid (GitHub renders natively).
-- **docs/ site:** PlantUML with C4-PlantUML library.
-- **Both committed as text files** — no binary exports, no PNGs checked in.
+- **Architecture diagrams are D2** (DR-15): five sources under `docs/design/diagrams/*.d2` (system context, containers, components, the submission flow, and the eval harnesses), diffable text that changes in the same PR as the architecture it documents.
+- **Rendered SVGs are committed** under `docs/assets/diagrams/<name>.svg`; GitHub and the docs site show them inline with no plugin.
+- **Render with `just diagrams`** (requires `brew install d2`). It loops over every source; `components.d2` uses the dagre layout, the others ELK.

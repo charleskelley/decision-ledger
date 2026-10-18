@@ -11,7 +11,7 @@ documentation site:
 The short version:
 
 1. Fork and clone the repository, then `uv sync` to install dependencies.
-2. Run `make check` (lint + typecheck + unit tests) before pushing.
+2. Run `make check` (lint, SQL lint, typecheck, unit tests) before pushing.
 3. Use [Conventional Commits](https://www.conventionalcommits.org/) with the
    project's scopes (see the guide).
 4. Open a pull request against `main` — CI is the safety net.

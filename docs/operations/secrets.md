@@ -2,9 +2,10 @@
 
 DecisionLedger reads every secret from environment variables, each in
 the settings class of the component that uses it: `FrameworkSettings`
-(`app/settings.py`) for the framework's Postgres, and a gate's or
-reasoner's own prefixed settings class for that plugin (the RAG policy
-gate's `PolicyRagGateSettings` reads the LLM keys). Where those env vars
+(`app/settings.py`) for the framework's Postgres and the ledger's API keys,
+and a gate's or reasoner's own prefixed settings class for that plugin (the
+RAG policy gate's `PolicyRagGateSettings` reads the LLM keys; ATO's
+`AtoSettings` reads its ledger key). Where those env vars
 come from is a deployment concern, not an application concern. This page
 covers the three deployment modes the project targets: local development,
 CI/CD, and production cloud.
@@ -13,8 +14,11 @@ CI/CD, and production cloud.
 
 | Variable             | Purpose                                                                | Required for                        |
 | -------------------- | ---------------------------------------------------------------------- | ----------------------------------- |
-| `OPENAI_API_KEY`     | RAG policy gate calls (`gates/policy_rag`: PolicyGate consumes OpenAILLMClient). | Any pipeline run, `make test-smoke` |
+| `OPENAI_API_KEY`     | RAG policy gate calls (`gates/policy_rag`: PolicyGate consumes OpenAILLMClient). | Any decision the RAG policy gate runs on, `make test-smoke` |
 | `ANTHROPIC_API_KEY`  | The RAG policy gate's eval judges, faithfulness and citation (cross-family bias control). | `make eval`, `make eval-gate-policy_rag` |
+| `DECISIONLEDGER_API_KEYS` / `DECISIONLEDGER_API_KEYS_FILE` | The ledger's per-reasoner API keys (`reasoner_id:key` pairs, or a mounted YAML file), checked on the `X-DecisionLedger-Key` header (`app/auth.py`). | Every `/api/v1` route (none configured: 401) |
+| `DECISIONLEDGER_OPERATOR_KEY` | The operator key: reads every reasoner's decisions and resolves held ones. | Resolutions; operator reads |
+| `ATO_LEDGER_KEY`, `DECISIONLEDGER_KEY` | Client-side copies of a reasoner's key: ATO's service (with `ATO_LEDGER_URL`), and the MCP server and conformance suite (with `DECISIONLEDGER_URL`). | Submitting over HTTP |
 
 Framework infrastructure values (Postgres credentials) flow through
 `FrameworkSettings`; their defaults match `docker-compose.yml` so they rarely
@@ -25,21 +29,24 @@ RAG policy gate's `POLICY_RAG_GATE_ELASTICSEARCH_URL` in `PolicyRagGateSettings`
 (the Elasticsearch in `gates/policy_rag/compose.yaml`). See `.env.example` for
 the complete list.
 
-## Architecture: one read site, many sources
+## Architecture: one settings class per component, many sources
 
 ```
-                       env vars
-                          │
-                          ▼
-          ┌───────────────────────────────┐
-          │  app/settings.py:Settings     │
-          │  (pydantic_settings)          │
-          └──────────────┬────────────────┘
-                         │ field accessors
-        ┌────────────────┼────────────────┐
-        ▼                ▼                ▼
-  PolicyGate        PipelineDriver    Eval harness
+                         env vars (+ .env)
+                               │
+       ┌───────────────────────┼───────────────────────┐
+       ▼                       ▼                       ▼
+ FrameworkSettings     PolicyRagGateSettings      AtoSettings
+ (app/settings.py)     (POLICY_RAG_GATE_*, the    (ATO_*)
+ Postgres, API keys     provider keys)
+       │                       │                       │
+       ▼                       ▼                       ▼
+ ledger runtime         RAG policy gate,         ATO's service,
+ (bootstrap, auth)      its eval harness         its eval driver
 ```
+
+Each settings class is a `pydantic_settings` model with its own prefix, so
+one environment serves them all without collisions.
 
 The application is unchanged across deployment modes. Only the *source* of
 the env vars differs. This is the 12-factor pattern — and it's what makes
@@ -62,16 +69,18 @@ For reviewers cloning the repo and running it on their own machine.
 3. **Loading.** Three independent consumers each read `.env`:
    - **Docker Compose** reads `.env` automatically for `${VAR}`
      substitution in `docker-compose.yml`.
-   - **`pydantic_settings`** reads `.env` from `app/settings.py` so
-     `make eval`, `make test-smoke`, and the FastAPI lifespan see the
-     keys without manual `export`.
+   - **`pydantic_settings`** reads `.env` in every settings class
+     (`FrameworkSettings`, each gate's and reasoner's own) so `make eval`,
+     `make test-smoke`, and the FastAPI lifespans see the keys without
+     manual `export`.
    - **direnv** (`.envrc`) calls `dotenv` to export every var into the
      shell, so direct `uv run` invocations also see them on `cd`.
-4. **`make test-smoke`** and **`make eval`** consume the same env via
-   `Settings()`.
+4. **`make test-smoke`** and **`make eval`** consume the same env through
+   those settings classes.
 
 `.env` is gitignored. `.env.example` is committed and serves as the
-documented contract — every field on `Settings` should appear there.
+documented contract — every field on `FrameworkSettings` should appear
+there (check 4 below), with each plugin's prefixed variables alongside.
 
 > **Migrating from `.env.local`?** Earlier setups sometimes used
 > `.env.local` (a Next.js convention). DecisionLedger standardizes on
@@ -98,13 +107,14 @@ file gitleaks can be configured to skip. Never bypass with
 
 ## Mode 2: CI/CD (GitHub Actions)
 
-Three workflows under `.github/workflows/`:
+Four workflows under `.github/workflows/`:
 
 | Workflow            | Trigger                          | Secrets needed                               |
 | ------------------- | -------------------------------- | -------------------------------------------- |
-| `ci.yaml`           | every push and PR                | none — runs on forks                         |
-| `integration.yaml`  | pushes to `main`, same-repo PRs to `main` (one job per reasoner) | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
-| `eval.yaml`         | manual (`workflow_dispatch`), one job per reasoner | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
+| `ci.yaml`           | pushes to `main`, PRs to `main`  | none — runs on forks                         |
+| `integration.yaml`  | pushes to `main`, same-repo PRs to `main` (one job per (reasoner, gate) pair) | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
+| `eval.yaml`         | manual (`workflow_dispatch`), one job per (reasoner, gate) pair | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`        |
+| `docs.yaml`         | pushes and PRs to `main` touching the docs, manual | none (the deploy job uses GitHub Pages permissions) |
 
 ### Configuring secrets
 
