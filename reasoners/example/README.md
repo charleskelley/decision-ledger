@@ -13,9 +13,9 @@ every part of the reasoner contract fits on a screen.
 
 | Module | What it shows |
 | --- | --- |
-| `events.py` | The reasoner's own event (`WidgetEvent`); `entity_id` is a UUID5 of `widget_id`. |
+| `events.py` | The reasoner's own event (`WidgetEvent`); `entity_id` is a UUID5 of `widget_id`, `entity_type` is `widget`. |
 | `scorer.py` | A pure scorer: `widget_score = logistic(-3 + 4·wobble + 0.5·misalignment_mm)` and the complete feature snapshot. |
-| `registry.py` | The registration: the RAG policy gate (advisory), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, and the Tier 3 / Tier 5 profile. |
+| `registry.py` | The registration: the RAG policy gate (advisory), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, and the enforcement profile (Tier 3 on `thin_history`; Tier 5 on REGION_A vs. REGION_B evidence). |
 | `assembler.py` | The handoff: records a widget under the bypass rule that holds, or asks the ledger to gate it, addressing the policy gate on every submission. |
 | `pipeline.py` | `decide_widget(event, client=...)`: score, assemble, submit through a `LedgerClient`. |
 | `plugin.py` | What a ledger deployment discovers: the registration, `prompts/`, and `corpus/`. |
@@ -57,13 +57,26 @@ registers through the ledger's registration file instead
 Infrastructure: none of its own. Its gated widgets go to the RAG policy
 gate, which needs its corpus indexed (`make prepare-example`).
 
+## The subject
+
+The example names no native subject (DR-32) and declares no native
+namespace, so no resolver can match its subjects: the ledger records each
+decision under the `entity_id` and `entity_type` the submission sends (the widget's
+UUID5, `widget`), unresolved, with the reason. Every inspection of one widget
+is therefore on one timeline (`GET /api/v1/entities/{entity_id}/decisions`).
+The ATO reasoner shows the other path: a native subject in a declared
+namespace.
+
 ## Command line
 
 ```bash
 uv run python -m example_reasoner sample --band mid > widget.json     # one submission
 uv run python -m example_reasoner batch --count 1000 > widgets.ndjson # NDJSON records
 uv run python -m example_reasoner submit --band low --ledger-url http://localhost:8000 --key "$KEY"
+uv run python -m example_reasoner submit --band low --in-process   # the ledger in this process (its stack must be up)
 ```
+
+The same CLI is installed as the `example-reasoner` console script.
 
 `low` scores ≈ 0.06 (recorded ALLOW), `mid` 0.50 (gated by the policy
 gate), `high` ≈ 0.98 (recorded BLOCK). A `batch` mixes low (ALLOW) and

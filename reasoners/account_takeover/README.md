@@ -7,20 +7,33 @@ distribution: `ato-reasoner`; `reasoner_id`: `ato-reasoner`.
 It owns the full ATO domain: login-event types, Redis-backed feature
 windows and ingestion stream, the XGBoost scorer (artifact under
 `src/ato_reasoner/scorer/models/`), the assembler that builds its
-`Submission` (recording a login under a score band or asking for the gate),
-prompt templates (`prompts/ato-v*.yaml`), the policy corpus
-(`corpus/`), the synthetic-scenario generator, and the eval driver and
-datasets. The framework (`decision-ledger`) never imports or depends on it.
+`Submission` (recording a login under one of its bypass rules or asking the
+ledger to gate it), its own FastAPI service, prompt templates
+(`prompts/ato-v*.yaml`), the policy corpus (`corpus/`), the
+synthetic-scenario generator, and the eval driver and datasets. The framework (`decision-ledger`) never imports or depends on it.
+
+`registry.py` holds `ATO_REGISTRATION`, the data the ledger reads:
+
+- the RAG policy gate (`policy`), bound advisory: it runs when ATO asks for
+  a gate;
+- two bypass rules (DR-30), `allow-band` (`risk_score < 0.20` → record
+  ALLOW) and `block-band` (`risk_score > 0.95` → record BLOCK), version `1`;
+  every other login is gated. The thresholds live here and nowhere in the
+  framework;
+- `recordable_actions` ALLOW and BLOCK;
+- the native namespace `ato-account` (subject type `account`, the UUID5
+  namespace ATO's account ids derive under);
+- the enforcement profile: `novel_entity_feature="sparse_history"` (Tier 3,
+  on gated logins) and the US vs. EU `jurisdiction_conflict_groups` (Tier 5).
 
 The active gate template is `ato-v3` (v2's user text plus a `system:` key
-carrying ATO's system message); `ato-v1`/`ato-v2` stay registered for
-historical bundles. `registry.py` declares the enforcement profile the
-framework reads: `novel_entity_feature="sparse_history"` (Tier 3) and the
-US vs. EU `jurisdiction_conflict_groups` (Tier 5).
+carrying ATO's system message); `ato-v1`/`ato-v2` stay in `prompts/`,
+since a prompt version is never modified or removed.
 
 See DR-26 in `docs/design/decisions.md` for why the reasoner is packaged
-this way, and `docs/design/reasoners/reasoner-handoff.md` for the contract
-and the checklist to copy when writing another reasoner.
+this way, `docs/design/reasoners/account-takeover/account-takeover.md` for
+how it decides, and `docs/design/reasoners/reasoner-handoff.md` for the
+submission contract and the checklist to copy when writing another reasoner.
 
 ## How it plugs in
 
@@ -54,10 +67,23 @@ through a ledger client (`ato_reasoner.pipeline.run_ato_decision`):
   (`HttpClient`) with its API key `ATO_LEDGER_KEY` (configured on the
   ledger as `DECISIONLEDGER_API_KEYS=ato-reasoner:<key>`).
 
-The response summarizes the ledger's receipt; the full bundle, replay, and
-the account's decision timeline are the ledger's routes
-(`GET /api/v1/decisions/{id}`, `.../replay`,
+The response summarizes the ledger's receipt (`decision_id`,
+`decision_action`, `mode`, the cited bypass rule and whether it held, the
+credited rule, each gate's outcome, and the whole decision's `latency_ms`);
+the full bundle, replay, and the account's decision timeline are the
+ledger's routes (`GET /api/v1/decisions/{id}`, `.../replay`,
 `GET /api/v1/entities/{entity_id}/decisions`).
+
+## The subject (DR-32)
+
+Every ATO submission names the account as its native subject,
+`(ato-account, account_id)`, and sends `entity_id = uuid5(namespace,
+account_id)` with `entity_type` `account` (`LoginEvent.entity_id`). With no
+identity resolver installed, the ledger's passthrough derives the subject
+from the declared namespace: the same `entity_id` and `entity_type` ATO's
+decisions always had, recorded `unresolved` with the reason. An enterprise
+resolver may map the account to the subject it belongs to; the submission
+keeps ATO's own id either way.
 
 ## Make targets (run from the repo root)
 
@@ -68,7 +94,7 @@ the account's decision timeline are the ledger's routes
 | `make scenario-account_takeover` | Publish 10 `baseline_normal` synthetic login events |
 | `make build-policy-index-ato-reasoner` | Embed and index `corpus/` into the RAG policy gate's stores under `reasoner_id=ato-reasoner` (the gate's target, `gates/policy_rag/gate.mk`) |
 | `make prepare-account_takeover` | Build the policy index and train the scorer if the artifact is missing |
-| `make eval-account_takeover` | Run the framework eval harness (consistency, robustness) with this reasoner's adapter (slow, paid); the policy gate's own eval (`make eval-gate-policy_rag`) reads this reasoner's retrieval, faithfulness, and citation datasets |
+| `make eval-account_takeover` | Run the framework eval harness (consistency, robustness, shadow) with this reasoner's adapter (slow, paid); the policy gate's own eval (`make eval-gate-policy_rag`) reads this reasoner's retrieval, faithfulness, and citation datasets |
 | `make capture-baselines-account_takeover` | Re-capture faithfulness fixtures from live gate runs |
 | `make serve-account_takeover` | Run ATO's own service (port 8001; `ATO_LEDGER_URL` selects an HTTP ledger) |
 

@@ -65,18 +65,19 @@ dataset and used to set parameters.
 ## Per-scenario summary
 
 The eight scenarios under `ato_reasoner/generator/scenarios/` map to risk patterns
-with corresponding generator parameters and expected pipeline actions:
+with corresponding generator parameters and expected actions (each scenario's
+`expected_actions`):
 
 | Scenario | Pattern | Expected action(s) | Paper signal |
 |---|---|---|---|
-| `baseline_normal` | Established device, low velocity, single home city | ALLOW (typically fast-path) | Login frequency + device + browser distributions (§4.1) |
-| `credential_stuffing_burst` | Short bursts of failed attempts with username guesses | BLOCK or HOLD | Failed-attempt funnel + naive-attacker IP-rotation patterns (§4.1, §5) |
+| `baseline_normal` | Established device, low velocity, single home city | ALLOW (typically recorded under `allow-band`) | Login frequency + device + browser distributions (§4.1) |
+| `credential_stuffing_burst` | Short bursts of failed attempts with username guesses | BLOCK | Failed-attempt funnel + naive-attacker IP-rotation patterns (§4.1, §5) |
 | `high_velocity_legitimate` | Genuine user with elevated velocity (e.g., shared service account) | ALLOW or CHALLENGE | Activity split — daily users (22.4%) vs sub-monthly (48.3%) (§4.1) |
 | `geo_impossible` | Impossible-travel velocity between successive logins | BLOCK | VPN-attacker geographic spoofing pattern (§5) |
 | `device_fingerprint_anomaly` | Login from a never-seen device fingerprint | CHALLENGE or HOLD | Targeted-attacker device-mimicry pattern (§5) |
-| `novel_entity` | Account with sparse history (new user) | HOLD | Login-history size distribution (§4.1, Fig 1) |
+| `novel_entity` | Account with sparse history (new user) | CHALLENGE or HOLD | Login-history size distribution (§4.1, Fig 1) |
 | `post_breach_ato` | Replay-style attack with high success rate from new device + impossible travel | HOLD or BLOCK | Very-targeted attacker profile — the 87 confirmed ATOs (§5) |
-| `adversarial_probe` | Probing pattern that tests the system's policy boundaries | HOLD | Designed pattern; no direct paper signal |
+| `adversarial_probe` | Probing pattern that tests the system's policy boundaries | BLOCK | Designed pattern; no direct paper signal |
 
 The scenarios are *designed against the same archetypes the paper
 characterizes*, not derived from the data via clustering or distribution
@@ -189,6 +190,6 @@ the framework itself.
 
 - **[`account-takeover.md`](account-takeover.md)** — the ATO reasoner
   architecture that consumes the scenarios.
-- **[`reasoner.md`](../index.md)** — abstract reasoner typology.
+- **[Reasoners](../index.md)** — abstract reasoner typology.
 - **DR-10** — hybrid data strategy (calibration intent and the
   scoping framing this document closes).

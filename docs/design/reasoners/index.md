@@ -1,152 +1,149 @@
 # Reasoner
 
-A **reasoner** is the component that owns observation, feature computation,
-and risk scoring for a specific decision domain. It produces typed
-`Observation` records and submits them to the DecisionLedger framework, which
-takes over for retrieval, gate evaluation, deterministic enforcement, and
-audit-bundle construction.
+A **reasoner** is a package or service that decides, or proposes, an action
+about a subject in one domain and submits it to the ledger. It owns its
+events, feature computation, and scoring, and hands the ledger one
+`Submission` (`core/submission.py`), in process or over HTTP. The ledger
+takes over from there: it validates the submission, resolves its subject,
+runs the gates, enforces, and writes the Decision Bundle. The framework
+never imports a reasoner (DR-26, DR-31).
 
-Concretely, a reasoner is a uv workspace member under `reasoners/<name>/`
-that owns everything up to and including `build_observation()` — its event
-types, features, model, pipeline, router, settings, prompts, policy corpus,
-eval adapter, and any infrastructure only it uses — and that the framework
-discovers through a `decisionledger.reasoners` entry point instead of
-importing it (DR-26). The reference reasoner is
-`reasoners/account_takeover/` (import package `ato_reasoner`).
+A reasoner in this repository is a uv workspace member under
+`reasoners/<name>/` that publishes its registration through a
+`decisionledger.reasoners` entry point. Two ship here: the reference
+reasoner `reasoners/account_takeover/` (import package `ato_reasoner`) and
+the documented example `reasoners/example/` (import package
+`example_reasoner`). A reasoner that runs elsewhere, in any language,
+registers through the deployment's registration file instead and submits
+over HTTP.
 
-This document covers the **abstract** picture: what a reasoner can be, what
-shapes it can take, and what information it must provide or have available
-to hook into the framework. For the contract specification (the typed
-boundary), see [`reasoner-handoff.md`](reasoner-handoff.md). For the
-concrete reference implementation, see [`account-takeover.md`](account-takeover/account-takeover.md).
+This page covers the **abstract** picture: what a reasoner can be, and what
+it must provide or have available to hook in. The contract itself, field by
+field, is the [Submission contract](reasoner-handoff.md). The reference
+implementation is [Account Takeover](account-takeover/account-takeover.md).
 
 ---
 
-## What a reasoner is — and is not
+## What a reasoner is, and is not
 
-A reasoner produces **observations**, not decisions. The framework owns the
-final action. This is the load-bearing separation that makes governed
-decisioning possible:
+A reasoner produces **evidence and a proposal**; the ledger owns the final
+action. That separation is what makes governed decisioning possible:
 
 - The reasoner can be probabilistic, opaque, or vendor-supplied.
-- The framework's enforcement is deterministic and auditable.
-- The Decision Bundle records both — the reasoner's evidence and the
-  framework's deterministic resolution of it — making every decision
-  replayable.
+- The ledger's enforcement is deterministic and auditable.
+- The Decision Bundle records both, the reasoner's evidence and the
+  ledger's resolution of it, so every decision replays.
 
-A reasoner that produces a final action directly is not a reasoner under
-this design; it's a complete decision system. This framework does not host
-that pattern.
+A reasoner says what it wants with one of two verbs (DR-30):
+
+- **Record** a decision it made (`mode: "record"`), citing one of its
+  registered bypass rules. The ledger checks the citation, re-evaluates the
+  rule on the submitted evidence, and runs the mandatory gates.
+- **Gate** a decision (`mode: "gate"`), with an optional proposal. The
+  ledger runs the mandatory gates, then the advisory gates.
+
+A system that already decides upstream is therefore not a different kind
+of thing: it records its decisions. It still does not have the last word.
+A mandatory gate can make the action more restrictive, and a cited rule
+that does not hold puts a HOLD floor under the record.
 
 ---
 
 ## Reasoner shapes
 
-The framework imposes only the typed `Observation` contract. The reasoning
-mechanism inside is plug-and-play.
+The ledger imposes only the `Submission` contract. The reasoning mechanism
+inside is the reasoner's choice.
 
 | Shape | Examples | When it fits |
 |---|---|---|
 | **ML-only** | XGBoost, LightGBM, scikit-learn classifier, neural network | Mature labeled data; bounded output schema; strict latency budget |
-| **LLM-only** | Direct LLM classification with structured output | Sparse labeled data; broad domain coverage needed; latency tolerable |
+| **LLM-only** | Direct LLM classification with structured output; an agent calling the MCP tools | Sparse labeled data; broad domain coverage needed; latency tolerable |
 | **Rule-based** | Decision tree, expert system, deterministic feature thresholds | Hard regulatory requirements; explainability dominates; data scarce |
-| **Hybrid (ML + LLM)** | Fast ML triage on confident events; LLM gate on ambiguous ones | Latency budget *and* coverage of edge cases needed |
+| **Hybrid (ML + LLM)** | Record confident cases under bypass rules; gate ambiguous ones with an LLM gate | Latency budget *and* coverage of edge cases needed |
 | **Hybrid (rule + ML)** | Rule-based pre-filter + ML scoring | Regulatory hard constraints; ML refines within them |
 | **Human-in-the-loop** | Feature service + analyst review | Low volume, very high stakes |
 
-The ATO reasoner uses the ML+LLM hybrid pattern — fast XGBoost for
-high-confidence routing, LLM policy gate for ambiguous cases. See
-[`account-takeover.md`](account-takeover/account-takeover.md) for the concrete
-architecture.
+The ATO reasoner is the ML + LLM hybrid: its XGBoost score is recorded
+under one of its two bypass rules when it is confident, and every other
+login asks for the RAG policy gate. See
+[Account Takeover](account-takeover/account-takeover.md).
 
-A reasoner can compose multiple shapes inside its own boundary; the
-framework only sees the resulting `Observation`.
+A reasoner can combine several shapes inside its own boundary; the ledger
+sees only the resulting submission.
 
 ---
 
 ## What a reasoner must provide
 
-The framework's intake (`validate_observation` in
-`core/observation/observation.py`) checks for these fields on every
-submitted observation. The reasoner's job is to produce them; the
-framework's job is to refuse the submission if any are missing.
+The ledger validates these on every submission and refuses one that breaks
+the contract, before any gate runs, with a stable code. The full rules are
+in [Intake validation](reasoner-handoff.md#intake-validation).
 
 ### Identity
 
-- `event_id: str` — unique per event.
-- `entity_id: UUID` — framework subject identity (typically derived
-  deterministically from a domain business key via UUID5).
-- `entity_type: str` — domain classification (`"account"`, `"transaction"`,
-  `"document"`, etc.).
-- `timestamp: datetime` — when the event occurred (UTC).
+- `reasoner_id`: the registered reasoner.
+- `event_id`: unique per event.
+- `timestamp`: when the event occurred, timezone-aware.
+- `entity_id` and `entity_type`: the reasoner's own id for the subject it
+  scored (typically UUID5 of its business key) and that subject's type.
+- `native_subject` (optional): the subject in the reasoner's own terms, a
+  `NativeSubject(native_namespace, native_subject_id)`. The ledger resolves
+  it to the decision's subject through the deployment's identity resolver
+  before any gate runs. In a namespace the reasoner's registration
+  declares, `entity_id` and `entity_type` must be the ones that declaration
+  derives. See [Native subject and declared namespaces](reasoner-handoff.md#native-subject-and-declared-namespaces)
+  and [Identity](../identity.md).
 
-### Reasoning evidence — `ReasonerContext`
+### Evidence: `ReasonerContext`
 
-A typed record of what the reasoning component computed. Stored verbatim
-in the Decision Bundle so a decision can be reconstructed without calling
-back to the reasoner.
+What the reasoner computed, stored verbatim in the bundle so the decision
+can be reconstructed without calling the reasoner back:
 
-Required:
+- `reasoner_id`, `reasoner_name`, `model_version` (and, optionally,
+  `model_artifact_sha256` and `inference_latency_ms`): the reasoning
+  artifact.
+- `label_type`, `label_name`, `label_value`: the prediction (a score or a
+  class label).
+- `feature_set`: every feature value the reasoner consumed. It must be
+  complete: replay, bypass rules, and rules-gate predicates read it.
+- `attribution` (optional, strongly recommended): per-event contributions,
+  global importance, or a narrative.
 
-- `reasoner_id`, `reasoner_name`, `model_version` — identity of the
-  reasoning artifact.
-- `inference_latency_ms` — operational telemetry.
-- `label_type`, `label_name`, `label_value` — what the reasoner produced
-  (numerical risk score, categorical label, etc.).
-- `feature_set: dict` — every feature value the reasoner consumed at
-  inference time. This is what makes replay self-contained.
+An LLM-agent reasoner fills the same fields with what it actually ran
+(model id, prompt digest, tool-trace digest), never with placeholders; the
+[Submission contract](reasoner-handoff.md#reasoner_context) lists them.
 
-Optional but strongly recommended:
+### Gate contexts
 
-- `attribution: AttributionSummary` — observation-level SHAP, attention
-  weights, or rule-trace explaining *this specific* decision (not just
-  what the model tends to do globally). Required for meaningful audit
-  quality; the framework accepts its absence but with reduced
-  explainability.
+One `GateContext(gate_id, gate_config)` for every gate the registration
+binds, on **every** submission, recorded ones included. Each gate validates
+its own `gate_config` (its `config_model`) and may authorize it per
+reasoner. Recorded submissions carry them so any recorded decision can be
+evaluated by its advisory gates offline (shadow evaluation).
 
-### Gate dispatch envelope — `GateContext`
+### The mode and, to record, the bypass citation
 
-Required on **every** observation, including fast-path. The framework uses
-this to:
+- `mode`: `"record"` or `"gate"`.
+- `proposed_action`: required to record (it is the decision); optional to
+  gate (a floor).
+- `bypass`: to record, a `BypassCitation(rule_id, rule_version)` naming a
+  registered `BypassRule` whose `action` equals the proposal. The rule's
+  predicate is checked by the ledger, not asserted by the reasoner: the
+  citation is an id and an optional version pin, and the values the
+  predicate read are recorded from the evidence.
 
-- Select the appropriate gate (`gate_id`).
-- Apply retrieval filters (`gate_config["jurisdictions"]`,
-  `gate_config["risk_tier"]`).
-- Render the LLM prompt (`gate_config["template_id"]`,
-  `gate_config["template_vars"]`), optionally honoring a model hint
-  (`gate_config["target_model"]`).
+A reasoner that uses scores typically registers one bypass rule per
+confident band and gates the rest. ATO's rules, for example, are
+`allow-band` (`label_value < 0.20` → ALLOW) and `block-band`
+(`label_value > 0.95` → BLOCK); the example reasoner's are `low-score` and
+`high-score`. A rule-based reasoner might record nearly everything; an
+LLM-only reasoner might gate everything, or record under rules over its own
+categorical verdict.
 
-`gate_config` is an opaque dict; the keys above are the ones the reference
-policy gate reads (documented on `core/observation/gate_context.py`). The
-framework validates `template_id` and `jurisdictions` against the
-reasoner's registration when they are present.
+### The raw event
 
-`GateContext` is required on fast-path observations to enable shadow
-evaluation — the framework can retrospectively run the gate offline against
-a fast-path bundle to compare scorer and gate verdicts on the same event.
-Skipping this on fast-path forfeits that capability.
-
-### Routing decision — `route`
-
-The reasoner produces a `GateRoute` value:
-
-- `FAST_PATH_ALLOW` — high confidence the event is benign; the gate is
-  bypassed, enforcement applies a permissive default.
-- `FAST_PATH_BLOCK` — high confidence the event is malicious;
-  enforcement applies a blocking default.
-- `ROUTE_TO_GATE` — ambiguous; the framework runs retrieval + gate.
-
-A reasoner that uses ML scores typically maps confidence bands to routes
-(e.g., score < 0.20 → ALLOW, > 0.95 → BLOCK, otherwise GATE). A
-rule-based reasoner might route directly. An LLM-only reasoner might route
-everything to GATE since the LLM is already its scoring mechanism.
-
-### Fast-path rationale — `fast_path_rationale`
-
-Required when `route` is `FAST_PATH_*`. Human-readable string explaining
-why the gate was bypassed (e.g., `"risk_score=0.97 > 0.95 → FAST_PATH_BLOCK"`).
-This is the audit-trail substitute for the gate's rationale on bypassed
-events.
+`raw_event`: the reasoner's own event as JSON, stored verbatim and never
+read by the ledger.
 
 ---
 
@@ -154,93 +151,122 @@ events.
 
 ### Feature computation
 
-A way to compute the features the reasoner consumes. For batch domains
-this might be precomputed; for streaming domains (the ATO reference) this
-is done online from the inbound event plus prior state.
+A way to compute the features it consumes. For batch domains they may be
+precomputed; for streaming domains (the ATO reference) they are computed
+online from the inbound event and prior state. The ledger prescribes no
+feature store: ATO uses Redis sliding windows from its own `compose.yaml`
+(`ato_reasoner/feature_service.py`); another domain might use DataFrames,
+SQL, or a managed store. What matters is that `feature_set` holds
+everything the model consumed.
 
-The framework does not prescribe a feature store — `ato_reasoner/feature_service.py` in the
-ATO reference uses Redis sliding-windows (Redis that the ATO reasoner owns
-and brings up from its own `compose.yaml`); another domain might use
-DataFrames, SQL, or a managed feature store. What matters is that
-`feature_set` in `ReasonerContext` is populated with everything the model
-consumed at inference time.
+### A score or label
 
-### Confidence or score primitive
+A signal to report as `label_value` and for bypass rules to test. ML
+reasoners output probabilities natively; rule-based reasoners can map rule
+outcomes to labels; an agent reports its own verdict.
 
-The reasoner needs to produce a confidence/score signal. This drives
-routing (`GateRoute`), populates `label_value`, and feeds the
-fast-path-rationale string. ML reasoners output probabilities natively;
-rule-based reasoners can map rule outcomes to bands.
+### Explainability
 
-### Explainability surface
+For a useful `attribution`, an introspection mechanism: TreeSHAP for tree
+models, integrated gradients for neural networks, attention weights for
+transformers, a rule trace for rule engines, or the stated reasoning of an
+LLM. The ledger records whatever the reasoner produces; the audit signal is
+only as good as the attribution.
 
-For meaningful `attribution`, the reasoner needs an introspection
-mechanism: TreeSHAP for tree models, integrated gradients for neural
-networks, attention weights for transformers, rule-trace for rule
-engines, or qualitative narrative for LLM reasoners. The framework records
-whatever shape the reasoner can produce; quality of the audit signal
-scales with the quality of attribution.
+### Choosing the mode
 
-### Operating-mode awareness
+The reasoner decides, per decision, whether to record or to gate. With its
+registration in hand it can ask
+`core.submission.matching_bypass_rule(registration, reasoner_context)`,
+which returns the registered rule with the most restrictive action that
+holds (the one the ledger would floor the record at anyway), or `None`
+when the decision should be gated.
 
-The reasoner must know whether it's operating in **governed mode** (full
-gate participation; default for the reference implementation) or
-**shadow/opt-out mode** (registration-time governance decision; rare). See
-[`reasoner-handoff.md`](reasoner-handoff.md) for the full operating-mode
-contract.
+### An assembler
 
-### Assembler
-
-The handoff happens at one point: when the reasoner calls
-`build_observation()` (or its domain-specific equivalent) and submits the
-result to the framework pipeline. Everything before that call is the
-reasoner's responsibility; everything after is the framework's.
-
-The ATO reference's assembler is at
-`reasoners/account_takeover/src/ato_reasoner/assembler.py` — that's the
-canonical pattern for any domain reasoner.
+One function that translates the reasoner's own types into the
+`Submission`. Everything before it is the reasoner's; everything after it
+is the ledger's. The ATO reference is `build_submission` in
+`reasoners/account_takeover/src/ato_reasoner/assembler.py`; see
+[the assembler pattern](reasoner-handoff.md#the-assembler-pattern-ato-reference).
 
 ### Packaging and registration
 
-Everything above ships in one workspace member that publishes a
-`ReasonerPlugin` (registration, router, prompts, corpus, raw-event
-deserializer, service factory) and an `EvalAdapter`. The registration also
-carries the reasoner's enforcement profile: which `feature_set` key marks a
-novel entity (Tier 3) and which jurisdiction groups conflict (Tier 5). See
-the [new-reasoner checklist](reasoner-handoff.md#implementing-a-new-reasoner)
-for the file-by-file layout.
+The ledger knows a reasoner by its `ReasonerRegistration`: the gate set
+(`GateBinding`s, mandatory or advisory), the bypass rules, the recordable
+actions, any native namespaces, and the enforcement profile (the
+`feature_set` key that marks a novel entity for Tier 3, and the
+jurisdiction groups whose policies conflict for Tier 5). A registration
+reaches the ledger one of two ways:
+
+- **A plugin.** A workspace member publishes a `ReasonerPlugin`
+  (`registration`, `prompts_dir`, `corpus_dir`) under
+  `decisionledger.reasoners` and an `EvalAdapter` under
+  `decisionledger.eval_adapters`. A gate that reads per-reasoner assets,
+  such as the RAG policy gate, serves only reasoners registered this way.
+- **The registration file.** The deployment lists the registration in
+  `DECISIONLEDGER_REGISTRATIONS`; the reasoner ships no code or assets to
+  the ledger.
+
+Either way the ledger serves it read-only at `GET /api/v1/reasoners`, with
+its `registration_version`. See the
+[new-reasoner checklist](reasoner-handoff.md#new-reasoner-checklist).
+
+### A client and a key
+
+A `LedgerClient` to submit through: `app.client.LocalClient` runs the
+ledger in the reasoner's process; `app.client.HttpClient` (or any HTTP
+client) calls a ledger service with the reasoner's API key in
+`X-DecisionLedger-Key`. The key is configured on the ledger
+(`DECISIONLEDGER_API_KEYS`) and writes and reads only that reasoner's
+decisions.
 
 ---
 
 ## Anti-patterns
 
-- **Reasoners that produce decisions directly.** The framework owns
-  decisions. A reasoner outputs evidence (`ReasonerContext`) and routing
-  (`GateRoute`); enforcement decides.
-- **Reasoners that omit `GateContext` on fast-path.** Forbidden — shadow
-  evaluation needs `GateContext` populated on every observation
-  regardless of routing.
-- **Reasoners that mutate `ReasonerContext` after assembly.** Pydantic
-  models in `core/observation/` are `frozen=True` by design. Mutation
-  defeats replay.
-- **Reasoners that bypass `validate_observation`.** The framework's
-  intake validates the contract; the reasoner doesn't get to
-  self-certify.
-- **Reasoners with no attribution.** The framework accepts it (some
-  vendor models can't expose attribution), but a reasoner with no
-  `AttributionSummary` produces decisions that can't be explained — a
-  governance liability the framework can't fix.
+- **Recording without a rule that holds.** A record must cite a registered
+  rule whose action is the proposal, and the ledger re-evaluates it on the
+  evidence. A rule that does not hold puts a HOLD floor under the decision
+  and is visible in the bundle (`bypass_rule_holds = false`); it is not a
+  way around the gates.
+- **Citing the lenient rule.** When a stricter registered rule also holds,
+  the ledger floors the decision at that rule's action. Pick the rule with
+  `matching_bypass_rule`.
+- **Omitting a gate context on a record.** Refused (`GATE_CONTEXT_MISSING`):
+  shadow evaluation needs every bound gate's context on every submission.
+- **An incomplete `feature_set`.** Replay, bypass rules, and rules-gate
+  predicates read it; a feature that is not there makes a predicate fail to
+  evaluate, and the rule does not hold.
+- **A mismatched subject.** Naming a native subject in a declared namespace
+  with a different `entity_id` is refused (`NATIVE_SUBJECT_MISMATCH`).
+  Derive the id from the declaration, or leave the namespace undeclared.
+- **Resolving identity in the reasoner.** The reasoner names what it
+  scored; the enterprise's resolver, called by the ledger, decides who that
+  is.
+- **Mutating evidence after assembly.** The contract's models are frozen;
+  mutation would defeat replay.
+- **Filler in an agent's `ReasonerContext`.** An optional field the agent
+  cannot fill truthfully stays empty.
+- **No attribution.** Accepted (some vendor models expose none), but the
+  bundle then explains less, and the ledger cannot fix that.
 
 ---
 
 ## Cross-references
 
-- **[`reasoner-handoff.md`](reasoner-handoff.md)** — the typed contract
-  at the framework boundary; field-by-field specification.
-- **[`account-takeover.md`](account-takeover/account-takeover.md)** — the ATO reasoner
-  reference architecture, including its hybrid fast/gate routing,
-  feature pipeline, and decisions & tradeoffs.
-- **[`scenarios.md`](account-takeover/scenarios.md)** — calibration provenance for the
-  ATO reasoner's training-data foundations.
-- **DR-11** — the framework / reasoner package boundary.
-- **DR-14** — `Observation` as the domain-assembled output.
+- **[Submission contract](reasoner-handoff.md)**: the wire contract, the
+  two modes, the registration, intake validation, the responsibility
+  boundary, and the new-reasoner and new-gate checklists.
+- **[Identity](../identity.md)**: native subjects, the resolver contract,
+  the passthrough, and the entity journal.
+- **[Gates](../gates/index.md)**: what a gate is and how one is bound.
+- **[Account Takeover](account-takeover/account-takeover.md)**: the
+  reference reasoner, its bands and gate path, feature pipeline, and
+  tradeoffs.
+- **[Scenarios](account-takeover/scenarios.md)**: calibration provenance
+  for ATO's training data.
+- **[Decision records](../decisions.md)**: DR-11 (the framework and
+  reasoner boundary), DR-26 (reasoner packaging and discovery), DR-29 (gate
+  sets and the combinator), DR-30 (record and gate), DR-31 (the wire
+  submission and the ledger API), DR-32 (the identity contract).
