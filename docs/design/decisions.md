@@ -588,7 +588,10 @@ through an entry point (DR-26). No framework module changes are required.
 
 ## DR-12: `entity_id` as the universal subject identity primitive
 
-**Status:** Accepted
+**Status:** Accepted (extended by DR-32: the ledger assigns each decision's
+subject, its `entity_id` and `entity_type`, through the deployment's identity
+resolver, the passthrough by default, and records the mapping's provenance on
+the bundle)
 **Category:** Pipeline & System Design
 
 > **Implementation note (DR-26, 2026-10):** The same principle now covers the
@@ -719,7 +722,14 @@ Neither analyzer path is authoritative — fusion handles the blend.
 
 ## DR-14: `Observation` as domain-assembled output — `GateContext` and `FastPathRecord` as framework entry contracts
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-32: the ledger, not the reasoner, assigns
+the decision's subject, after intake validation and before the gates. The
+handoff types it names are replaced: DR-31's wire `Submission` replaced the
+`Observation` protocol, and DR-30 replaced the fast path with record mode, in
+which a decision cites a registered bypass rule that the ledger checks and
+replay re-checks. Its principle stands: the reasoner assembles its evidence
+and one `GateContext` per bound gate (DR-29), whose configuration that gate
+defines (DR-28), on every submission, recorded ones included.)
 **Category:** Pipeline & System Design
 
 > **Implementation note (DR-26, 2026-10):** Intake validation is now enforced
@@ -1215,8 +1225,41 @@ not in `core.resolution`.
 
 ## DR-19: GateInput / GateOutput contracts on the bundle (typed gate-invocation records)
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: one `GateRecord` per gate, and the
+open `GateOutput`; see the implementation note)
 **Category:** Pipeline & System Design
+
+> **Implementation note (DR-28 to DR-31, 2026-10):** DR-28 amends this
+> record. The two contracts survive, but a bundle no longer carries one
+> gate's `gate_input` and `gate_output`: a version-2 bundle
+> (`core/bundle.py`) stores one `GateRecord` per gate in the decision's gate
+> set, with `mandatory`, its `status` (`ran`, `skipped`, or `failed`),
+> `reason`, `input`, `output`, gate-level `enforcement`, and `duration_ms`.
+> `GateInput`
+> (`core/gate/input.py`) keeps only `gate_id`, the framework's record that it
+> invoked the gate. `GateOutput` (`core/gate/output.py`) is DR-28's open
+> contract: `gate_id`, `deterministic`, `verdict`, `evidence`
+> (`EvidenceRef`), and two opaque JSON fields the framework stores verbatim
+> and never reads, `evidence_snapshot` and `extra`, which take the place of
+> the `config` and `extras` dicts described below.
+>
+> - **The RAG policy gate's artifacts are its own.** Its prompt snapshot,
+>   model version, `corpus_version`, and retrieval (the bundle's former
+>   `retrieval_query`, `retrieval_results`, `retrieval_path`, and
+>   `index_version` layers) are in its `evidence_snapshot`
+>   (`PolicyGateSnapshot`); its rationale, citations, and `TokenCost` are in
+>   its `extra` (`PolicyGateExtra`). Both models live in
+>   `policy_rag_gate.models` (`gates/policy_rag/`), which the framework never
+>   imports. The reasoner now sends `corpus_version` in the gate's
+>   `gate_config` (`PolicyGateConfig`).
+> - **The three states below map to gate records.** A gate not invoked is
+>   `skipped`. A gate that raised, timed out, returned an unusable output, or
+>   is not composed is `failed`, with no output, and Tier 1 holds it. A gate
+>   that ran without a valid verdict has `verdict=None`, and Tier 1 holds it
+>   the same way.
+> - **Replay** re-runs the gate-level tiers on every stored output, then the
+>   decision-level rules and the combinator (`app/audit/store.py`). It still
+>   re-invokes no gate.
 
 ### Context
 
@@ -1325,8 +1368,39 @@ discipline.
 
 ## DR-20: Universal gate contracts; per-gate-type subpackages; closed discriminated union for MVP
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: the closed union became an open
+contract, and the per-gate-type subpackages left the framework; see the
+implementation note)
 **Category:** Pipeline & System Design
+
+> **Implementation note (DR-28, 2026-10):** DR-28 amends this record: the
+> closed discriminated union is gone, replaced by an open contract, and the
+> per-gate-type subpackages left the framework.
+>
+> - **The universal split stands.** `GateVerdict` (`core/gate/verdict.py`)
+>   is still universal and carries only what enforcement reads; `GateInput`
+>   (`core/gate/input.py`) carries only `gate_id`. `GateOutput`
+>   (`core/gate/output.py`) adds `deterministic`, `evidence`
+>   (`EvidenceRef`), and the opaque JSON `evidence_snapshot` and `extra`,
+>   which the framework stores verbatim and never reads. The "no `extras` at
+>   the framework level" rule below therefore no longer holds for
+>   gate-specific data: it is opaque JSON, not typed fields.
+> - **No union to extend.** The framework defines, imports, and deserializes
+>   no `GateInput`, `GateOutput`, or `GateVerdict` subclass
+>   (`tests/test_framework_boundary.py` checks), and `app/audit/store.py`
+>   reads the universal types only. A new gate is a package that publishes a
+>   `GatePlugin` (`app/gates.py`) through the `decisionledger.gates`
+>   entry-point group.
+> - **The policy gate moved out.** Its typed models left `core/gate/policy/`
+>   for `policy_rag_gate.models`, and its runtime left `app/gate/policy/`
+>   for the workspace member `gates/policy_rag/` (DR-28, Phase 1b). There
+>   `PolicyGateVerdict(GateVerdict)` is the gate's structured-output schema
+>   for the LLM, converted to the universal verdict before it reaches the
+>   bundle. Its `rationale` and `citations`, the raw response text, and
+>   `TokenCost` are stored in the output's `extra` (`PolicyGateExtra`), and
+>   the prompt and retrieval in its `evidence_snapshot`
+>   (`PolicyGateSnapshot`). `PolicyGateInput` and `PolicyGateOutput` no
+>   longer exist.
 
 ### Context
 
@@ -1931,6 +2005,33 @@ catches this and the leak stays "almost generic."
 registration as bypass rules, which supersedes the framework fast path: see
 DR-30)
 
+> **Implementation note (DR-28 and DR-30, 2026-10):** The four calibrations
+> below stand, each with its owner:
+>
+> 1. The device-anomaly weight is ATO's training heuristic,
+>    `_heuristic_label` in
+>    `reasoners/account_takeover/src/ato_reasoner/scorer/trainer.py`
+>    (`HEURISTIC_LABEL_VERSION = "1.1"`, `DEFAULT_MODEL_VERSION = "1.0.1"`).
+> 2. The 0.95 band is ATO's `block-band` bypass rule (DR-30):
+>    `BLOCK_BAND_THRESHOLD = 0.95` in `ato_reasoner/registry.py`, beside
+>    `allow-band` (`ALLOW_BAND_THRESHOLD = 0.20`). ATO's scorer keeps
+>    `FAST_PATH_BLOCK_THRESHOLD` only as an alias of it, named for its model
+>    card's `fast_path_block_threshold` field. The framework holds no
+>    threshold.
+> 3. Top-k version resolution is in the RAG policy gate's retrieval
+>    dimension: `version_resolution_accuracy` counts a query as resolved when
+>    `has_correct_top_version` finds the expected document and version in
+>    the top `k=3` snippets
+>    (`gates/policy_rag/src/policy_rag_gate/eval/retrieval.py`).
+> 4. `THRESHOLD_RAGAS = 0.65` is in the gate's faithfulness dimension
+>    (`gates/policy_rag/src/policy_rag_gate/eval/faithfulness.py`).
+>
+> In the text below, `FAST_PATH_BLOCK_THRESHOLD` as the threshold's home is
+> historical (item 2), and so are the paths `eval/dimensions/retrieval.py`
+> and `eval/dimensions/faithfulness.py`: items 3 and 4 moved with the gate's
+> eval (DR-28, Phase 1b). `eval/dimensions/robustness.py` stays in the
+> framework.
+
 **Decision.** Four calibration choices land together as the MVP's
 behavioral baseline:
 
@@ -2220,10 +2321,8 @@ reasoner files, and a second reasoner would edit framework directories.
 **Status:** Accepted
 **Category:** Pipeline & System Design
 
-> Recorded with DR-28 so the record sequence has no gap. Rationale,
-> rejected-alternative detail, and cross-references land with the
-> documentation pass that closes this plan; the README and architecture
-> pages still describe the earlier framing until then.
+> Recorded with DR-28 so the record sequence has no gap. DR-28 to DR-32
+> implement it.
 
 **Decision.** DecisionLedger is (a) one immutable Decision Bundle schema for
 every automated decision about a subject, (b) a subject-centric ledger with
@@ -2234,9 +2333,77 @@ reference gates (rules, RAG) as workspace members. This supersedes the README
 "reasoners inside the framework" framing, and the "UI out of scope" line only
 insofar as a later single-pane-of-glass decision adds one.
 
-**Alternatives rejected.** Keeping the RAG gate as framework core (it is why
-the framework needs torch). "Governed runtime" positioning (the 2026 market
-filled that in).
+**Rationale.** Every system that makes an automated decision about a
+customer logs it its own way, if at all. A rules engine audits its own
+verdicts, a customer data platform holds profiles, lineage tools trace the
+data and models behind an artifact, LLM observability tools trace model
+calls, and model inventories list models and their validation status. None
+of them records each decision about each subject in one schema, with enough
+of its evidence and enforcement to replay it, across the systems that
+decide. That record (the Decision Bundle) and a ledger that finds every
+bundle by subject are the product, so the framework is defined as them; the
+gating service and eval-gated release are why its records can be trusted.
+
+Reasoners and gates are customers of the ledger, so they live outside it.
+Before DR-28 and DR-31 the RAG policy gate, its retrieval stack, and the
+in-process handoff were framework code: pgvector, Elasticsearch,
+sentence-transformers, torch, and the OpenAI and Anthropic SDKs were
+framework runtime dependencies, and a reasoner could submit only as a Python
+plugin running in the ledger's process. With them outside, the framework's
+only infrastructure is Postgres (`docker-compose.yml`, `app/audit/sql/`),
+its unit tests run without Docker against test doubles
+(`tests/_stub_reasoner`, `tests/_fake_gate`, `tests/_stub_resolver`), and a
+reasoner can be any stack, in any language, that sends the JSON submission
+over HTTP (`schemas/submission-v2.json`, `conformance/`). The repository
+still ships reference members, two reasoners (ATO and the example reasoner)
+and two gates (rules and RAG), none of them in the framework's wheel.
+
+What it gives up: the framework alone is no longer a turnkey RAG decisioning
+product. Its wheel holds `core`, `app`, and `eval` and no gate, so an
+adopter installs the reference gates (and runs the RAG gate's
+Elasticsearch) or writes its own, and treats a deployment as an assembly of
+members. The framework owns the record, the gate contract, and enforcement,
+not the reasoning that produces a decision. One part of the decision is not
+automatic yet: the eval workflow runs on manual dispatch only
+(`.github/workflows/eval.yaml`), so CI does not block a release whose
+artifacts have not been evaluated.
+
+**Rejected alternatives.**
+
+- **The RAG gate as framework core.** It is why the framework needed torch:
+  it made torch and sentence-transformers (for the embedding and reranking
+  models), Elasticsearch, pgvector, and the LLM SDKs dependencies of every
+  deployment, including one whose reasoners only record decisions or gate
+  them with rules, and it made one gate's design (hybrid retrieval over a
+  policy corpus, an LLM verdict) the framework's definition of gating. It is
+  a reference gate instead (DR-28).
+- **"Governed runtime" positioning.** The 2026 market filled that category
+  with products that combine rules with RAG explanations, enforce
+  natural-language policy, or serve deterministic verdicts. In this
+  project's terms each is a reasoner or a gate, something that would write
+  to a ledger; positioning as one more runtime would compete with the
+  ledger's prospective writers and hide what is distinctive about it.
+- **Reasoners inside the framework.** Before DR-26 the framework imported
+  ATO directly; until DR-31 it mounted each reasoner plugin's router and
+  built its services in the ledger's process. Either way every reasoner
+  shared the ledger's release train, and only a Python package in that
+  process could submit. DR-26 made reasoners plugins, and DR-31 made them
+  clients that submit over HTTP or through `LocalClient`.
+
+**Cross-references.**
+
+- Builds on DR-24 (the framework owns audit storage, with reasoners as
+  row-level tenants) and DR-26 (reasoners are workspace members discovered
+  by entry point). DR-8 keeps `core/` free of infrastructure; this record
+  narrows the whole framework's infrastructure to Postgres.
+- Implemented by DR-28 (gates leave the framework), DR-29 (gate sets and the
+  combinator), DR-30 (the two verbs, record and gate), DR-31 (the wire
+  contract that lets reasoners run outside the ledger), and DR-32 (the
+  subject a timeline is keyed on).
+- Design pages: [Architecture](architecture.md),
+  [Infrastructure](infrastructure.md), [Gates](gates/index.md),
+  [Submission contract](reasoners/reasoner-handoff.md),
+  [Identity](identity.md), [Evaluation](evaluation.md).
 
 ---
 
@@ -2246,9 +2413,8 @@ filled that in).
 **Category:** Pipeline & System Design
 
 > Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
-> open contract. Implementation notes on those records, the full rationale,
-> and cross-references land with the documentation pass that closes this
-> plan. The seam is implemented (Phase 1a, below), and the RAG gate is its
+> open contract, and both records carry an implementation note saying what
+> changed. The seam is implemented (Phase 1a, below), and the RAG gate is its
 > own workspace member (Phase 1b, below).
 
 **Decision.**
@@ -2283,8 +2449,93 @@ filled that in).
 - Lookup gates (do-not-contact, sanctions) are adapters to enterprise
   systems. The framework never hosts a reference lookup table.
 
-**Alternatives rejected.** Gate pipelines with data flow between gates;
-configurable combinators; a shared `decisionledger` schema for gate tables.
+**Rationale.** Enforcement and replay read little of what a gate produces:
+whether it reached a verdict, what the verdict permits and requires and how
+confident it is, whether the gate is deterministic, and which jurisdictions
+its evidence carries. Everything else (a rendered prompt, retrieved
+passages, a rule trace, token cost) serves audit and the gate's own
+evaluation. Typing only what the framework reads, and storing the rest
+verbatim as opaque JSON (`evidence_snapshot`, `extra`), makes the contract
+open: a new gate of any kind the framework names (`llm`, `lookup`, `rules`)
+is a package that publishes a `GatePlugin`, not a framework edit, and the
+framework never imports or deserializes a gate's own models. Under DR-20 the
+store had to know every gate's subclasses, and framework validation of one
+gate's data could make bundles unreadable: while the retrieval layers were
+framework types, a non-negative constraint on `relevance_score` kept the
+store from reloading most reranked gate-path bundles (48 of 62 in the local
+ledger carried a negative score; Phase 1a, below). Because the snapshot
+holds what the gate consulted, replay needs no corpus, index, or model.
+
+The tiers split by what they judge. Schema failure, adversarial probe, low
+confidence, and jurisdiction conflict judge one gate's output, so they apply
+per gate. Novelty is a property of the decision's subject, read from the
+reasoner's evidence through its registration's `novel_entity_feature`, so it
+applies once per decision however many gates run. A deterministic gate
+(rules, a lookup) has no self-assessed confidence to distrust and no model
+an adversarial input could steer, so Tiers 2 and 4 are skipped for it. Tier 5
+runs only when a gate's evidence carries jurisdictions, so a gate whose
+sources carry none cannot trip it.
+
+Gates own their infrastructure and their eval: the RAG gate keeps its
+chunks in its own `policy_rag` schema, its index mapping and Elasticsearch
+in its member, and its retrieval, faithfulness, and citation dimensions in
+`policy_rag_gate.eval`. Lookup gates adapt the enterprise's own systems (a
+do-not-contact list, a sanctions screen), so the framework never holds an
+enterprise's reference data.
+
+What it gives up: inside the framework a gate's own fields are untyped
+JSON. The framework cannot validate a gate's snapshot, a reader that wants
+the RAG gate's rationale or retrieval must know that gate and re-validate
+its models (`policy_rag_gate.models`), and keeping gate internals out of the
+framework is a scan in the boundary test rather than a type error. Each gate
+also carries operational work the framework used to do once: its DDL, its
+index build (`make build-policy-index-<reasoner_id>`), and its own eval
+harness (`make eval-gate-policy_rag`), whose LLM judges are paid calls.
+
+**Rejected alternatives.**
+
+- **Gate pipelines with data flow between gates.** A gate that reads
+  another's output makes the result depend on order, rules out concurrent
+  evaluation, and mixes one gate's evidence into another's verdict. Gates
+  stay independent (DR-29).
+- **Configurable combinators.** A deployment-chosen rule (voting, weighting)
+  could let lenient gates outweigh a restrictive one, and replay would need
+  the rule snapshotted with every decision. The combinator is fixed
+  (DR-29).
+- **A shared `decisionledger` schema for gate tables.** The framework's DDL
+  would carry every gate's tables and extensions (the vector extension for
+  the RAG gate's chunks), so the framework's database would need whatever
+  any gate needs. A gate's DDL creates its own schema (`policy_rag`), the
+  framework's creates no extension, and the boundary test checks that a
+  gate's DDL never touches the framework schema.
+- **Keeping DR-20's closed discriminated union.** Every new gate type was a
+  framework edit (the union in `app/audit/store.py`) and a framework
+  release, and the framework imported every gate's models to read its own
+  bundles, so no one outside the repository could ship a gate.
+- **Framework-hosted reference lookup tables.** Do-not-contact and sanctions
+  lists already have systems of record in the enterprise. A copy in the
+  ledger would go stale and make the ledger a second system of record for
+  data it does not own; a lookup gate is an adapter to the enterprise's
+  system instead.
+
+**Cross-references.**
+
+- Amends DR-19 and DR-20 (each carries an implementation note). Splits the
+  review triggers of DR-6 into gate-level and decision-level tiers, and
+  discovers gates by entry point as DR-26 discovers reasoners.
+- The retrieval records (DR-2, DR-3, DR-4, DR-13) and the eval and LLM
+  adapters of DR-22 and DR-23 now describe the RAG gate's member; the
+  `LLMClient` protocol stays in `core/llm/`.
+- Siblings: DR-27 (why gates live outside the framework), DR-29 (how a gate
+  set combines and how a gate fails closed), DR-30 (bypass rules share the
+  rules gate's predicate language), DR-31 (`GateRequest.submission`), DR-32
+  (`GateRequest.identity`).
+- Design pages: [Gates](gates/index.md),
+  [How to implement a gate](gates/implementation.md),
+  [Policy gate](gates/policy/index.md), the
+  [new-gate checklist](reasoners/reasoner-handoff.md#new-gate-checklist),
+  [Pipeline](pipeline.md), [Infrastructure](infrastructure.md),
+  [Evaluation](evaluation.md).
 
 **Implementation (Phase 1a, the seam).**
 
@@ -2514,8 +2765,8 @@ configurable combinators; a shared `decisionledger` schema for gate tables.
 
 > Closes the question DR-28 Phase 1a left open: how the decision-level
 > novel-entity tier composes with several gates, and whether it may hold a
-> mandatory gate's BLOCK for review (it may not). Rationale and
-> cross-references land with the documentation pass that closes this plan.
+> mandatory gate's BLOCK for review (it may not). Phase 2 implements it
+> (below).
 
 **Decision.**
 
@@ -2539,8 +2790,73 @@ configurable combinators; a shared `decisionledger` schema for gate tables.
 - The submission carries one `GateContext` per bound gate, each validated
   against that gate's declared `config_model`.
 
-**Alternatives rejected.** Gate pipelines with data flow between gates;
-configurable combinators; a configurable short-circuit policy.
+**Rationale.** A decision may pass through several gates, so the ledger
+needs one rule that makes their actions one. The most restrictive action
+over ALLOW < CHALLENGE < HOLD < BLOCK is a conjunction: the final action is
+at least as restrictive as every gate's enforced action, so a gate can add
+restriction and never remove another's. It is a maximum
+(`core/gate/combinator.py`), hence associative, commutative, and idempotent:
+the order gates run in, or running them concurrently, cannot change the
+result, and replay recombines stored actions with no order to reproduce. It
+is also monotone, which makes the short-circuit safe: once a mandatory
+gate's enforced action is BLOCK nothing can lower it, so skipping the
+advisory gates saves their cost without changing an outcome.
+
+Mandatory and advisory bindings separate two kinds of control. A mandatory
+gate is a constraint the deployment or the registration puts on every
+decision, recorded ones included; an advisory gate is judgment the reasoner
+asks for when it cannot settle a case itself. Failing closed (a gate that
+raises, outlives its budget, returns an unusable output, or is not composed
+holds the decision through Tier 1) keeps an outage from becoming an
+approval. Independence (a `GateRequest` never carries another gate's output,
+and a gate cannot reach the others when it is built) keeps each verdict and
+its evidence attributable to one gate.
+
+What it gives up: no gate can express "relax if another gate is confident",
+and voting or weighted ensembles are out. The final action is also not a
+pure maximum on one path. On a gated decision about a novel entity, Tier 3
+holds the advisory gates' verdicts for review, so an advisory BLOCK that did
+not come from that gate's own Tier 2 counts as HOLD (DR-6). The override is
+explicit in the bundle (`decision_level_rule` is `tier3_novel_entity`), and
+it matters in practice: when Phase 1a measured the local ledger, every
+gate-routed ATO decision was about a novel entity, and 4 of the 39 HOLDs
+among them came from a verdict that permitted BLOCK (DR-28, Phase 1a
+judgment calls). Every mandatory gate adds its latency to every decision,
+and the two phases run one after the other, so a gated decision waits for
+its slowest mandatory gate and then for its slowest advisory gate.
+
+**Rejected alternatives.**
+
+- **Gate pipelines with data flow between gates.** The result would depend
+  on order, gates could not run concurrently, replay would have to
+  reproduce the order, and a verdict would rest partly on another gate's
+  evidence.
+- **Configurable combinators.** Voting or weighting lets lenient gates
+  outvote a restrictive one, so configuration could relax a control, and
+  replay would need the combinator snapshotted with the registration.
+- **A configurable short-circuit policy.** BLOCK absorbs and the final action
+  is monotone in the gates that ran, so a policy could change only cost,
+  never an outcome. The rule is fixed: once a mandatory gate blocks, the
+  advisory gates are skipped. A gate-mode proposal of BLOCK does not skip
+  them (Phase 2 judgment calls).
+- **One concurrent phase for every gate.** It would save the wait between
+  phases but make the short-circuit impossible: the advisory gates, often a
+  model call, would run on decisions a mandatory gate already blocks.
+- **Letting Tier 3 hold a mandatory gate's BLOCK for review.** The reasoner's
+  uncertainty about its subject would then lower a control the deployment
+  or the registration imposed. Tier 3 holds the advisory side only (Phase 2
+  judgment calls).
+
+**Cross-references.**
+
+- Settles what DR-28 left open about Tier 3, and keeps DR-6's routing of
+  novel entities to review, now for the advisory side of a gated decision.
+- Siblings: DR-28 (gate-level and decision-level tiers), DR-30 (a record
+  runs only its mandatory gates, and its bypass floors join the
+  combinator), DR-31 (`GET /api/v1/gates` reports each gate's mandate), DR-32
+  (the identity step runs before the gate set).
+- Design pages: [Pipeline](pipeline.md), [Gates](gates/index.md),
+  [Interfaces](core.md).
 
 **Implementation (Phase 2).**
 
@@ -2645,7 +2961,8 @@ configurable combinators; a configurable short-circuit policy.
 
 > Supersedes the framework's fast path and DR-25's place for the score
 > thresholds: the thresholds are now the ATO reasoner's registered bypass
-> rules. Rationale and cross-references land with the documentation pass.
+> rules (DR-25 carries an implementation note). Phase 2 implements it
+> (below).
 
 **Decision.**
 
@@ -2670,9 +2987,79 @@ configurable combinators; a configurable short-circuit policy.
   (`label_value > 0.95` → BLOCK). The numbers live in ATO's registration
   and nowhere in the framework.
 
-**Alternatives rejected.** A free-text fast-path rationale (not checkable,
-not replayable); thresholds in the framework; a separate audit-only mode
-(record mode is that mode, with mandatory gates still applied).
+**Rationale.** Before this record a reasoner skipped the gate by choosing a
+framework route, `FAST_PATH_ALLOW` or `FAST_PATH_BLOCK` (`GateRoute`), on its
+own word. The framework required a free-text `fast_path_rationale` to be
+present but could not check it, replay could not re-evaluate it, and a
+fast-path decision ran no gate at all. The route also carried one reasoner's
+design into the framework: two score bands, one to ALLOW and one to BLOCK.
+The numbers were already in ATO's code after DR-26, but the route
+vocabulary assumed them and the framework's records held them as a
+calibration (DR-25).
+
+A registered bypass rule turns the reason for not gating into data the
+ledger can check: a pure predicate in the rules gate's language over the
+reasoner's own evidence (`label_value`, `feature_set`), naming the one
+action it justifies. The ledger evaluates it when it writes the record,
+snapshots the rule and the values it read, and replay evaluates the snapshot
+again (`bypass_rule_holds`). A rule may justify any action in the
+registration's `recordable_actions`, not only ALLOW and BLOCK. Mandatory
+gates still run on a record, so a deployment control cannot be bypassed.
+Gate contexts stay required, so the shadow dimension can measure what the
+advisory gates would have said about recorded decisions, and a batch
+reasoner can record in bulk (`POST /api/v1/decisions:batch`, records only).
+ATO's bands are now its `allow-band` and `block-band` rules
+(`ato_reasoner/registry.py`), and the framework holds no threshold.
+
+What it gives up: a reasoner registers every shortcut in advance, and
+changing a threshold changes its registration and the registration's
+version. A rule that does not hold is not refused: the record is stored with
+`bypass_rule_holds=false` under a HOLD floor, so a misbehaving reasoner
+produces held decisions rather than errors. Records skip the advisory gates
+and Tier 3, so a rule that should exclude novel subjects must say so in its
+predicate. The shadow dimension is report-only until a baseline calibrates
+a threshold, and each sample costs one call per advisory gate.
+
+**Rejected alternatives.**
+
+- **A free-text fast-path rationale.** Not checkable and not replayable; it
+  is the design this record replaces.
+- **Thresholds in the framework.** They are one reasoner's calibration of
+  one scorer, and another reasoner's reason to record need not be a score
+  band at all.
+- **A separate audit-only mode.** Record mode is that mode, with mandatory
+  gates still applied: a reasoner that decides for itself still meets the
+  deployment's controls and leaves a replayable record.
+- **A bypass rule without an action.** A rule would say when it applies but
+  not what it justifies, so a reasoner could cite `block-band` to record
+  ALLOW and skip every advisory gate. A record's proposed action must equal
+  its rule's action (Phase 2 judgment calls).
+- **Observed values carried by the reasoner.** The values a predicate reads
+  are already in the submission's `reasoner_context`, so a second copy could
+  only disagree with it. The ledger records what each predicate read
+  (`BypassCheck.observed`).
+- **Trusting the cited rule alone.** A reasoner whose evidence satisfies two
+  rules could cite the lenient one. The ledger evaluates every registered
+  rule and floors the record at the action of the strictest rule that holds
+  (`bypass_rule_superseded`).
+- **Rejecting a record whose rule does not hold.** Refusing it would discard
+  the evidence of an unjustified bypass; storing it under a HOLD floor keeps
+  the evidence and fails closed. Static faults (an unregistered rule, a
+  wrong action or version, an unrecordable action) are still rejected.
+
+**Cross-references.**
+
+- Supersedes DR-25's place for the score thresholds (see its implementation
+  note) and the fast path of DR-14 (see its status), and keeps DR-14's
+  `GateContext` on every submission for shadow evaluation. DR-10 explains
+  why ATO's score bands are triage, not fraud detection.
+- Siblings: DR-28 (the predicate language that the rules gate and bypass
+  rules share), DR-29 (a record still runs its mandatory gates, and bypass
+  floors join the combinator), DR-31 (`BypassCitation` on the wire, and the
+  batch route).
+- Design pages: [Submission contract](reasoners/reasoner-handoff.md),
+  [Pipeline](pipeline.md), [Evaluation](evaluation.md), and ATO's bands in
+  [Account Takeover reasoner](reasoners/account-takeover/account-takeover.md).
 
 **Implementation (Phase 2).**
 
@@ -2760,9 +3147,10 @@ not replayable); thresholds in the framework; a separate audit-only mode
 **Status:** Accepted
 **Category:** Pipeline & System Design
 
+> Replaces the in-process handoff that DR-14 describes (see its status).
 > Phase 2 implements the wire schema; Phase 3 the HTTP surface, registration
 > as a resource, auth, clients, contract artifacts, conformance, and MCP
-> (both below). The rationale lands in the documentation pass.
+> (both below).
 
 **Decision.**
 
@@ -2786,6 +3174,81 @@ not replayable); thresholds in the framework; a separate audit-only mode
 - Contract artifacts: `schemas/submission-v2.json` and
   `schemas/bundle-v2.json` diffed in CI, a conformance suite, and an MCP
   integration over the same client.
+
+**Rationale.** Before this record a reasoner handed the ledger a Python
+object satisfying the `Observation` protocol, in the ledger's process,
+through a router the framework mounted for it (DR-26 and DR-16's
+implementation note), and the store needed that reasoner's deserializer
+(`raw_event_factory`) to rebuild the event for replay, so a deployment
+without the reasoner could not replay its decisions (DR-24's implementation
+note). An HTTP or MCP caller cannot hand over a Python object. A concrete,
+strict, frozen `Submission` that stores the event as opaque JSON makes the
+handoff a document: it exports as JSON Schema (`schemas/submission-v2.json`,
+`schemas/bundle-v2.json`; `tests/test_schemas.py` fails on drift), a
+black-box suite (`conformance/`) can test any instance over HTTP, a reasoner
+can be written in any language, and replay runs from the bundle alone.
+
+Registration as content-addressed data closes the remaining gap: every
+bundle records its `registration_version`, the ledger snapshots each version
+it serves, and replay enforces under the profile in effect when the decision
+was made, even after the registration changed or its reasoner left the
+deployment. A key bound to one `reasoner_id` makes writes tenant-safe (a
+write naming another reasoner is a 403) and reads tenant-scoped, and the
+operator key separates resolving a HOLD from writing decisions.
+`LocalClient` serializes the same `Submission` and calls the same operations
+the routes call, so an in-process caller, an HTTP client, and an eval run
+decide identically. Problem documents with stable codes give every client
+one error format to switch on, and the MCP server offers agent reasoners the
+same operations as six tools whose descriptions are written for agents.
+
+What it gives up: the wire has no idempotency yet, so a retried POST records
+twice, and `HttpClient` does not retry. Registrations are read-only over the
+API; changing one means restarting with a new plugin or registration file. A
+reasoner registered by file cannot bind the RAG gate, which serves only the
+reasoners whose prompts and corpus it loaded from their plugins
+(`ReasonerScope`). Version-1 bundles stay readable but cannot be replayed
+(409 `BUNDLE_SCHEMA_UNSUPPORTED`). Auth is keys in the environment or a
+mounted file, with one shared operator key: no user model, no sessions, and
+no key issuance.
+
+**Rejected alternatives.**
+
+- **Keeping the protocol and adding an HTTP adapter.** Two contracts, a
+  Python protocol in process and a JSON shape over HTTP, that could drift,
+  and replay of in-process submissions would still need reasoner code.
+- **Generating the MCP server from the FastAPI app.** Route descriptions are
+  written for HTTP clients; an agent needs tool descriptions that say when
+  to record and when to gate. The server is hand-rolled over `HttpClient`
+  (JSON-RPC 2.0 on stdio).
+- **A registration write route now (`PUT /api/v1/reasoners/{reasoner_id}`).**
+  Deferred: registrations come from plugins or a mounted file at startup and
+  are served read-only. Content addressing and the snapshots already let a
+  later write route change a registration without breaking replay.
+- **Converting version-1 bundles.** Their reasoner-typed event cannot be
+  rebuilt without reasoner code, and no production data exists. They stay
+  readable through lookup and are refused for replay (409).
+- **Returning the full bundle from the write.** DR-16 keeps the primary
+  response small: the write returns a `DecisionReceipt`, and
+  `GET /api/v1/decisions/{decision_id}` serves the bundle.
+- **A user model, sessions, or OAuth.** Out of scope for the MVP. Keys come
+  from the environment or a mounted file and are indexed by digest, and a
+  key given to two principals refuses startup.
+
+**Cross-references.**
+
+- Replaces DR-14's handoff (see its status) and the per-reasoner raw-event
+  deserializers of DR-26 and DR-24's implementation note. Amends DR-16: its
+  small response survives as the `DecisionReceipt`, the decide route
+  returns to the framework (`POST /api/v1/decisions`), and reasoner routers
+  are no longer mounted. Gives DR-18's resolution journal an operator route
+  (`POST /api/v1/decisions/{decision_id}/resolutions`).
+- Siblings: DR-29 and DR-30 (the gate set and the mode a submission names),
+  DR-32 (fills the `native_subject` this record reserved, and adds the
+  timeline's `include_related`).
+- Design pages: [Submission contract](reasoners/reasoner-handoff.md) and its
+  [new-reasoner checklist](reasoners/reasoner-handoff.md#new-reasoner-checklist),
+  [Architecture](architecture.md), [Interfaces](core.md),
+  [Infrastructure](infrastructure.md).
 
 **Implementation (Phase 2, the wire schema).**
 
@@ -2999,9 +3462,8 @@ not replayable); thresholds in the framework; a separate audit-only mode
 **Category:** Pipeline & System Design
 
 > Extends DR-12 (`entity_id` is the universal subject) and amends DR-14 (the
-> framework, not the reasoner, assigns a decision's subject). Phase 3b
-> implements it (below); the rationale and the cross-references land in the
-> documentation pass.
+> framework, not the reasoner, assigns a decision's subject); both records'
+> status lines say so. Phase 3b implements it (below).
 
 **Decision.**
 
@@ -3044,6 +3506,91 @@ not replayable); thresholds in the framework; a separate audit-only mode
 - **Routes.** `GET /api/v1/identity/resolve?namespace=&native_id=` (served
   by the active resolver) and `GET /api/v1/entities/{id}/decisions` with
   `include_related=<relationship_type>`, unioning merged ids.
+
+**Rationale.** A subject's timeline is the ledger's distinctive product
+(DR-27), and it cannot exist while each reasoner names subjects its own way.
+Two reasoners that derive `entity_id` from different keys give one person
+two ids: ATO derives its id from the account it scores, and a second
+reasoner that scores the same person by another key derives another. DR-12
+made `entity_id` the universal subject and deferred resolution, which left
+nothing that could join them.
+
+Identity resolution itself is enterprise-specific: matching rules,
+crosswalks between systems, survivorship, and the master data behind them
+belong to the enterprise and differ from one enterprise to the next. The
+ledger's part is narrower and checkable: ask the enterprise's resolver, and
+record the answer with the resolver, the crosswalk version, the method, and
+the derivation, so a wrong mapping is visible on the bundle and replayable
+rather than silent. Resolving after intake and before the gates hands every
+gate the subject (`GateRequest.identity`), so a lookup gate about a person
+(do-not-contact, sanctions) keys on the enterprise's subject rather than on
+what the reasoner scored. An unresolved subject is a valid outcome, recorded
+under the reasoner's own id with the reason, so no decision is lost to an
+identity fault. The passthrough default keeps the framework, its tests, and
+its example reasoner runnable with no enterprise installed, and it
+reproduces the `entity_id` every ATO decision already had.
+
+Merges, detaches, and relationships change after decisions are written, and
+bundles are immutable (DR-18). An append-only journal (`entity_events`) and
+a projection rebuildable from it and the bundles (`entity_membership`)
+follow the pattern DR-18 set for resolution attempts, in framework-owned
+storage (DR-24): a bundle keeps what was known when its decision was made,
+and a timeline reads the current membership.
+
+What it gives up: the ledger does not know who is who on its own. A
+timeline is only as good as the resolver behind it, and with the
+passthrough two reasoners' decisions about one person stay apart until a
+journal `merge` joins them. `include_related` follows one relationship step,
+and there is no as-of-time timeline. An active resolver adds up to its
+50 ms budget to every decision, and one that never returns keeps a worker
+thread busy while its decision proceeds unresolved.
+
+**Rejected alternatives.**
+
+- **A framework-owned master entity index.** Matching, crosswalks, and
+  survivorship differ per enterprise and already have owners there (master
+  data management, a CRM). A framework index would duplicate them, drift
+  from them as a second source of truth, and make the ledger answerable for
+  mappings it cannot correct. The ledger records whichever mapping the
+  enterprise's resolver gives it, with its provenance, and keeps only the
+  derivation arithmetic (`derive_entity_id`) in `core`.
+- **Resolving identity in the reasoner.** Every reasoner would need the
+  crosswalk and its versions, two reasoners could resolve one person
+  differently or at different crosswalk versions, and the ledger could not
+  tell whether, by whom, or how a decision's subject was resolved. Resolving
+  in the ledger gives every decision one recorded resolution; a reasoner
+  names only what it scored.
+- **Dropping a decision whose subject does not resolve.** An identity outage
+  would become a decision outage and lose the record a system of record
+  exists to keep. The subject is recorded unresolved, under the reasoner's
+  own id and with the reason, and can join an enterprise subject later
+  through a journal `merge`.
+- **Relationship semantics in the framework (households or any other).**
+  What a relationship means, and its cardinality, are the enterprise's; a
+  framework household concept would fit one enterprise's model and force it
+  on every other. A resolver declares the relationship types it emits; the
+  ledger accepts only those (an answer that relates by another type is not
+  used, and a journal `relate` must name a declared type) and journals and
+  projects them as opaque labels. The boundary test forbids a household
+  concept in framework files.
+- **Rewriting bundles when subjects merge.** It would break bundle
+  immutability (DR-18) and lose the mapping in effect when the decision was
+  made. The journal and the projection carry changes to the identity graph
+  instead.
+
+**Cross-references.**
+
+- Extends DR-12 and amends DR-14 (see their status lines). Applies DR-18's
+  append-only pattern and DR-24's framework-owned storage to identity, and
+  fills the `native_subject` that DR-31 reserved on the wire schema.
+- Siblings: DR-27 (the subject-centric ledger), DR-28 (a gate reads the
+  subject on `GateRequest.identity`), DR-29 (the identity step runs before
+  the gate set), DR-31 (the HTTP surface this record extends with
+  `GET /api/v1/identity/resolve` and the timeline's `include_related`).
+- Design pages: [Identity](identity.md), including
+  [shipping a resolver](identity.md#shipping-a-resolver),
+  [Pipeline](pipeline.md), [Infrastructure](infrastructure.md),
+  [Submission contract](reasoners/reasoner-handoff.md).
 
 **Implementation (Phase 3b).**
 
@@ -3167,4 +3714,5 @@ not replayable); thresholds in the framework; a separate audit-only mode
   echoes the native key.
 - **The example reasoner is unchanged.** It names no native subject, so its
   decisions are recorded under its own ids by the passthrough; it can adopt
-  the contract in the documentation pass.
+  the contract in the documentation pass. The documentation pass changed no
+  code, so adopting the contract remains a follow-up.
