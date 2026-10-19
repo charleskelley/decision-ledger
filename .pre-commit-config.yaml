@@ -1,8 +1,8 @@
 # pre-commit hooks for DecisionLedger
-# Install: uv add --dev pre-commit && uv run pre-commit install
+# Install: make install-hooks (the pre-commit and pre-push hooks)
 # Run manually: uv run pre-commit run --all-files
 #
-# Ruff only — no black, isort, flake8, or pylint. See STYLE.md.
+# Ruff only — no black, isort, flake8, or pylint. See docs/development/style.md.
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -18,7 +18,7 @@ repos:
     rev: v5.0.0
     hooks:
       - id: check-yaml
-        args: [--unsafe]   # Allow custom YAML tags in scenario configs
+        args: [--unsafe]   # Syntax-only parse; no YAML here uses custom tags
       - id: check-toml
       - id: end-of-file-fixer
         exclude: "\\.(png|jpg|svg|ico)$"
@@ -38,8 +38,9 @@ repos:
   # Pre-push gate: run the local verify suite before every push.
   # Lenient by design — when the Docker compose stack is up, runs the
   # full ``check + test-integration + test-smoke``; otherwise falls back
-  # to ``check`` only and prints a hint. CI re-validates either way, so
-  # external contributors without Docker are not blocked.
+  # to ``check`` only and prints a hint. CI re-validates either way (fork
+  # PRs get integration from a maintainer before merge), so external
+  # contributors without Docker are not blocked.
   - repo: local
     hooks:
       - id: verify-push
