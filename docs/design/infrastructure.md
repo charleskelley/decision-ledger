@@ -289,7 +289,7 @@ never reads these keys.
 | Key Pattern | Type | TTL | Purpose |
 |-------------|------|-----|---------|
 | `ato:login-events` | Stream | none | Login-event queue (produced by the scenario generator) |
-| `ato:login-events:dlq` | Stream | none | Dead-letter queue (schema errors, lateness, duplicates) |
+| `ato:login-events:dlq` | Stream | none | Dead-letter queue (schema errors, lateness, duplicates; `ledger_refused` and `pipeline_error` from `python -m ato_reasoner consume`) |
 | `ato:dedup:<sha256>` | String | 24 h | Idempotency store: SHA-256 of `event_id`, `SET NX EX` |
 | `ato:velocity:{account_id}` | Sorted Set | 48 h | Sliding-window event timestamps |
 | `ato:ips:{account_id}` | Set | 90 d | Seen IP addresses |

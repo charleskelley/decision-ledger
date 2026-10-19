@@ -80,7 +80,12 @@ enforces a bounded-lateness window (one hour by default), deduplicates by a
 SHA-256 of the `event_id` (Redis `SET NX` with a 24-hour TTL), and routes every
 failure to `ato:login-events:dlq` with a reason of `schema_error`, `lateness`,
 or `duplicate`. The scenario generator publishes to that stream
-(`make scenario-account_takeover`).
+(`make scenario-account_takeover`), and `python -m ato_reasoner consume`
+decides each accepted event through `run_ato_decision`, the pipeline the
+service's route runs. A decision the ledger refuses (a 422 or 413 about
+that submission) is dead-lettered as `ledger_refused`; any other failure of a
+decision is dead-lettered as `pipeline_error` and stops the consumer, whose
+next run decides the rest of that batch first.
 
 **Features (ATO).** `ato_reasoner/feature_service.py` reads the account's
 history from Redis in one pipelined round trip and computes an

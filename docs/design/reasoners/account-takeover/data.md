@@ -87,7 +87,12 @@ the event id: the Redis key is `ato:dedup:` plus the SHA-256 of `event_id`,
 set with `SET NX EX` (default TTL 24 hours), so the check and the store are
 one atomic step. Schema errors, late events, and duplicates go to
 `ato:login-events:dlq` with a `reason` of `schema_error`, `lateness`, or
-`duplicate`.
+`duplicate`. `python -m ato_reasoner consume` decides each accepted event
+through ATO's pipeline (`ato_reasoner/ingestion/stream.py`) and dead-letters
+one whose decision fails: `ledger_refused` when the ledger refuses the
+submission itself (a 422 or 413), `pipeline_error` for any other failure of
+the decision, which also stops the run (the rest of that batch stays
+pending, and the next run decides it first).
 
 The bundle's own `idempotency_key` is the submission's `event_id` unless an
 in-process caller supplies one.

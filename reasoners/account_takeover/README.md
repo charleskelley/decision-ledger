@@ -74,6 +74,35 @@ the full bundle, replay, and the account's decision timeline are the
 ledger's routes (`GET /api/v1/decisions/{id}`, `.../replay`,
 `GET /api/v1/entities/{entity_id}/decisions`).
 
+## Decides from its event stream
+
+`python -m ato_reasoner consume` decides the logins on ATO's Redis stream
+(`ato:login-events`, where `make scenario-account_takeover` and the
+generator publish). The stream consumer (`ingestion/consumer.py`) reads
+through the `ato-reasoner` consumer group, dead-letters a malformed, late
+(older than an hour), or duplicate event to `ato:login-events:dlq`, and
+ACKs every message it checks. Each accepted login goes through the same
+`run_ato_decision` the service's route runs (`ingestion/stream.py`), to the
+ledger `ATO_LEDGER_URL` names or, without one, a ledger composed in process.
+A login the ledger refuses (a 422 or 413 about that submission) is
+dead-lettered as `ledger_refused` and the run goes on. Any other failure of
+a decision (a wrong key, an unregistered reasoner, the ledger failing or
+unreachable, the scorer failing) is dead-lettered as `pipeline_error` and
+stops the run with exit status 1; the rest of that batch stays pending, and
+the next run decides it first. A Redis failure also stops the run with exit
+status 1, with nothing dead-lettered.
+
+```bash
+make scenario-account_takeover                          # publish 10 baseline_normal logins
+uv run python -m ato_reasoner consume --max-events 10   # decide them: one JSON line each
+```
+
+Without `--max-events` it runs until interrupted; Ctrl-C finishes the
+messages already read (a second Ctrl-C stops at once, abandoning the login
+being decided). `--stream-key`, `--group`, `--consumer`,
+`--batch-size`, `--block-ms`, and `--lateness-seconds` override the
+defaults.
+
 ## The subject (DR-32)
 
 Every ATO submission names the account as its native subject,

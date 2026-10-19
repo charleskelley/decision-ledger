@@ -4,7 +4,10 @@ IngestionConsumer reads from a Redis Streams consumer group, validates
 each message against LoginEvent, enforces a bounded-lateness window,
 and deduplicates via IdempotencyStore. Messages that fail any check are
 routed to the dead-letter stream; all messages are ACKed to prevent
-infinite redelivery.
+infinite redelivery. ``consume`` hands each accepted event to a
+synchronous callback; ``ato_reasoner.ingestion.stream.decide_from_stream``
+drives the same checks (``read``, then ``process_message``) and decides each
+accepted event through ATO's pipeline (``python -m ato_reasoner consume``).
 
 Stream layout::
 
@@ -16,10 +19,13 @@ LoginEvent produced by ``model_dump_json()``.
 
 DLQ entries copy the original ``"data"`` payload and add:
 
-- ``reason``:      ``schema_error`` | ``lateness`` | ``duplicate``
+- ``reason``:      ``schema_error`` | ``lateness`` | ``duplicate`` (this
+  consumer's checks), or ``ledger_refused`` | ``pipeline_error`` (an
+  accepted event whose decision failed; written by ``decide_from_stream``)
 - ``detail``:      human-readable description of the failure
 - ``original_id``: Redis Streams message ID of the rejected entry
-- ``event_id``:    parsed event_id when available (lateness / duplicate only)
+- ``event_id``:    parsed event_id when available (every reason but
+  ``schema_error``)
 """
 
 from __future__ import annotations
@@ -40,10 +46,14 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_DEFAULT_STREAM_KEY = "ato:login-events"
-_DEFAULT_GROUP = "ato-reasoner"
-_DEFAULT_CONSUMER = "consumer-0"
-_DEFAULT_LATENESS_SECONDS = 3_600  # 1 hour
+#: The login-event stream the scenario generator publishes to.
+DEFAULT_STREAM_KEY = "ato:login-events"
+#: The consumer group ATO reads the stream through.
+DEFAULT_GROUP = "ato-reasoner"
+#: This instance's name within the group (unique per running consumer).
+DEFAULT_CONSUMER = "consumer-0"
+#: Events older than this many seconds are dead-lettered (one hour).
+DEFAULT_LATENESS_SECONDS = 3_600
 
 
 class IngestionConsumer:
@@ -68,10 +78,10 @@ class IngestionConsumer:
         self,
         client: redis_lib.Redis,
         *,
-        stream_key: str = _DEFAULT_STREAM_KEY,
-        group: str = _DEFAULT_GROUP,
-        consumer: str = _DEFAULT_CONSUMER,
-        lateness_seconds: int = _DEFAULT_LATENESS_SECONDS,
+        stream_key: str = DEFAULT_STREAM_KEY,
+        group: str = DEFAULT_GROUP,
+        consumer: str = DEFAULT_CONSUMER,
+        lateness_seconds: int = DEFAULT_LATENESS_SECONDS,
         dedup_ttl_seconds: int = 86_400,
     ) -> None:
         """Initialize the consumer with a Redis client and configuration."""
@@ -115,7 +125,7 @@ class IngestionConsumer:
         try:
             event = LoginEvent.model_validate_json(raw_data)
         except (ValidationError, ValueError) as exc:
-            self._dead_letter(
+            self.dead_letter(
                 message_id,
                 raw_data,
                 reason="schema_error",
@@ -127,7 +137,7 @@ class IngestionConsumer:
         # 2. Bounded lateness
         age = datetime.now(UTC) - event.timestamp
         if age > self._lateness:
-            self._dead_letter(
+            self.dead_letter(
                 message_id,
                 raw_data,
                 reason="lateness",
@@ -148,7 +158,7 @@ class IngestionConsumer:
 
         # 3. Deduplication
         if not self._dedup.is_new(event.event_id):
-            self._dead_letter(
+            self.dead_letter(
                 message_id,
                 raw_data,
                 reason="duplicate",
@@ -204,36 +214,55 @@ class IngestionConsumer:
         batches = 0
 
         while max_batches is None or batches < max_batches:
-            results = self._client.xreadgroup(
-                self._group,
-                self._consumer,
-                {self._stream_key: ">"},
-                count=batch_size,
-                block=block_ms,
-            )
+            messages = self.read(batch_size=batch_size, block_ms=block_ms)
             batches += 1
-
-            if not results:
-                continue
-
-            for _stream, messages in results:  # type: ignore[union-attr]
-                for message_id, fields in messages:
-                    raw = fields.get("data", "")
-                    event = self.process_message(message_id, raw)
-                    if event is not None:
-                        handler(event)
-                        accepted += 1
+            for message_id, raw in messages:
+                event = self.process_message(message_id, raw)
+                if event is not None:
+                    handler(event)
+                    accepted += 1
 
         return accepted
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def read(
+        self, *, batch_size: int = 10, block_ms: int = 1_000, pending: bool = False
+    ) -> list[tuple[str, str]]:
+        """Read messages delivered to this consumer (one XREADGROUP).
 
-    def _ack(self, message_id: str) -> None:
-        self._client.xack(self._stream_key, self._group, message_id)
+        By default, reads new messages: reading delivers them to this
+        consumer, and each stays pending in the group until
+        ``process_message`` ACKs it. With ``pending``, re-reads this
+        consumer's own backlog instead: messages delivered to it earlier and
+        never ACKed (a run that stopped after reading them), oldest first,
+        without blocking. Nothing is validated here.
 
-    def _dead_letter(
+        Args:
+            batch_size: Maximum messages to read.
+            block_ms: Milliseconds to block waiting for new messages
+                (ignored with ``pending``).
+            pending: Re-read this consumer's unacknowledged messages.
+
+        Returns:
+            ``(message_id, data)`` per message, in stream order; empty when
+            nothing arrived within ``block_ms`` (or, with ``pending``, when
+            the backlog is empty). ``data`` is the entry's ``"data"`` field
+            (empty when the entry has none, or was deleted from the stream
+            while pending).
+        """
+        results = self._client.xreadgroup(
+            self._group,
+            self._consumer,
+            {self._stream_key: "0" if pending else ">"},
+            count=batch_size,
+            block=None if pending else block_ms,
+        )
+        return [
+            (message_id, (fields or {}).get("data", ""))
+            for _stream, messages in results or []  # type: ignore[union-attr]
+            for message_id, fields in messages
+        ]
+
+    def dead_letter(
         self,
         message_id: str,
         raw_data: str,
@@ -242,6 +271,19 @@ class IngestionConsumer:
         detail: str,
         event_id: str | None = None,
     ) -> None:
+        """Copy a message to the dead-letter stream with the reason it failed.
+
+        Does not ACK: ``process_message`` ACKs every message it checks, and
+        a caller that dead-letters an accepted event after a failed decision
+        does so after that ACK.
+
+        Args:
+            message_id: The message's Redis Streams ID (``original_id``).
+            raw_data: The message's original ``"data"`` payload.
+            reason: Why it failed (see the module docstring).
+            detail: Human-readable description of the failure.
+            event_id: The parsed event id, when there is one.
+        """
         entry: dict[str, str] = {
             "data": raw_data,
             "reason": reason,
@@ -258,3 +300,10 @@ class IngestionConsumer:
             original_id=message_id,
             event_id=event_id,
         )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ack(self, message_id: str) -> None:
+        self._client.xack(self._stream_key, self._group, message_id)
