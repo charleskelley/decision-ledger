@@ -140,6 +140,16 @@ decisioning production-safe:
   <img src="docs/assets/decision-ledger-overview.png" alt="Decision Pipeline Overview" width="850">
 </p>
 
+> **Note:** This overview predates DR-27 to DR-32 and draws the earlier,
+> conceptual flow. In the ledger as built, evidence retrieval runs inside the
+> RAG policy gate, a plugin; the ML "fast path" is a decision the reasoner
+> records under one of its registered bypass rules (DR-30); the LLM path is
+> that gate, which the ledger runs when the reasoner asks for a gate; the
+> human path is a held decision an operator resolves through the ledger's
+> resolution journal; and the ledger resolves each decision's subject before
+> any gate runs (DR-32). The [submission flow](docs/assets/diagrams/reasoner-handoff.svg)
+> and [the pipeline](docs/design/pipeline.md) show the current flow.
+
 The **framework** is `core/` (contracts), `app/` (the ledger runtime), and
 `eval/` (the evaluation harness); its only infrastructure is Postgres. Three
 roles work with it, and the framework imports none of them:
