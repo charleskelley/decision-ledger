@@ -160,10 +160,12 @@ class ResolverPluginError(Exception):
     ``decisionledger.identity_resolvers`` entry-point group, the entry point
     fails to load, the loaded object does not satisfy the resolver plugin
     protocol (or declares a malformed relationship type, or a name other
-    than its ``resolver_id``), or its ``build`` fails or returns something
-    that is not an ``IdentityResolver``. Raised at startup. A resolver that
-    misbehaves at decision time is not this error: the ledger records that
-    decision's subject unresolved, with the reason, and writes it.
+    than its ``resolver_id``), or its ``build`` returns something that is
+    not a synchronous ``IdentityResolver``. Raised at startup. An exception
+    ``build`` itself raises is not wrapped in this error: it propagates as
+    itself and stops startup too. A resolver that misbehaves at decision
+    time is not this error: the ledger records that decision's subject
+    unresolved, with the reason, and writes it.
 
     Args:
         resolver_id: The configured or published resolver id.
