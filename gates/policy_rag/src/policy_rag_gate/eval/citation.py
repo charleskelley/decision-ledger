@@ -41,11 +41,12 @@ if TYPE_CHECKING:
     from core.llm import LLMClient
 
 # ---------------------------------------------------------------------------
-# CI-gate thresholds (mirror core/eval/metrics.py:CitationMetrics docstring)
+# CI-gate thresholds (this harness owns them; core/eval/metrics.py defines the
+# metrics only)
 # ---------------------------------------------------------------------------
 
 THRESHOLD_RELEVANCE = 0.80
-THRESHOLD_ENTAILMENT = 0.70  # not in core docstring; defensible MVP default
+THRESHOLD_ENTAILMENT = 0.70  # defensible MVP default
 THRESHOLD_SUPERFICIAL_RATE_MAX = 0.05  # ≤ 5% may be superficial
 
 # Boundary at which a relevance score is "superficial" (judge mapped 1-5 → [0,1];

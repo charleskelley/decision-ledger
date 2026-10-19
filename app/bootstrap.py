@@ -90,12 +90,15 @@ def build_framework_services(
         releases the Postgres connection.
 
     Raises:
-        GatePluginError: A gate plugin is malformed or cannot be built, or
+        GatePluginError: A gate plugin is malformed, its ``build`` returns
+            something that does not satisfy ``Gate``, or
             ``DECISIONLEDGER_MANDATORY_GATES`` names a gate that is not
-            composed.
+            composed. An exception ``build`` raises propagates as itself.
         ResolverPluginError: ``DECISIONLEDGER_IDENTITY_RESOLVER`` names a
-            resolver that is not installed, or whose plugin is malformed or
-            cannot be built.
+            resolver that is not installed, whose plugin is malformed, or
+            whose ``build`` returns something other than a synchronous
+            ``IdentityResolver``. An exception ``build`` raises propagates
+            as itself.
         RegistrationError: The registration file cannot be loaded, registers
             a reasoner twice, or two registrations declare one native
             namespace differently.

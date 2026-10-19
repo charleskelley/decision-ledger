@@ -51,7 +51,7 @@ deployment would replace each with operational artifacts.
 
 | Layer | Module | Responsibility |
 |---|---|---|
-| Ingestion | `ato_reasoner/ingestion/` | Redis Streams consumer, lateness window, and SHA-256 dedup of the `event_id`; produces typed `LoginEvent`s and dead-letters the rest. |
+| Ingestion | `ato_reasoner/ingestion/` | Redis Streams consumer, lateness window, and SHA-256 dedup of the `event_id`; produces typed `LoginEvent`s and dead-letters the rest. `python -m ato_reasoner consume` decides each accepted login through the pipeline (`ingestion/stream.py`). |
 | Features | `ato_reasoner/feature_service.py` | Redis sliding-window velocity, novelty, and impossible-travel signals; produces `AtoFeatureVector`. |
 | Scorer | `ato_reasoner/scorer/` | XGBoost binary-logistic model with TreeSHAP attribution; produces `ScorerOutput` (risk score and top signals). |
 | Assembler | `ato_reasoner/assembler.py` | `build_submission`: event, features, and score into one `Submission` with its `ReasonerContext`, the policy gate's `GateContext`, the native subject, and the mode. |

@@ -22,7 +22,11 @@ The payloads under `examples/` are the example reasoner's
 | `resolution.json` | `POST /api/v1/decisions/{id}/resolutions` | An operator's resolution of a held decision |
 
 Each test sends a copy with a fresh `event_id` and subject (`entity_id`),
-so runs never collide.
+so runs never collide. For that reason the payloads name no native subject,
+although the example reasoner names `(example-widget, widget_id)` on every
+submission: a fresh `entity_id` would contradict that namespace's
+derivation (422 `NATIVE_SUBJECT_MISMATCH`). Drop `native_subject` when
+regenerating them from `python -m example_reasoner sample`.
 
 | Test file | What it checks |
 | --- | --- |

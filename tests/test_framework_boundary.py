@@ -69,9 +69,10 @@ Scans and build-metadata checks codify those rules:
   and implements no identity resolution itself. No framework file has a
   household concept (relationship types are a resolver's, declared when it
   is composed) or names the test-only stub resolver, and no member still
-  keeps a private subject namespace constant: a reasoner declares its
-  native namespaces in its registration, where the passthrough resolver
-  reads them.
+  keeps a private subject namespace constant (a former one by name, or any
+  module- or class-level ``UUID(...)`` binding in a reasoner member): a
+  reasoner declares its native namespaces in its registration, where the
+  passthrough resolver reads them.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -285,6 +286,12 @@ STUB_RESOLVER_TOKENS = re.compile(r"_?stub[-_ ]?resolver\w*", re.IGNORECASE)
 #: namespace the passthrough derives its ids under) in its registration, so
 #: the ledger can assign the subject itself; the constant moved there.
 FORMER_IDENTITY_TOKENS = re.compile(r"\b_ATO_ACCOUNT_NS\b")
+
+#: The constructor of a UUID value (``UUID(...)``, ``uuid.UUID(...)``, or an
+#: alias it is imported under). Bound to a module- or class-level name in a
+#: reasoner member, such a value is a private subject namespace; inside a
+#: ``NativeNamespace`` declaration it is an argument, not a binding.
+UUID_CONSTRUCTORS = frozenset({"UUID"})
 
 #: ``create extension`` in any form — the framework's DDL needs none.
 CREATE_EXTENSION = re.compile(r"\bcreate\s+extension\b", re.IGNORECASE)
@@ -863,18 +870,65 @@ def test_framework_names_no_test_resolver():
     assert not offenders, f"framework code names the stub resolver: {offenders}"
 
 
+def _module_level_uuid_constants(tree: ast.Module) -> list[str]:
+    """Names a module binds, at module or class level, to a ``UUID(...)`` call.
+
+    Function bodies are not scanned: parsing a UUID out of input there is
+    ordinary code, not a constant.
+    """
+    constructors = set(UUID_CONSTRUCTORS) | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "uuid"
+        for alias in node.names
+        if alias.name in UUID_CONSTRUCTORS and alias.asname
+    }
+    names: list[str] = []
+    scopes: list[list[ast.stmt]] = [tree.body]
+    while scopes:
+        for node in scopes.pop():
+            if isinstance(node, ast.ClassDef):
+                scopes.append(node.body)
+                continue
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if not isinstance(value, ast.Call):
+                continue
+            func = value.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if called in constructors:
+                names.extend(t.id for t in targets if isinstance(t, ast.Name))
+    return names
+
+
 def test_no_member_keeps_a_private_subject_namespace():
     """A reasoner's subject namespace lives in its registration (DR-32).
 
     The passthrough resolver derives a reasoner's subject ids from the
     native namespaces its registration declares; a namespace constant kept
     privately in a member's event module would be a second source the
-    ledger cannot see.
+    ledger cannot see. Besides the former constants by name, no reasoner
+    member binds a module- or class-level name to a ``UUID(...)`` call: the
+    UUID5 namespace a reasoner derives its subject ids under is an argument
+    of the ``NativeNamespace`` its registration declares, and its events
+    derive ids through that declaration (``entity_id_of``).
     """
     offenders: list[tuple[str, list[str]]] = []
     for path in _member_src_files():
         text = path.read_text(encoding="utf-8")
         hits = sorted({m.group(0) for m in FORMER_IDENTITY_TOKENS.finditer(text)})
+        if path.suffix == ".py" and path.is_relative_to(REASONERS_DIR):
+            hits.extend(_module_level_uuid_constants(ast.parse(text)))
         if hits:
             offenders.append((_rel(path), hits))
     assert not offenders, f"members keep a private subject namespace: {offenders}"

@@ -26,7 +26,10 @@ The seam is three types:
   (``GET /api/v1/identity/resolve``).
 
 A misconfigured deployment (an unknown resolver, a malformed plugin, a
-build that fails) raises ``ResolverPluginError`` at startup.
+``build()`` that returns something other than a synchronous
+``IdentityResolver``) raises ``ResolverPluginError`` at startup. An
+exception ``build()`` itself raises is not wrapped: it propagates as itself,
+and also stops startup.
 """
 
 from __future__ import annotations

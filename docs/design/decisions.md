@@ -123,7 +123,11 @@ implementation. Document Kafka/Kinesis as the production migration path.
 
 ## DR-2: pgvector over managed vector database
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: pgvector is the RAG policy gate's, not
+the framework's. The gate's DDL (`gates/policy_rag/src/policy_rag_gate/sql/`)
+creates the `vector` extension and the HNSW-indexed chunk table,
+`policy_rag.policy_chunks`, in the framework's database; the framework's own
+DDL creates no extension)
 **Category:** Data Storage & Retrieval
 
 ### Context
@@ -158,7 +162,11 @@ similarity search.
 
 ## DR-3: Hybrid retrieval (dense + sparse) over dense-only
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: hybrid retrieval runs inside the RAG
+policy gate, `gates/policy_rag/src/policy_rag_gate/retriever.py`, which records
+the path taken (`reranked` or `rrf_only`) as `retrieval_path` in its
+`evidence_snapshot`, inside the bundle's record of that gate rather than as a
+bundle field)
 **Category:** Data Storage & Retrieval
 
 ### Context
@@ -197,7 +205,12 @@ selection.
 
 ## DR-4: Hierarchical chunking over fixed-size for policy documents
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: the chunker is the RAG policy gate's
+corpus loader, `gates/policy_rag/src/policy_rag_gate/corpus_loader.py`, which
+writes the chunks to the gate's `policy_rag.policy_chunks` table and its
+`policy-chunks` index; `docs/design/gates/policy/policy-corpus.md` states the
+chunking rules. The loader splits at `##` and `###` headings only, and the
+parent-document retriever is not implemented)
 **Category:** Data Storage & Retrieval
 
 ### Context
@@ -237,7 +250,12 @@ full parent section is available for context injection.
 
 ## DR-5: Latency budget allocation across pipeline components
 
-**Status:** Proposed — to be updated with measured P50/P95 numbers
+**Status:** Proposed — to be updated with measured P50/P95 numbers (amended by
+DR-28 to DR-32: retrieval, reranking, and LLM inference are the RAG policy
+gate's, and every gate runs under the ledger's budget, 45 s by default
+(`app/submit.py`); the scorer-only path is a recorded decision (DR-30); the
+identity step has a 50 ms budget (DR-32); and a bundle's `latency_breakdown`
+holds only the ledger's steps, while a reasoner reports its own (DR-31))
 **Category:** Pipeline & System Design
 
 ### Context
@@ -273,7 +291,13 @@ LLM path; <30ms for the fast-scorer-only path.
 
 ## DR-6: Rule-based human review routing over confidence-threshold-only
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28 to DR-30: the review triggers are
+enforcement tiers in `app/enforcement/resolver.py`. Schema failure (Tier 1,
+which also holds a gate that failed closed), adversarial probe (2), low
+confidence (4), and jurisdiction conflict (5) judge each gate's output; novel
+entity (3), the registration's `novel_entity_feature`, is decision-level and
+holds only a gated decision's advisory side. DR-18 replaced the review packet
+with the bundle)
 **Category:** Pipeline & System Design
 
 ### Context
@@ -497,7 +521,12 @@ this stage; the data-pipeline depth is a follow-on portfolio piece.
 
 ## DR-11: Two-layer core/ structure — framework protocols and domain implementations
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-26, DR-28, and DR-31: reasoners and gates
+are workspace members outside the framework (`reasoners/`, `gates/`; see the
+DR-26 implementation note), the policy gate's types, `Citation` among them,
+live in `policy_rag_gate.models`, and the concrete wire `Submission`
+(`core/submission.py`), which carries the event as opaque `raw_event` JSON,
+replaced the `Observation` protocol)
 **Category:** Pipeline & System Design
 
 > **Implementation note:** When this decision was written, the domain layer was
@@ -666,7 +695,10 @@ conversion, preventing accidental key conflation across domains.
 
 ## DR-13: Dual-analyzer strategy for Elasticsearch policy-chunks index
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: the mapping is the RAG policy gate's,
+`gates/policy_rag/src/policy_rag_gate/es/policy-chunks.json`, and its
+retriever, `policy_rag_gate/retriever.py`, queries `text` and
+`text.keyword_search` with one `multi_match`)
 **Category:** Retrieval & Infrastructure
 
 ### Context
@@ -918,7 +950,12 @@ flows better than ELK for that diagram).
 
 ## DR-16: FastAPI entry point — summary DTO, sync handlers, and replay endpoint
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-23, which made the decide route async, and
+by DR-31: the decide route is the ledger's `POST /api/v1/decisions`
+(`app/api/decisions.py`), answering with a `DecisionReceipt`
+(`app/api/models.py`); the ledger mounts no reasoner router and builds no
+reasoner services, so ATO's missing-model check runs in ATO's own service
+(`ato_reasoner/plugin.py`))
 **Category:** Pipeline & System Design
 
 > **Implementation note (DR-26, 2026-10):** The decisions below still hold,
@@ -1023,7 +1060,10 @@ shutdown. This replaces the deprecated `@app.on_event("startup")` pattern.
 
 ## DR-17: Model artifact fingerprint over model registry integration
 
-**Status:** Accepted
+**Status:** Accepted (extended by DR-31: an LLM-agent reasoner records the
+SHA-256 of the exact prompt it ran in `model_artifact_sha256`, which this
+record leaves `None` for API-based models; see
+`core/observation/reasoner_context.py`)
 **Category:** Pipeline & System Design
 
 ### Context
@@ -1536,7 +1576,12 @@ for any artifact they want captured.
 
 ## DR-21: SOLID cleanup — package surface, ResolutionAttempt subclassing, RetrievedSnippet rename, EnforcementDecision relocation
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28 and DR-30: DR-28 moved
+`RetrievedSnippet` and the policy gate's types, `DocumentType` and
+`PolicyDocument` among them, to the RAG policy gate's `policy_rag_gate.models`
+(`gates/policy_rag/`), and DR-30 deleted `GateRoute` (`core/routes.py`). The
+`ResolutionAttempt` subclasses (`core/resolution/`) and `EnforcementDecision`
+(`core/enforcement.py`) stand)
 **Category:** Pipeline & System Design
 
 ### Context
@@ -1660,7 +1705,12 @@ A SOLID audit of `core/` after DR-20 surfaced four issues:
 
 ## DR-22: Eval harness — RAGAS in, openevals out, custom SDK-agnostic LLM-judge primitive
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-23: the `LLMClient` protocol in `core/llm/`
+replaced `JudgeClient`, and `OpenAILLMClient` replaced `OpenAIJudgeClient`;
+amended by DR-28: the RAGAS adapter, the judge and its prompts, and the
+faithfulness and citation dimensions moved to the RAG policy gate's
+`policy_rag_gate.eval` (`gates/policy_rag/`), where RAGAS is the member's
+`eval` extra)
 **Category:** Evaluation & Tooling
 
 ### Context
@@ -1774,7 +1824,11 @@ how heavy it is.
 
 ## DR-23: Unified `LLMClient` adapter — one provider boundary for gate and judge
 
-**Status:** Accepted (supersedes DR-22's `JudgeClient`)
+**Status:** Accepted (supersedes DR-22's `JudgeClient`; amended by DR-28: the
+`LLMClient` protocol stays in `core/llm/`, but the OpenAI and Anthropic
+adapters, the pricing table, and the judge moved with the RAG policy gate to
+`gates/policy_rag/` (`policy_rag_gate.llm`, `policy_rag_gate.eval`), and only
+that gate's `llm/` may import an LLM SDK)
 **Category:** Architecture / Provider Abstraction
 
 ### Context
@@ -1892,7 +1946,12 @@ this decision.
 
 ## DR-24: Framework owns audit storage; reasoner_id is a row-level filter, not a schema-level partition
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28: policy chunks moved to the RAG policy
+gate's own `policy_rag` schema, still filtered by `reasoner_id`, and the
+retriever, corpus loader, and Elasticsearch mapping moved to
+`gates/policy_rag/`; amended by DR-31: a bundle stores the reasoner's
+`Submission`, so replay needs no raw-event factory. The framework schema also
+holds DR-31's registration snapshots and DR-32's entity journal)
 **Category:** Data Storage & Retrieval
 
 > **Implementation note (DR-26, 2026-10):** The storage model below is
@@ -2130,7 +2189,13 @@ item.
 
 ## DR-26: Reasoner packaging and discovery
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-28 and DR-31: DR-28 moved the retrieval
+stack (chunk table, Elasticsearch, corpus loader), the prompt registry, and
+the policy gate with its eval to `gates/policy_rag/`; DR-31 reduced a plugin
+to its registration, `prompts_dir`, and `corpus_dir` (`app/plugin.py`): the
+reasoner runs itself and sends the `Submission` that `build_submission()`
+assembles (formerly `build_observation()`) through a `LedgerClient`
+(`app/client.py`))
 **Category:** Pipeline & System Design
 
 **Decision.** A reasoner is a uv workspace member under
@@ -3624,9 +3689,11 @@ thread busy while its decision proceeds unresolved.
   a declared namespace is that declaration's derivation; any other subject
   is the submission's own `entity_id` and `entity_type`. Either way the
   subject is `unresolved`, with the reason. Discovery loads only the
-  configured entry point; an unknown, malformed, or unbuildable resolver is
-  a `ResolverPluginError` at startup. `FrameworkServices.identity` holds the
-  step and closes the resolver on shutdown.
+  configured entry point; an unknown or malformed resolver, or one whose
+  `build()` returns something other than a synchronous `IdentityResolver`,
+  is a `ResolverPluginError` at startup, and an exception `build()` raises
+  propagates as itself and also stops startup. `FrameworkServices.identity`
+  holds the step and closes the resolver on shutdown.
 - **The bundle.** `DecisionBundle.identity` (`None` only on a bundle written
   before this phase) must name the native subject its submission named.
   `DecisionBundle.entity_id` / `entity_type` are the resolved subject, and
@@ -3715,4 +3782,9 @@ thread busy while its decision proceeds unresolved.
 - **The example reasoner is unchanged.** It names no native subject, so its
   decisions are recorded under its own ids by the passthrough; it can adopt
   the contract in the documentation pass. The documentation pass changed no
-  code, so adopting the contract remains a follow-up.
+  code, so adopting the contract remains a follow-up. *(Adopted in the
+  DR-32 follow-ups, 2026-10: the example declares `example-widget`, the
+  UUID5 namespace its widget ids always derived under, and names
+  `(example-widget, widget_id)` on every submission; its entity ids are
+  unchanged, and its `registration_version` moved from `da9c3f8102bb9532`
+  to `5ebae2ed3c2f3be1`.)*

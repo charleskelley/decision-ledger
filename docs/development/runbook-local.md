@@ -309,6 +309,24 @@ The stream key is `ato:login-events`. Each entry has a single `data` field conta
 
 The ingestion consumer reads from the Redis Stream, validates each event, enforces bounded lateness and deduplication, and delivers clean events to the next pipeline stage.
 
+### Decide the stream through the ledger
+
+`python -m ato_reasoner consume` reads the stream through the consumer and decides each accepted event with `run_ato_decision`, the pipeline ATO's service route runs. It submits to the ledger `ATO_LEDGER_URL` names (with `ATO_LEDGER_KEY`), or, with no URL, to a ledger composed in its own process (the compose stack must be up).
+
+```bash
+# Publish ten logins, then decide them (one JSON line per decision on stdout,
+# the run's counts on stderr)
+make scenario-account_takeover
+uv run python -m ato_reasoner consume --max-events 10
+
+# Or against the ledger service, until interrupted (Ctrl-C finishes the
+# messages already read; a second Ctrl-C stops at once)
+ATO_LEDGER_URL=http://localhost:8000 ATO_LEDGER_KEY="$ATO_KEY" \
+  uv run python -m ato_reasoner consume
+```
+
+A new consumer group starts at the beginning of the stream, so events left from earlier runs are read first (and dead-lettered as late once they are an hour old). A login the ledger refuses (a 422 or 413 about that submission) is dead-lettered as `ledger_refused` and the run goes on. Any other failure of a decision (a wrong or missing `ATO_LEDGER_KEY`, an unregistered reasoner, the ledger failing or unreachable) is dead-lettered as `pipeline_error` and stops the run with exit status 1; the rest of that batch stays pending in the group (`XPENDING`), and the next run with the same `--consumer` decides it first. If Redis itself is down, nothing can be dead-lettered: the run stops with exit status 1 and names the error. A second Ctrl-C abandons the login being decided: it was already acknowledged, so it is neither decided nor dead-lettered (its payload stays in the stream).
+
 ### Run the consumer interactively (Python REPL)
 
 ```bash
@@ -349,7 +367,7 @@ docker compose exec redis redis-cli XLEN ato:login-events:dlq
 docker compose exec redis redis-cli XRANGE ato:login-events:dlq - + COUNT 5
 ```
 
-Each DLQ entry has: `reason` (schema_error / lateness / duplicate), `detail`, `original_id`, and `event_id` (when available).
+Each DLQ entry has: `reason` (schema_error / lateness / duplicate from the consumer's checks; ledger_refused / pipeline_error for an accepted event whose decision failed under `consume`), `detail`, `original_id`, and `event_id` (when available).
 
 ### Test deduplication manually
 

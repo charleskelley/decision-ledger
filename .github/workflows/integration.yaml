@@ -5,8 +5,9 @@ name: Integration
 # (Elasticsearch and the vector extension for the policy_rag gate, Redis for
 # account_takeover). Trunk-based development: also runs on direct push to
 # main so solo trunk pushes are validated even without a PR cycle.
-# OpenAI/Anthropic spend stays bounded because the smoke suite hits the
-# fast-path scorer; only gate-routed events make LLM calls.
+# OpenAI spend stays bounded because most account_takeover scenarios are
+# recorded under its registered bypass rules (allow-band, block-band); only
+# gate-mode decisions call the policy_rag gate's LLM.
 # Target: under 5 minutes.
 
 on:
@@ -28,9 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # One job per (reasoner, gate) pair of workspace members (reasoners/<name>,
-    # gates/<name>). Framework integration tests run once per entry; fine
-    # while there is one of each.
+    # One job per (reasoner, gate) pair of workspace members that bring
+    # infrastructure (reasoners/<name>, gates/<name>); example and rules bring
+    # none and have no integration tests. Each entry runs the whole
+    # integration suite; fine while there is one entry.
     strategy:
       fail-fast: false
       matrix:
@@ -49,8 +51,8 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
-      # The pgvector image ships the extension the policy_rag gate's DDL
-      # creates in its own schema; the framework's DDL creates none.
+      # The pgvector image ships the vector extension the policy_rag gate's
+      # DDL creates; the framework's DDL creates none.
       postgres:
         image: pgvector/pgvector:pg16
         env:
@@ -134,5 +136,5 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
-      - name: 8-scenario smoke test
+      - name: Smoke tests
         run: make test-smoke

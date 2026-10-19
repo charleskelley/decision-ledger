@@ -103,8 +103,8 @@ def build_submission(
     Returns:
         A ``record`` submission (the band's action and a version-pinned
         citation) when a bypass rule holds; otherwise a ``gate`` submission
-        with no proposal. Both address the policy gate and carry the event
-        as ``raw_event``.
+        with no proposal. Both address the policy gate, name the widget as
+        their native subject, and carry the event as ``raw_event``.
     """
     context = reasoner_context(score)
     rule = matching_bypass_rule(registration, context)
@@ -114,6 +114,7 @@ def build_submission(
         timestamp=event.timestamp,
         entity_id=event.entity_id,
         entity_type=event.entity_type,
+        native_subject=event.native_subject,
         mode="record" if rule is not None else "gate",
         proposed_action=rule.action if rule is not None else None,
         bypass=(

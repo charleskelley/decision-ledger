@@ -43,13 +43,14 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # CI-gate thresholds.
 #
-# The aspirational threshold in core/eval/metrics.py:RetrievalMetrics docstring
-# is precision@k ≥ 0.80, but that's calibrated for dense ground-truth datasets
-# where most queries have ≥k relevant documents. Our golden set has 1-2
-# relevant docs per query (real-world policy retrieval is sparse), which caps
-# precision@5 at 0.20-0.40 even with perfect ranking. We set the gate to 0.40
-# here — that's realistic for sparse relevance and still catches real
-# regressions (a working retriever lands ≥2 relevant in top-5 on average).
+# The aspirational precision@k threshold is 0.80, but that's calibrated for
+# dense ground-truth datasets where most queries have ≥k relevant documents.
+# Our golden set has 1-2 relevant docs per query (real-world policy retrieval
+# is sparse), which would cap document-level precision@5 at 0.20-0.40; this
+# metric counts every retrieved chunk of a relevant document, so the committed
+# baselines score higher (0.63-0.67). We set the gate to 0.40 here — that's
+# realistic for sparse relevance and still catches real regressions (a
+# working retriever lands ≥2 relevant in top-5 on average).
 #
 # Recall and MRR remain the primary signal; precision is informational at this
 # threshold. A future, denser golden set could raise this back toward 0.80.

@@ -37,6 +37,10 @@ registrations:
   recordable_actions:
   - ALLOW
   - BLOCK
+  native_namespaces:
+  - native_namespace: example-widget
+    namespace_uuid: 8b4f2a6e-1c3d-5e7f-9a0b-2c4d6e8f0a1b
+    entity_type: widget
   novel_entity_feature: thin_history
   jurisdiction_conflict_groups:
   - - REGION_A

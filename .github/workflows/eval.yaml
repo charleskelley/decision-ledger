@@ -1,10 +1,10 @@
 name: Eval
 
 # Every eval against the live stack: the framework harness for each matrix
-# reasoner (consistency, robustness) and each matrix gate's own harness (the
-# policy_rag gate: retrieval, faithfulness, citation). Manual trigger only —
-# cost-bounded by definition; re-enable a cron once the harness is stable and
-# budget is approved.
+# reasoner (consistency, robustness, shadow) and each matrix gate's own
+# harness (the policy_rag gate: retrieval, faithfulness, citation). Manual
+# trigger only — cost-bounded by definition; re-enable a cron once the
+# harness is stable and budget is approved.
 #
 # Uses an `eval` GitHub Actions environment so secrets and budget can be
 # scoped separately from CI/integration. Configure required reviewers on
@@ -51,8 +51,8 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
-      # The pgvector image ships the extension the policy_rag gate's DDL
-      # creates in its own schema.
+      # The pgvector image ships the vector extension the policy_rag gate's
+      # DDL creates.
       postgres:
         image: pgvector/pgvector:pg16
         env:

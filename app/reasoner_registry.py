@@ -43,9 +43,10 @@ class RegisteredReasoner:
     Args:
         registration: The reasoner's registration.
         version: Its ``registration_version`` (content address).
-        source: Where it came from: ``plugin:<entry point>`` for an
-            installed reasoner plugin, ``file:<path>`` for the deployment's
-            registration file, or ``inline``.
+        source: Where it came from: ``plugin:<module>`` for an installed
+            reasoner plugin (the module that defines the plugin object's
+            class), ``file:<path>`` for the deployment's registration file,
+            or ``inline``.
     """
 
     registration: ReasonerRegistration
