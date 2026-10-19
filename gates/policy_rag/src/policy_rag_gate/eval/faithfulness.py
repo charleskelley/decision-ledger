@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from core.llm import LLMClient
 
 # ---------------------------------------------------------------------------
-# CI-gate thresholds (mirror core/eval/metrics.py:FaithfulnessMetrics docstring)
+# CI-gate thresholds (this harness owns them; core/eval/metrics.py defines the
+# metrics only)
 #
 # Aspirational target for ragas_faithfulness is 0.85, but RAGAS' atomic-claim
 # decomposition is genuinely strict against hand-crafted seed fixtures: a
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 THRESHOLD_RAGAS = 0.65
-THRESHOLD_JUDGE = 0.80  # not in core docstring; defensible MVP default
+THRESHOLD_JUDGE = 0.80  # defensible MVP default
 THRESHOLD_OVERLAP = 0.40  # informational floor on text overlap
 THRESHOLD_HALLUCINATION_MAX = 0.0  # zero tolerance
 

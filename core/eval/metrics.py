@@ -9,33 +9,41 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class EvalDimension(StrEnum):
-    """The evaluation dimensions run against every release candidate.
+    """The evaluation dimensions an ``EvalReport`` can carry.
 
-    Each dimension maps to a metric container with defined CI thresholds.
-    A PR that causes any dimension to fall below its threshold is blocked
-    from merge.
+    Each dimension has one metric container below. The framework's harness
+    drives a reasoner's own pipeline over the datasets the reasoner ships
+    (CONSISTENCY, ROBUSTNESS), then shadows the decisions recorded in that
+    run (SHADOW). A gate's own harness runs the dimensions that measure that
+    gate (RETRIEVAL, FAITHFULNESS, CITATION) over the datasets each reasoner
+    ships for it. The harness that runs a dimension owns its thresholds, and
+    the dimension fails when a metric misses one or its dataset is missing.
+    Evaluation runs on demand; no merge check runs it.
 
     Attributes:
-        RETRIEVAL: Quality of the policy RAG retriever. Measures whether
-            the correct policy chunks are retrieved for a given decision
-            context (context precision@k, recall@k, MRR).
-        FAITHFULNESS: Degree to which the LLM policy gate's reasoning is
-            grounded in the retrieved documents. Penalizes hallucination
-            and unsupported claims (claim-level faithfulness,
-            hallucination rate).
+        RETRIEVAL: Quality of a retrieving gate's retriever. Measures whether
+            the documents annotated relevant to each golden query come back,
+            the expected one at its current version, within the query's
+            jurisdiction filter (context precision@k, recall@k, MRR).
+        FAITHFULNESS: Degree to which a gate's generated rationale is
+            grounded in the evidence it retrieved. Penalizes hallucination
+            and unsupported claims (claim-level faithfulness, judge
+            grounding, hallucination rate).
         CONSISTENCY: Stability of pipeline outputs across equivalent event
             orderings. Tests that the same scenario produces the same action
             regardless of event sequence variation (action stability rate).
-        CITATION: Precision and relevance of policy citations produced by
-            the policy gate, evaluated by an LLM judge on a 1-5 scale
+        CITATION: Precision and relevance of the citations a gate produces,
+            evaluated by LLM judges: support on a 1-5 scale, and entailment
             (citation relevance score, superficial citation rate).
-        ROBUSTNESS: Resistance to adversarial inputs — prompt injection
-            attempts, novel attack patterns, and schema violations
+        ROBUSTNESS: Resistance to adversarial inputs and gate failures:
+            prompt injection attempts, gate outputs that fail schema
+            validation, novel attack patterns, and forced fallbacks
             (injection resistance rate, novel pattern accuracy).
         SHADOW: How recorded decisions compare with what the ledger would
             have decided had the reasoner asked for a gate: a sample of
             recorded bundles is re-decided offline with the reasoner's
             advisory gates (agreement, escalation, relaxation rates).
+            Report-only: it applies no threshold.
     """
 
     RETRIEVAL = "retrieval"
@@ -49,23 +57,27 @@ class EvalDimension(StrEnum):
 class RetrievalMetrics(BaseModel):
     """Dimension 01 — Retrieval Quality metric container.
 
-    Evaluated against a golden query set of 30 queries, each with annotated
-    relevant policy chunks. Covers direct regulatory queries, version-ambiguous
-    queries, jurisdiction-scoped queries, and risk-tier-specific queries.
-
-    CI thresholds: context_precision_at_k ≥ 0.80, context_recall_at_k ≥ 0.75,
-    mean_reciprocal_rank ≥ 0.70, version_resolution_accuracy = 1.0 (zero
-    tolerance), jurisdiction_filter_accuracy = 1.0 (zero tolerance).
+    Computed over a reasoner's golden queries, each annotated with its
+    relevant documents, the document and version expected near the top, and
+    any jurisdiction filter. The thresholds belong to the harness of the
+    gate that runs this dimension.
 
     Attributes:
-        k: Retrieval depth at which metrics are computed.
-        context_precision_at_k: Fraction of retrieved chunks that are relevant.
-        context_recall_at_k: Fraction of relevant chunks that were retrieved.
-        mean_reciprocal_rank: How highly the first relevant result is ranked.
-        version_resolution_accuracy: Rate at which the latest policy version is
-            preferred over superseded versions.
-        jurisdiction_filter_accuracy: Rate at which jurisdiction-scoped queries
-            return correctly scoped results.
+        k: Retrieval depth: results requested per query, and the cutoff for
+            precision and recall.
+        context_precision_at_k: Mean over queries of the fraction of the top
+            k results whose document is annotated relevant (missing results
+            count against it).
+        context_recall_at_k: Mean over queries of the fraction of annotated
+            relevant documents found in the top k.
+        mean_reciprocal_rank: How highly the first relevant result is ranked
+            (mean over queries of 1 / its rank; 0 when none is retrieved).
+        version_resolution_accuracy: Fraction of queries whose expected
+            document appears, at its expected version, among the top
+            results. Catches a superseded version displacing the current one.
+        jurisdiction_filter_accuracy: Fraction of queries whose results all
+            lie within the query's jurisdiction filter (a query without one
+            counts as correct).
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -81,21 +93,24 @@ class RetrievalMetrics(BaseModel):
 class FaithfulnessMetrics(BaseModel):
     """Dimension 02 — Generation Faithfulness metric container.
 
-    Measures whether the LLM's rationale reflects only retrieved policy content.
-    The claim-level faithfulness score decomposes the rationale into atomic
-    claims and checks each against the retrieved context (the gate's eval
-    names its scorer).
-
-    CI thresholds: ragas_faithfulness ≥ 0.85, hallucination_rate = 0.0 on the
-    golden scenario set (any hallucination is a blocking failure).
+    Measures whether a gate's rationale reflects only its retrieved evidence.
+    Computed over a reasoner's golden cases, each a rationale with the
+    contexts it had and the snippets it cited. The claim-level faithfulness
+    score decomposes the rationale into atomic claims and checks each against
+    the contexts (the gate's eval names its scorer). The thresholds belong to
+    the harness of the gate that runs this dimension.
 
     Attributes:
-        ragas_faithfulness: Claim-level grounding score against retrieved context.
-        llm_judge_grounding: Secondary LLM judge score for rationale grounding.
-        citation_rationale_overlap: Text overlap between rationale claims and
-            cited snippets.
-        hallucination_rate: Fraction of outputs containing any claim not
-            traceable to retrieved content. Zero tolerance on golden set.
+        ragas_faithfulness: Claim-level grounding score against retrieved
+            context, averaged over cases. The key keeps its original name so
+            committed reports still load.
+        llm_judge_grounding: Secondary LLM judge score for rationale
+            grounding, averaged over cases.
+        citation_rationale_overlap: Word-level Jaccard similarity between the
+            rationale and the text of the snippets it cites, averaged over
+            cases.
+        hallucination_rate: Fraction of cases whose judge grounding score
+            falls below the harness's hallucination boundary.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -109,23 +124,27 @@ class FaithfulnessMetrics(BaseModel):
 class ConsistencyMetrics(BaseModel):
     """Dimension 03 — Decision Consistency metric container.
 
-    Tests 8 named scenarios x 3 event orderings = 24 consistency tests. The
-    same risk signals must produce the same final action regardless of the
-    order in which events are presented.
+    Each scenario in a reasoner's dataset presents the same events in at
+    least two orderings; the last event of each ordering is the trigger. The
+    same events must produce the same final action for the trigger regardless
+    of the order in which they are presented.
 
-    CI thresholds: action_stability_rate = 1.0 on all 24 tests (any instability
-    is a blocking failure). Rationale and confidence variance are tracked but
-    not gated.
+    The framework's harness requires action_stability_rate = 1.0 (zero
+    tolerance: one unstable scenario fails the dimension). Confidence
+    variance and rationale similarity are recorded but not gated.
 
     Attributes:
-        num_scenarios: Number of named scenarios evaluated.
-        num_orderings: Number of event orderings per scenario.
-        action_stability_rate: Fraction of scenario x ordering combinations where
-            the final action is consistent across all orderings.
-        confidence_variance: Variance in reported confidence across orderings.
-            Informational — not a CI gate.
-        rationale_semantic_similarity: Embedding similarity between rationale
-            texts across orderings. Informational — not a CI gate.
+        num_scenarios: Number of scenarios evaluated.
+        num_orderings: Number of event orderings per scenario (the fewest,
+            when scenarios differ).
+        action_stability_rate: Fraction of scenarios whose orderings all
+            reached the same final action.
+        confidence_variance: Mean over scenarios of the variance, across
+            orderings, of the gate confidence each run reported (runs without
+            one are left out). Informational, never gated.
+        rationale_semantic_similarity: Reserved for the similarity of
+            rationale texts across orderings. Not computed yet: the
+            framework's harness reports 1.0. Informational, never gated.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -140,12 +159,11 @@ class ConsistencyMetrics(BaseModel):
 class CitationMetrics(BaseModel):
     """Dimension 04 — Citation Accuracy metric container.
 
-    Evaluates whether cited policy snippets actually support the specific claims
-    they are attached to. Evaluated on a golden output set from the 8 canonical
-    scenarios.
-
-    CI thresholds: citation_relevance_score (mean) ≥ 0.80,
-    superficial_citation_rate ≤ 0.05.
+    Evaluates whether cited snippets actually support the specific claims
+    they are attached to. Computed over a reasoner's golden (claim, cited
+    snippet) cases, each scored by two LLM judges: one rates support on a
+    1-5 scale, the other answers whether the snippet entails the claim. The
+    thresholds belong to the harness of the gate that runs this dimension.
 
     Attributes:
         citation_relevance_score: LLM-as-judge mean score for how well each
@@ -166,23 +184,28 @@ class CitationMetrics(BaseModel):
 class RobustnessMetrics(BaseModel):
     """Dimension 05 — Adversarial Robustness metric container.
 
-    Tests the system against injection attempts, schema violations, and event
-    patterns designed to confuse the scoring and reasoning layers.
+    Tests the decision pipeline against injection attempts, gate outputs
+    that fail schema validation, novel adversarial patterns, and forced gate
+    failures. Each sub-check runs its own cases from the reasoner's dataset;
+    a sub-check with no cases scores 1.0.
 
-    CI thresholds: injection_resistance_rate = 1.0 (zero tolerance),
-    schema_violation_handling = 1.0 (zero tolerance),
-    novel_pattern_action_accuracy ≥ 0.90, fallback_behavior_correctness = 1.0
-    (zero tolerance).
+    The framework's harness requires injection_resistance_rate = 1.0,
+    schema_violation_handling = 1.0, and fallback_behavior_correctness = 1.0
+    (zero tolerance each), and novel_pattern_action_accuracy ≥ 0.90.
 
     Attributes:
         injection_resistance_rate: Fraction of injection attempts that do not
-            influence the final action.
-        schema_violation_handling: Fraction of malformed events correctly routed
-            to HOLD.
+            influence the final action (the injected event and its clean twin
+            reach the same action).
+        schema_violation_handling: Fraction of cases where a gate output
+            forced to carry no verdict ends in the expected action (HOLD,
+            through the schema-failure tier, unless the case says otherwise).
         novel_pattern_action_accuracy: Fraction of novel adversarial patterns
-            routed to the correct conservative action.
-        fallback_behavior_correctness: Fraction of error scenarios that correctly
-            activate the fallback path.
+            routed to a conservative action (HOLD or BLOCK).
+        fallback_behavior_correctness: Fraction of error scenarios that
+            correctly activate the fallback path: a forced failure (a gate's
+            model or retrieval call raising, for example) ends in the expected
+            action, HOLD unless the case says otherwise.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -236,12 +259,17 @@ class DimensionResult(BaseModel):
 
     Attributes:
         dimension: Which evaluation dimension this result covers.
-        passed: True if all CI gate thresholds for this dimension were met.
-        metrics: Raw metric values keyed by metric name.
-        threshold_violations: Human-readable descriptions of any metrics that
-            failed their CI gate threshold. Empty list when ``passed`` is True.
+        passed: True if every threshold the harness applies to this
+            dimension was met. A dimension skipped for a missing dataset
+            fails; a report-only dimension passes whenever it runs.
+        metrics: Metric values keyed by metric name.
+        threshold_violations: Human-readable descriptions of each threshold
+            missed, or of why the dimension was skipped. Empty list when
+            ``passed`` is True.
         evaluated_at: When this dimension run completed (UTC).
-        num_samples: Number of test cases evaluated.
+        num_samples: Number of test cases evaluated, in the dimension's own
+            unit (golden queries or cases, scenario orderings run, robustness
+            cases, or recorded decisions compared); 0 when skipped.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -257,21 +285,26 @@ class DimensionResult(BaseModel):
 class EvalReport(BaseModel):
     """Aggregated evaluation report across the dimensions that ran.
 
-    Produced by ``make eval``. A report with ``overall_passed = False`` blocks
-    the CI merge gate. Metric containers for each dimension are populated only
-    when that dimension was included in the run.
+    Each harness writes one report per reasoner it evaluates: the framework's
+    harness fills ``consistency``, ``robustness``, and ``shadow``, and a
+    gate's own harness fills the dimensions that measure that gate. Each
+    harness's command exits non-zero when a report it wrote did not pass. A
+    dimension's metric container is populated only when that dimension ran
+    and produced metrics: it is None when another harness owns the dimension
+    or when the dimension was skipped.
 
     Attributes:
         run_id: UUID identifying this evaluation run.
         created_at: When the report was generated (UTC).
-        overall_passed: True only when every included dimension passed its
-            CI gate thresholds.
-        dimensions: Per-dimension result records, in run order.
-        retrieval: Dimension 01 metrics. None if dimension was skipped.
-        faithfulness: Dimension 02 metrics. None if dimension was skipped.
-        consistency: Dimension 03 metrics. None if dimension was skipped.
-        citation: Dimension 04 metrics. None if dimension was skipped.
-        robustness: Dimension 05 metrics. None if dimension was skipped.
+        overall_passed: True only when the report holds at least one
+            dimension and every one passed; a skipped dimension fails.
+        dimensions: Per-dimension result records, in the order the harness
+            listed them, with dimensions that run after the others last.
+        retrieval: Dimension 01 metrics. None if the dimension did not run.
+        faithfulness: Dimension 02 metrics. None if the dimension did not run.
+        consistency: Dimension 03 metrics. None if the dimension did not run.
+        citation: Dimension 04 metrics. None if the dimension did not run.
+        robustness: Dimension 05 metrics. None if the dimension did not run.
         shadow: Shadow evaluation metrics. None if the dimension did not run
             (reports written before it existed have none).
     """
