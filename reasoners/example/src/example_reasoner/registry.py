@@ -9,6 +9,11 @@
   ``HIGH_SCORE_THRESHOLD`` → record BLOCK). Everything between asks for the
   gate.
 - **Recordable actions**: ALLOW and BLOCK.
+- **Native namespace** (DR-32): the example names the subject it scores, a
+  widget, as ``(example-widget, widget_id)``. The declaration carries the
+  UUID5 namespace the example's widget ids have always derived under, so
+  the ledger's passthrough resolver assigns exactly the ``entity_id`` (and
+  the ``entity_type`` ``widget``) the example's decisions always had.
 - **Enforcement profile**: Tier 3 fires on ``thin_history`` (a widget with
   few prior inspections, on gated decisions), and Tier 5 treats REGION_A
   and REGION_B policy evidence in one gate output as a jurisdiction
@@ -17,14 +22,27 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from core.actions import DecisionAction
 from core.gate import Compare
+from core.identity import NativeNamespace
 from core.observation import BypassRule, GateBinding, ReasonerRegistration
 
 #: Below this ``widget_score`` the example records ALLOW.
 LOW_SCORE_THRESHOLD = 0.2
 #: Above this ``widget_score`` the example records BLOCK.
 HIGH_SCORE_THRESHOLD = 0.9
+
+#: The native namespace of the example's subjects: a widget, keyed by
+#: ``widget_id``. Its UUID5 namespace is the one the example's widget ids
+#: have always derived under (``WidgetEvent.entity_id``), declared where the
+#: ledger can read it.
+EXAMPLE_WIDGET_NAMESPACE = NativeNamespace(
+    native_namespace="example-widget",
+    namespace_uuid=UUID("8b4f2a6e-1c3d-5e7f-9a0b-2c4d6e8f0a1b"),
+    entity_type="widget",
+)
 
 LOW_SCORE_RULE = BypassRule(
     rule_id="low-score",
@@ -54,6 +72,7 @@ EXAMPLE_REGISTRATION = ReasonerRegistration(
     gates=(GateBinding(gate_id="policy"),),
     bypass_rules=(LOW_SCORE_RULE, HIGH_SCORE_RULE),
     recordable_actions=frozenset({DecisionAction.ALLOW, DecisionAction.BLOCK}),
+    native_namespaces=(EXAMPLE_WIDGET_NAMESPACE,),
     novel_entity_feature="thin_history",
     jurisdiction_conflict_groups=(frozenset({"REGION_A"}), frozenset({"REGION_B"})),
 )

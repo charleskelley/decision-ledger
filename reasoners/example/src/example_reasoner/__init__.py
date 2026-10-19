@@ -7,11 +7,13 @@ by a transparent heuristic — so nothing here can be mistaken for production
 behavior, and every part of the contract is short enough to read:
 
 Submodules:
-    events:    ``WidgetEvent`` — the reasoner's own event; its ``entity_id`` is
-               a UUID5 of ``widget_id``.
+    events:    ``WidgetEvent`` — the reasoner's own event; it names the widget
+               as its native subject, ``(example-widget, widget_id)``, and
+               derives ``entity_id`` under that declared namespace.
     scorer:    ``score_widget`` — a pure, documented heuristic (no model file).
     registry:  ``EXAMPLE_REGISTRATION`` — one advisory gate (the RAG policy
-               gate) and two bypass rules (``low-score``, ``high-score``).
+               gate), two bypass rules (``low-score``, ``high-score``), and
+               the widget's native namespace.
     assembler: ``build_submission`` — records a widget under a bypass rule,
                or asks the ledger to gate it, addressing the policy gate.
     pipeline:  ``decide_widget`` — score, assemble, submit through a

@@ -14,10 +14,11 @@ three-document policy corpus, an eval adapter with its datasets, and a CLI.
 
 It reaches the framework only through its `PLUGIN` (entry point group
 `decisionledger.reasoners`), its eval `ADAPTER`
-(`decisionledger.eval_adapters`), and the `Submission`s it sends. It names no
-native subject, so the passthrough records each decision under the
-`entity_id` it sends. `tests/_stub_reasoner` stays the framework's minimal
-test double; this package is the documentation.
+(`decisionledger.eval_adapters`), and the `Submission`s it sends. It names each
+widget as its native subject, `(example-widget, widget_id)`, in the
+namespace its registration declares, so the passthrough derives the same
+`entity_id` the example sends. `tests/_stub_reasoner` stays the framework's
+minimal test double; this package is the documentation.
 
 ::: example_reasoner
     options:

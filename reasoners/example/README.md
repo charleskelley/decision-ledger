@@ -13,9 +13,9 @@ every part of the reasoner contract fits on a screen.
 
 | Module | What it shows |
 | --- | --- |
-| `events.py` | The reasoner's own event (`WidgetEvent`); `entity_id` is a UUID5 of `widget_id`, `entity_type` is `widget`. |
+| `events.py` | The reasoner's own event (`WidgetEvent`); it names the widget as its native subject, `(example-widget, widget_id)`, and derives `entity_id` (a UUID5 of `widget_id`, type `widget`) under that declared namespace. |
 | `scorer.py` | A pure scorer: `widget_score = logistic(-3 + 4·wobble + 0.5·misalignment_mm)` and the complete feature snapshot. |
-| `registry.py` | The registration: the RAG policy gate (advisory), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, and the enforcement profile (Tier 3 on `thin_history`; Tier 5 on REGION_A vs. REGION_B evidence). |
+| `registry.py` | The registration: the RAG policy gate (advisory), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, the `example-widget` native namespace, and the enforcement profile (Tier 3 on `thin_history`; Tier 5 on REGION_A vs. REGION_B evidence). |
 | `assembler.py` | The handoff: records a widget under the bypass rule that holds, or asks the ledger to gate it, addressing the policy gate on every submission. |
 | `pipeline.py` | `decide_widget(event, client=...)`: score, assemble, submit through a `LedgerClient`. |
 | `plugin.py` | What a ledger deployment discovers: the registration, `prompts/`, and `corpus/`. |
@@ -59,13 +59,17 @@ gate, which needs its corpus indexed (`make prepare-example`).
 
 ## The subject
 
-The example names no native subject (DR-32) and declares no native
-namespace, so no resolver can match its subjects: the ledger records each
-decision under the `entity_id` and `entity_type` the submission sends (the widget's
-UUID5, `widget`), unresolved, with the reason. Every inspection of one widget
-is therefore on one timeline (`GET /api/v1/entities/{entity_id}/decisions`).
-The ATO reasoner shows the other path: a native subject in a declared
-namespace.
+The example names the widget it scores as its native subject (DR-32),
+`(example-widget, widget_id)`, and its registration declares that namespace
+(`EXAMPLE_WIDGET_NAMESPACE`: subject type `widget`, and the UUID5 namespace
+the example's widget ids have always derived under). Intake refuses a
+submission whose `entity_id` is not that declaration's derivation of its
+`widget_id` (422 `NATIVE_SUBJECT_MISMATCH`). With no identity resolver
+active, the ledger records each decision under the widget's UUID5 and type
+`widget`, unresolved, with the reason; a deployment's resolver can map the
+widget to the enterprise subject it belongs to. Every inspection of one
+widget is on one timeline (`GET /api/v1/entities/{entity_id}/decisions`).
+The ATO reasoner names its accounts the same way.
 
 ## Command line
 

@@ -156,8 +156,12 @@ resolver installed, the passthrough derives exactly the `entity_id` and
 `ato_reasoner/registry.py` (`ATO_ACCOUNT_NAMESPACE`); the framework knows
 none of them.
 
-The example reasoner (`reasoners/example`) names no native subject, so the
-passthrough records its decisions under the `entity_id` it sends.
+The example reasoner (`reasoners/example`) does the same for widgets: its
+registration declares `example-widget` (subject type `widget`, the UUID5
+namespace its widget ids have always derived under; `EXAMPLE_WIDGET_NAMESPACE`
+in `example_reasoner/registry.py`), and every example submission names
+`(example-widget, widget_id)` as its native subject, so the passthrough
+derives the `entity_id` its decisions always had.
 
 ## Registration and intake
 
