@@ -15,7 +15,8 @@ the ledger through a ``LedgerClient``:
 Both return the same wire models (``app.api.models``) and raise the same
 ``core.exceptions.LedgerError`` (``status`` and stable ``code``), so code
 written against one runs against the other. ``submit`` returns the
-decision's receipt; ``get_bundle`` reads the full ``DecisionBundle``.
+decision's receipt; ``get_bundle`` reads the full ``DecisionBundle``;
+``register`` writes a reasoner's registration (an operator act, DR-33).
 
 The methods are coroutines; close a client with ``aclose()`` (or use it as
 an async context manager). ``HttpClient`` does not retry: a decision write
@@ -50,11 +51,12 @@ from app.api.models import (
     ResolutionReceipt,
     ResolutionRequest,
 )
-from app.api.registrations import get_reasoner, list_reasoners
+from app.api.registrations import get_reasoner, list_reasoners, register_reasoner
 from app.auth import KEY_HEADER, TRUSTED, Principal
 from core.bundle import DecisionBundle
 from core.exceptions import LedgerError
 from core.identity import ResolvedIdentity
+from core.observation import canonical_registration
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
 
     from app.plugin import FrameworkServices
     from app.settings import FrameworkSettings
+    from core.observation import ReasonerRegistration
     from core.submission import Submission
 
 #: Default request timeout of ``HttpClient``, in seconds. A gated decision
@@ -134,6 +137,12 @@ class LedgerClient(Protocol):
 
     async def reasoner(self, reasoner_id: str) -> RegisteredReasonerView:
         """One registration, as served now."""
+        ...
+
+    async def register(
+        self, registration: ReasonerRegistration
+    ) -> RegisteredReasonerView:
+        """Register a reasoner, or replace its API registration (operator)."""
         ...
 
     async def gates(self) -> GateList:
@@ -319,6 +328,23 @@ class LocalClient:
             reasoner_id, principal=self._principal, framework=self._framework
         )
 
+    async def register(
+        self, registration: ReasonerRegistration
+    ) -> RegisteredReasonerView:
+        """Register a reasoner, or replace its API registration (DR-33).
+
+        Raises:
+            LedgerError: As ``PUT /api/v1/reasoners/{reasoner_id}`` would
+                answer.
+        """
+        view, _ = register_reasoner(
+            registration.reasoner_id,
+            _registration_body(registration),
+            principal=self._principal,
+            framework=self._framework,
+        )
+        return view
+
     async def gates(self) -> GateList:
         """Every gate the ledger composes."""
         return list_gates(principal=self._principal, framework=self._framework)
@@ -351,7 +377,7 @@ class HttpClient:
             operator-only client), sent as ``X-DecisionLedger-Key``.
             Surrounding whitespace is dropped, as the ledger drops it.
         operator_key: The operator key, sent instead of ``api_key`` on
-            resolutions when given.
+            resolutions and registrations when given.
         timeout: Request timeout in seconds (every call but a batch).
         batch_timeout: Read timeout of a batch, in seconds; ``None`` (the
             default) waits as long as the ledger works — a batch decides
@@ -521,6 +547,24 @@ class HttpClient:
         response = await self._request("GET", f"/api/v1/reasoners/{reasoner_id}")
         return RegisteredReasonerView.model_validate_json(response.content)
 
+    async def register(
+        self, registration: ReasonerRegistration
+    ) -> RegisteredReasonerView:
+        """Register a reasoner, or replace its API registration (operator key).
+
+        Raises:
+            LedgerError: The ledger's problem response (``201`` and ``200``
+                both return the registration as served now).
+        """
+        response = await self._request(
+            "PUT",
+            f"/api/v1/reasoners/{registration.reasoner_id}",
+            key=self._operator_key,
+            content=_registration_body(registration),
+            content_type="application/json",
+        )
+        return RegisteredReasonerView.model_validate_json(response.content)
+
     async def gates(self) -> GateList:
         """Every gate the ledger composes."""
         response = await self._request("GET", "/api/v1/gates")
@@ -542,6 +586,11 @@ class HttpClient:
     ) -> None:
         """Close the client."""
         await self.aclose()
+
+
+def _registration_body(registration: ReasonerRegistration) -> str:
+    """A registration as the body of a write: its canonical JSON form."""
+    return json.dumps(canonical_registration(registration))
 
 
 def _header_key(key: str | None, name: str) -> str | None:
