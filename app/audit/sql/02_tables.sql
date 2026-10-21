@@ -5,9 +5,10 @@
 -- All tables live in the framework-owned `decisionledger` schema. Reasoners
 -- are tenants distinguished by the `reasoner_id` column on row-level. These
 -- are the audit ledger's tables only: decision bundles, replay logs,
--- resolution attempts, the reasoner registration snapshots bundles cite, and
--- the identity journal and its membership projection (DR-32). Gates keep
--- whatever they store in their own schemas, created by their own DDL.
+-- resolution attempts, the reasoner registration snapshots bundles cite, the
+-- registrations written over the API (DR-33), and the identity journal and
+-- its membership projection (DR-32). Gates keep whatever they store in their
+-- own schemas, created by their own DDL.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -170,6 +171,36 @@ create table if not exists decisionledger.reasoner_registrations (
     registration jsonb not null,
     first_registered_at timestamptz not null default now(),
     primary key (reasoner_id, registration_version)
+);
+
+-- ---------------------------------------------------------------------------
+-- reasoner_registry — the registrations written over the API (DR-33)
+--
+-- One row per reasoner registered with PUT /api/v1/reasoners/{reasoner_id}:
+-- the version the ledger serves now (its registration is that version's
+-- snapshot in reasoner_registrations), its source ('api'), who wrote that
+-- version (a principal label), when the reasoner was first registered, and
+-- when its current version was written. The table is the source of truth on
+-- restart: the ledger composes these rows with its plugins' registrations
+-- and its registration file's, and refuses to start when one reasoner_id
+-- comes from two sources. The first PUT inserts the row and each PUT that
+-- changes the registration updates it, in the transaction that stores the
+-- new version's snapshot; nothing deletes a row (deregistration is deferred:
+-- bundles reference registrations).
+-- ---------------------------------------------------------------------------
+create table if not exists decisionledger.reasoner_registry (
+    reasoner_id text primary key,
+    registration_version text not null,
+    source text not null,
+    registered_by text not null,
+    registered_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint reasoner_registry_source_api check (source = 'api'),
+    constraint reasoner_registry_version_snapshotted foreign key (
+        reasoner_id, registration_version
+    ) references decisionledger.reasoner_registrations (
+        reasoner_id, registration_version
+    )
 );
 
 -- ---------------------------------------------------------------------------
