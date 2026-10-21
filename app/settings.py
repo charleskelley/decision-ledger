@@ -69,6 +69,8 @@ class FrameworkSettings(BaseSettings):
 
     #: Comma-separated allowlist of ``reasoner_id`` values to compose from the
     #: installed plugins. Blank (the default) composes every installed plugin.
+    #: It filters plugins only: the registration file's registrations and the
+    #: ones written over the API (DR-33) are always served.
     decisionledger_reasoners: str = ""
 
     #: Comma-separated ``gate_id`` values the deployment runs on every
@@ -78,9 +80,10 @@ class FrameworkSettings(BaseSettings):
     decisionledger_mandatory_gates: str = ""
 
     #: Path to a YAML file of reasoner registrations, composed with the
-    #: installed reasoner plugins' (DR-31): how a reasoner that runs as its
-    #: own service, with no plugin installed here, registers. Blank (the
-    #: default) reads no file.
+    #: installed reasoner plugins' (DR-31): one way a reasoner that runs as its
+    #: own service, with no plugin installed here, registers (the other is
+    #: ``PUT /api/v1/reasoners/{reasoner_id}``, DR-33). Blank (the default)
+    #: reads no file.
     decisionledger_registrations: str = ""
 
     #: The deployment's one active identity resolver (DR-32): the name of a
@@ -100,8 +103,9 @@ class FrameworkSettings(BaseSettings):
     #: read in addition to ``DECISIONLEDGER_API_KEYS`` (a mounted secret).
     decisionledger_api_keys_file: str = ""
 
-    #: The operator key: a single shared secret that resolves held decisions
-    #: and reads every reasoner's decisions. Blank disables operator access.
+    #: The operator key: a single shared secret that resolves held decisions,
+    #: registers reasoners over the API (DR-33), and reads every reasoner's
+    #: decisions. Blank disables operator access.
     decisionledger_operator_key: SecretStr = SecretStr("")
 
     @property

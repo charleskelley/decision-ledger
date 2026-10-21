@@ -3,9 +3,10 @@
 ``create_app`` discovers reasoner plugins (``decisionledger.reasoners``
 entry points, filtered by ``DECISIONLEDGER_REASONERS``) and gate plugins
 (``decisionledger.gates`` entry points), and installs a lifespan that builds
-the shared framework services once — the registry (plugins plus the
-registration file), the composed gates, the store, and the resolution
-journal — and the key ring the routes authenticate callers with. Nothing in
+the shared framework services once — the live registry (plugins, the
+registration file, and the registrations written over the API), the
+composed gates, the store, and the resolution journal — and the key ring the
+routes authenticate callers with. Nothing in
 this module names a concrete reasoner or gate.
 
 The ledger serves its own routes only: ``GET /health`` and the ``/api/v1``
@@ -38,6 +39,7 @@ from app.gates import discover_gates
 from app.monitoring import configure_logging
 from app.plugins import allowlist_from_settings, discover_plugins
 from app.settings import FrameworkSettings
+from core.observation import ReasonerRegistration
 from core.submission import Submission
 
 if TYPE_CHECKING:
@@ -59,14 +61,14 @@ def health() -> dict[str, str]:
 
 #: Models the routes read from raw bodies (or answer with) that FastAPI does
 #: not see as parameters; the OpenAPI document carries them as components.
-_WIRE_MODELS = (Submission, ResolutionRequest, ProblemDocument)
+_WIRE_MODELS = (Submission, ResolutionRequest, ReasonerRegistration, ProblemDocument)
 
 
 def _install_openapi(application: FastAPI) -> None:
     """Generate the OpenAPI document with the wire models as components.
 
-    The decision and resolution routes parse their bodies themselves
-    (strictly, as JSON), so FastAPI does not know their schemas; their
+    The decision, resolution, and registration routes parse their bodies
+    themselves (strictly, as JSON), so FastAPI does not know their schemas; their
     request bodies reference ``#/components/schemas/<Model>`` and every
     problem response references ``ProblemDocument``. This registers those
     models (and every model they nest) under ``components.schemas``.

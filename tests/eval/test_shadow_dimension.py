@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.audit.store import RecordedSample
 from app.gates import ComposedGate
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.submit import submit
 from core.actions import DecisionAction
 from core.eval.metrics import EvalDimension, ShadowMetrics
@@ -104,7 +104,7 @@ async def _record(
         submission=submission,
         gates=gates if gates is not None else _compose(FakeGatePlugin()),
         store=_Store(),  # type: ignore[arg-type]
-        registry=StaticReasonerRegistry([registration]),
+        registry=LiveReasonerRegistry([registration]),
         ingestion_timestamp=event.timestamp,
     )
 
@@ -113,7 +113,7 @@ def _dimension(bundles, *, gates=None, registration=STUB_REGISTRATION, **kw):
     return ShadowDimension(
         source=_Source(bundles),
         gates=gates if gates is not None else _compose(FakeGatePlugin()),
-        registry=StaticReasonerRegistry([registration]),
+        registry=LiveReasonerRegistry([registration]),
         reasoner_id=registration.reasoner_id,
         **kw,
     )
@@ -267,7 +267,7 @@ async def test_the_sample_is_bounded_and_scoped_to_the_run():
     dimension = ShadowDimension(
         source=source,
         gates={},
-        registry=StaticReasonerRegistry([STUB_REGISTRATION]),
+        registry=LiveReasonerRegistry([STUB_REGISTRATION]),
         reasoner_id="stub-reasoner",
         sample_size=3,
         since=since,
@@ -281,7 +281,7 @@ async def test_unloadable_rows_are_reported(reasoner_context):
     dimension = ShadowDimension(
         source=source,
         gates={},
-        registry=StaticReasonerRegistry([STUB_REGISTRATION]),
+        registry=LiveReasonerRegistry([STUB_REGISTRATION]),
         reasoner_id="stub-reasoner",
     )
     assert _metrics(await dimension.evaluate()).unloadable == 2

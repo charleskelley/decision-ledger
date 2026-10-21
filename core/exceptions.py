@@ -151,6 +151,29 @@ class GatePluginError(Exception):
         super().__init__(f"Gate plugin error [{gate_id}]: {reason}")
 
 
+class GateConfigError(ValueError):
+    """Raised by a gate that refuses a reasoner's binding to it (DR-33).
+
+    A registration binds each gate in its gate set with an optional
+    ``GateBinding.config`` the framework never interprets. A gate that admits
+    bindings (``app.gates.BindingValidator``) raises this error from
+    ``validate_binding`` when it cannot serve that reasoner with that
+    configuration: a configuration it does not accept, or assets it would
+    need and cannot find. The framework names the gate when it reports the
+    refusal: startup fails with ``GatePluginError``, and a registration
+    written over the API is refused (422 ``GATE_BINDING_REFUSED``) with
+    nothing stored. A subclass of ``ValueError``, as a Pydantic validation
+    error is, so one handler covers both.
+
+    Args:
+        reason: Human-readable description of why the binding is refused.
+    """
+
+    def __init__(self, reason: str) -> None:  # noqa: D107
+        self.reason = reason
+        super().__init__(reason)
+
+
 class ResolverPluginError(Exception):
     """Raised when the deployment's identity resolver cannot be composed.
 
@@ -198,17 +221,20 @@ class PredicateError(ValueError):
 class RegistrationError(Exception):
     """Raised when the deployment's reasoner registrations cannot be composed.
 
-    A deployment registers reasoners from two sources (DR-31): the installed
-    reasoner plugins and an optional registration file
-    (``DECISIONLEDGER_REGISTRATIONS``). A file that cannot be read, parsed,
-    or validated, two sources declaring the same ``reasoner_id``, or two
-    registrations declaring one native namespace differently (DR-32) raise
-    this error at startup, so a deployment never serves decisions under a
-    registration it did not mean to have.
+    A deployment registers reasoners from three sources (DR-31, DR-33): the
+    installed reasoner plugins, an optional registration file
+    (``DECISIONLEDGER_REGISTRATIONS``), and the registrations written over
+    the API (``PUT /api/v1/reasoners/{reasoner_id}``), which the ledger keeps
+    in Postgres. A file that cannot be read, parsed, or validated, two
+    sources declaring the same ``reasoner_id``, or two registrations
+    declaring one native namespace differently (DR-32) raise this error at
+    startup, so a deployment never serves decisions under a registration it
+    did not mean to have. Replacing a plugin's or the file's registration at
+    runtime raises it too: declared configuration stays declared.
 
     Args:
-        source: Where the offending registration came from (a file path or
-            a plugin entry point).
+        source: Where the offending registration came from (a file path, a
+            plugin entry point, ``api``, or the reasoner).
         reason: Human-readable description of what went wrong.
     """
 

@@ -289,9 +289,9 @@ def test_replay_enforces_against_the_registration_the_decision_was_made_under(
     assert ledger.store.bundles()[0].decision_action == DecisionAction.HOLD
 
     # The reasoner re-registers without its novel-entity signal.
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
 
-    ledger.store._registry = StaticReasonerRegistry([_without_tier3(STUB_REGISTRATION)])
+    ledger.store._registry = LiveReasonerRegistry([_without_tier3(STUB_REGISTRATION)])
 
     result = _replay(ledger, decision_id).json()
     assert result["matched"] is True
@@ -302,11 +302,11 @@ def test_replay_enforces_against_the_registration_the_decision_was_made_under(
 def test_replay_without_the_cited_snapshot_is_refused_when_the_registration_changed(
     ledger: Ledger, submission
 ):
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
 
     decision_id = ledger.submit(submission).json()["decision_id"]
     ledger.store.snapshots.rows.clear()  # type: ignore[attr-defined]
-    ledger.store._registry = StaticReasonerRegistry([_without_tier3(STUB_REGISTRATION)])
+    ledger.store._registry = LiveReasonerRegistry([_without_tier3(STUB_REGISTRATION)])
 
     problem = _assert_problem(
         _replay(ledger, decision_id), 409, "REGISTRATION_SNAPSHOT_MISSING"
@@ -326,14 +326,14 @@ def test_replay_without_a_snapshot_uses_the_same_current_registration(
 def test_replay_of_an_unversioned_bundle_needs_its_reasoner_registered(
     ledger: Ledger, submission
 ):
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
 
     decision_id = ledger.submit(submission).json()["decision_id"]
     row = ledger.store.rows[decision_id]
     row.payload = {**row.payload, "registration_version": None}
 
     assert _replay(ledger, decision_id).json()["matched"] is True
-    ledger.store._registry = StaticReasonerRegistry([])
+    ledger.store._registry = LiveReasonerRegistry([])
     problem = _assert_problem(
         _replay(ledger, decision_id, key=OPERATOR_KEY), 409, "REASONER_NOT_COMPOSED"
     )
@@ -496,11 +496,11 @@ def test_a_resolution_the_journal_cannot_store_is_422(ledger: Ledger, submission
 def test_a_cited_version_with_no_snapshot_and_no_registration_is_snapshot_missing(
     ledger: Ledger, submission
 ):
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
 
     decision_id = ledger.submit(submission).json()["decision_id"]
     ledger.store.snapshots.rows.clear()  # type: ignore[attr-defined]
-    ledger.store._registry = StaticReasonerRegistry([])
+    ledger.store._registry = LiveReasonerRegistry([])
 
     problem = _assert_problem(
         _replay(ledger, decision_id, key=OPERATOR_KEY),

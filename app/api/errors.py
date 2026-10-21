@@ -16,8 +16,12 @@ Stable codes (the ``code`` member):
   ``GATE_CONFIG_INVALID``, ``NATIVE_SUBJECT_MISMATCH``, ...),
   ``REASONER_NOT_REGISTERED``,
   ``REQUEST_INVALID`` (a query or path parameter), ``RESOLUTION_INVALID``,
-  ``ENTITY_ID_INVALID``, ``BATCH_EMPTY``, ``BODY_TOO_LARGE``,
-  ``BATCH_TOO_LARGE`` (413).
+  ``ENTITY_ID_INVALID``, ``BATCH_EMPTY``; a registration write (DR-33):
+  ``REGISTRATION_INVALID`` (the body is not a valid registration for the
+  reasoner the path names), ``NATIVE_NAMESPACE_CONFLICT`` (another
+  registration declares one of its native namespaces differently),
+  ``GATE_BINDING_REFUSED`` (the composed gates cannot serve its gate set;
+  ``gate_id`` names the gate); ``BODY_TOO_LARGE``, ``BATCH_TOO_LARGE`` (413).
 - auth: ``UNAUTHENTICATED`` (401), ``REASONER_MISMATCH``,
   ``REASONER_KEY_REQUIRED``, ``OPERATOR_REQUIRED`` (403).
 - state: ``DECISION_NOT_FOUND``, ``REASONER_NOT_FOUND``,
@@ -25,7 +29,9 @@ Stable codes (the ``code`` member):
   (404);
   ``BUNDLE_SCHEMA_UNSUPPORTED``, ``REASONER_NOT_COMPOSED``,
   ``REGISTRATION_SNAPSHOT_MISSING``, ``DECISION_NOT_RESOLVABLE``,
-  ``DECISION_ALREADY_RESOLVED``, ``RESOLUTION_CONFLICT`` (409).
+  ``DECISION_ALREADY_RESOLVED``, ``RESOLUTION_CONFLICT``,
+  ``REGISTRATION_SOURCE_IMMUTABLE`` (a plugin's or the registration file's
+  reasoner cannot be replaced over the API) (409).
 - server: ``BUNDLE_UNREADABLE``, ``INTERNAL_ERROR`` (500),
   ``RESOLUTIONS_UNAVAILABLE`` (503).
 """

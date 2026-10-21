@@ -37,7 +37,7 @@ from app.audit.schema import apply_canonical_schema
 from app.audit.store import BundleStore
 from app.gates import ComposedGate
 from app.identity import IdentityService, build_resolver
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.settings import FrameworkSettings
 from app.submit import submit
 from core.identity import (
@@ -218,8 +218,8 @@ async def _decide(
     return await submit(
         submission=named,
         gates={"fake": ComposedGate(plugin=plugin, gate=plugin.build(None))},  # type: ignore[arg-type]
-        store=BundleStore(conn, registry=StaticReasonerRegistry([STUB_REGISTRATION])),
-        registry=StaticReasonerRegistry([STUB_REGISTRATION]),
+        store=BundleStore(conn, registry=LiveReasonerRegistry([STUB_REGISTRATION])),
+        registry=LiveReasonerRegistry([STUB_REGISTRATION]),
         ingestion_timestamp=datetime.now(UTC),
         identity=identity,
     )
@@ -264,7 +264,7 @@ async def test_timelines_union_merged_ids_and_group_members_on_postgres(
     assert stray.identity is not None
     assert stray.identity.provenance.method == "unresolved"
     owner_a = owner_id(f"owner-a-{suffix}")
-    store = BundleStore(conn, registry=StaticReasonerRegistry([STUB_REGISTRATION]))
+    store = BundleStore(conn, registry=LiveReasonerRegistry([STUB_REGISTRATION]))
 
     def _ids(entity: uuid.UUID, **kw: Any) -> set[str]:
         return {r.decision_id for r in store.entity_decisions(str(entity), **kw)}

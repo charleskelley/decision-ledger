@@ -1,10 +1,12 @@
 """YamlPromptRegistry — file-based PromptRegistry implementation.
 
 Loads versioned prompt templates from the YAML files in each reasoner's
-``prompts_dir`` (declared on its ``ReasonerPlugin``) at startup. This is the
-same structural pattern as the policy corpus builder: directories of
-structured files are parsed into one in-memory lookup — no external store
-dependency.
+``prompts_dir`` (declared on its ``ReasonerPlugin``) when the gate is built,
+and adds the templates of a reasoner registered without a plugin, from its
+directory under the gate's asset root, when the gate admits that reasoner's
+binding (``add``, DR-33). This is the same structural pattern as the policy
+corpus builder: directories of structured files are parsed into one
+in-memory lookup — no external store dependency.
 
 YAML file format::
 
@@ -24,10 +26,10 @@ Template IDs are derived from the YAML ``template_id`` field (falling back to
 the filename stem). A file named ``example-v1.yaml`` with
 ``template_id: example-v1`` registers as ``"example-v1"``.
 
-Template IDs are global across the deployment: the same ``template_id``
-appearing in two reasoners' directories is a configuration error and fails
-construction, because ``prompt_template_id`` is the audit key recorded in
-every Decision Bundle.
+Template IDs are global across the deployment and immutable: the same
+``template_id`` appearing in two reasoners' directories is a configuration
+error that fails construction (or refuses the ``add``), because
+``prompt_template_id`` is the audit key recorded in every Decision Bundle.
 
 ``{policy_snippets}`` is excluded from ``required_vars`` — it is
 framework-injected at render time, not a domain-provided variable.
@@ -36,6 +38,7 @@ framework-injected at render time, not a domain-provided variable.
 from __future__ import annotations
 
 import re
+import threading
 from typing import TYPE_CHECKING
 
 import yaml
@@ -43,7 +46,7 @@ import yaml
 from policy_rag_gate.models import PromptTemplate
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 # Matches {placeholder} tokens in template strings.
@@ -89,20 +92,33 @@ def _load_template(path: Path) -> PromptTemplate:
 
     Raises:
         KeyError: If the YAML is missing a required field.
-        ValueError: If the template content is empty, or a ``system`` key is
-            present but blank.
+        ValueError: If the file is not a mapping, the template content is
+            empty or not text, or a ``system`` key is present but blank or not
+            text.
     """
-    raw: dict = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Template file '{path.name}' is not a mapping of fields.")
 
-    template_str: str = raw["template"]
+    template_str = raw["template"]
+    if not isinstance(template_str, str):
+        raise ValueError(
+            f"Template file '{path.name}' has a template that is not text."
+        )
     if not template_str.strip():
         raise ValueError(f"Template file '{path.name}' has empty template content.")
 
-    system_text: str = raw.get("system", DEFAULT_SYSTEM_TEXT)
-    if not system_text.strip():
+    system_text = raw.get("system", DEFAULT_SYSTEM_TEXT)
+    if system_text is None or (
+        isinstance(system_text, str) and not system_text.strip()
+    ):
         raise ValueError(
             f"Template file '{path.name}' has an empty 'system' key; omit the "
             "key to use the framework default."
+        )
+    if not isinstance(system_text, str):
+        raise ValueError(
+            f"Template file '{path.name}' has a 'system' key that is not text."
         )
 
     return PromptTemplate(
@@ -115,12 +131,51 @@ def _load_template(path: Path) -> PromptTemplate:
     )
 
 
+def _declared_twice(template_id: str, first: Path, second: Path) -> ValueError:
+    return ValueError(
+        f"Prompt template id '{template_id}' is declared twice: {first} and "
+        f"{second}. Template ids are global across the deployment because they "
+        "are the audit key in every Decision Bundle."
+    )
+
+
+def load_templates(prompts_dir: Path) -> dict[str, tuple[PromptTemplate, Path]]:
+    """Load every ``*.yaml`` template in one directory (not recursive).
+
+    Args:
+        prompts_dir: A reasoner's directory of prompt templates. A missing
+            directory holds no templates.
+
+    Returns:
+        ``template_id`` → the template and the file it came from, in file
+        name order.
+
+    Raises:
+        ValueError: Two files in the directory declare one ``template_id``,
+            or a file's template content is empty.
+        KeyError, TypeError, yaml.YAMLError, pydantic.ValidationError: A
+            file is malformed (a missing key, not a mapping, not YAML, or a
+            value of the wrong type).
+    """
+    loaded: dict[str, tuple[PromptTemplate, Path]] = {}
+    for path in sorted(prompts_dir.glob("*.yaml")):
+        template = _load_template(path)
+        if template.template_id in loaded:
+            raise _declared_twice(
+                template.template_id, loaded[template.template_id][1], path
+            )
+        loaded[template.template_id] = (template, path)
+    return loaded
+
+
 class YamlPromptRegistry:
     """File-based PromptRegistry that loads ``*.yaml`` templates from directories.
 
-    Templates are loaded once at startup. The prompts directories are the
-    source of truth: adding a YAML file registers a new template. Templates
-    are immutable once loaded — the registry does not support runtime updates.
+    Templates are loaded when the registry is built, from the prompts
+    directories of the composed reasoner plugins, and ``add`` adds the
+    templates of a reasoner admitted later (DR-33). Add-only: a template,
+    once registered, never changes or leaves, and a ``template_id`` is
+    registered once. Reads never wait for an ``add``: it swaps in a new map.
 
     Satisfies the ``PromptRegistry`` protocol defined in
     ``policy_rag_gate.models.prompt``.
@@ -132,28 +187,42 @@ class YamlPromptRegistry:
             composed).
 
     Raises:
-        ValueError: If any YAML file fails to parse or has empty content, or
-            if the same ``template_id`` is declared by files in more than one
-            place.
+        ValueError: If a template file has empty content, or if the same
+            ``template_id`` is declared by files in more than one place.
+        KeyError, TypeError, yaml.YAMLError, pydantic.ValidationError: A
+            template file is malformed (see ``load_templates``).
     """
 
     def __init__(self, prompts_dirs: Sequence[Path]) -> None:
         """Load all *.yaml templates from every directory into the registry."""
-        self._templates: dict[str, PromptTemplate] = {}
-        sources: dict[str, Path] = {}
+        self._templates: Mapping[str, PromptTemplate] = {}
+        self._sources: Mapping[str, Path] = {}
+        self._lock = threading.Lock()
         for prompts_dir in prompts_dirs:
-            for path in sorted(prompts_dir.glob("*.yaml")):
-                template = _load_template(path)
-                template_id = template.template_id
-                if template_id in sources:
-                    raise ValueError(
-                        f"Prompt template id '{template_id}' is declared twice: "
-                        f"{sources[template_id]} and {path}. Template ids are "
-                        "global across the deployment because they are the "
-                        "audit key in every Decision Bundle."
-                    )
-                sources[template_id] = path
-                self._templates[template_id] = template
+            self.add(load_templates(prompts_dir))
+
+    def add(self, templates: Mapping[str, tuple[PromptTemplate, Path]]) -> None:
+        """Register templates loaded with ``load_templates``, all or none.
+
+        Args:
+            templates: ``template_id`` → template and source file.
+
+        Raises:
+            ValueError: A ``template_id`` is registered already (nothing is
+                added).
+        """
+        with self._lock:
+            for template_id, (_, path) in templates.items():
+                if template_id in self._sources:
+                    raise _declared_twice(template_id, self._sources[template_id], path)
+            self._templates = {
+                **self._templates,
+                **{tid: template for tid, (template, _) in templates.items()},
+            }
+            self._sources = {
+                **self._sources,
+                **{tid: path for tid, (_, path) in templates.items()},
+            }
 
     def get(self, template_id: str) -> PromptTemplate:
         """Retrieve a template by ID.
@@ -168,10 +237,11 @@ class YamlPromptRegistry:
         Raises:
             KeyError: If ``template_id`` is not registered.
         """
+        templates = self._templates
         try:
-            return self._templates[template_id]
+            return templates[template_id]
         except KeyError:
-            registered = sorted(self._templates)
+            registered = sorted(templates)
             raise KeyError(
                 f"Prompt template '{template_id}' not found. "
                 f"Registered templates: {registered}"

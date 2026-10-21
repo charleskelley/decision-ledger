@@ -47,7 +47,7 @@ from app.plugins import (
     build_registry,
     discover_plugins,
 )
-from app.reasoner_registry import RegisteredReasoner, StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry, RegisteredReasoner
 from app.settings import FrameworkSettings
 from core.exceptions import ReasonerPluginError
 from core.observation import GateBinding, ReasonerRegistration
@@ -138,7 +138,7 @@ def test_the_ledger_ignores_a_plugins_router_and_services(monkeypatch):
     plugin = _LeakyPlugin()
     framework = MagicMock(spec=FrameworkServices)
     framework.gates = {}
-    framework.registry = StaticReasonerRegistry([plugin.registration])
+    framework.registry = LiveReasonerRegistry([plugin.registration])
     monkeypatch.setattr("app.main.build_framework_services", lambda s, p, g: framework)
     app = create_app(plugins=[plugin], gate_plugins=[], keyring=TEST_KEYRING)
 
@@ -316,7 +316,7 @@ def fake_framework(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """
     framework = MagicMock(spec=FrameworkServices)
     framework.gates = {}
-    framework.registry = StaticReasonerRegistry([STUB_REGISTRATION])
+    framework.registry = LiveReasonerRegistry([STUB_REGISTRATION])
 
     def _build(settings: Any, plugins: Any, gate_plugins: Any) -> MagicMock:
         framework.received_plugins = plugins
@@ -358,7 +358,7 @@ def test_lifespan_warns_when_no_reasoner_or_no_key_is_configured(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    fake_framework.registry = StaticReasonerRegistry([])
+    fake_framework.registry = LiveReasonerRegistry([])
     for name in ("DECISIONLEDGER_API_KEYS", "DECISIONLEDGER_OPERATOR_KEY"):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("DECISIONLEDGER_API_KEYS_FILE", "")
@@ -451,7 +451,7 @@ def test_create_app_without_plugins_passes_no_allowlist_when_setting_is_blank(
 
 
 def test_registered_reasoner_entries_carry_their_version():
-    [entry] = StaticReasonerRegistry([STUB_REGISTRATION]).entries()
+    [entry] = LiveReasonerRegistry([STUB_REGISTRATION]).entries()
     assert isinstance(entry, RegisteredReasoner)
     assert entry.reasoner_id == "stub-reasoner"
     assert entry.source == "inline"

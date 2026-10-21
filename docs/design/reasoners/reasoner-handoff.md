@@ -257,7 +257,7 @@ snapshot of the version a bundle cites.
 | Field | Meaning |
 |---|---|
 | `reasoner_id`, `reasoner_name` | Identity. `reasoner_id` is the registry key and the bundle store's tenant column. |
-| `gates` | The gate set: one `GateBinding(gate_id, mandatory)` per gate, each at most once. A mandatory gate runs on every decision; an advisory gate (`mandatory: false`, the default) runs only on a gated decision. The deployment may mandate further gates for every reasoner (`DECISIONLEDGER_MANDATORY_GATES`). |
+| `gates` | The gate set: one `GateBinding(gate_id, mandatory, config)` per gate, each at most once. A mandatory gate runs on every decision; an advisory gate (`mandatory: false`, the default) runs only on a gated decision. The deployment may mandate further gates for every reasoner (`DECISIONLEDGER_MANDATORY_GATES`). `config` (default `{}`) is the gate's configuration for this reasoner: JSON the framework never reads, validated by the gate when it admits the binding (DR-33). |
 | `bypass_rules` | `BypassRule(rule_id, version, description, predicate, action)` values a record may cite; `rule_id` is unique. The predicate uses the closed predicate language the rules gate uses (`core/gate/predicate.py`: `compare`, `all`, `any`, `not`) over `label_value` and `feature_set.<name>`. The action is the one action the rule justifies. Empty means the reasoner can only ask for a gate. |
 | `recordable_actions` | The actions the reasoner may record; every rule's action must be one of them. Defaults to every action. |
 | `native_namespaces` | The declared native namespaces (above). Empty by default. |
@@ -265,19 +265,24 @@ snapshot of the version a bundle cites.
 | `jurisdiction_conflict_groups` | Enforcement profile, Tier 5: groups of jurisdiction tags whose policies are mutually consistent; a gate's evidence spanning two groups is a conflict. |
 
 A registration's `registration_version` is its content address: the first
-16 hex digits of the SHA-256 of its canonical form (sets sorted). Any change
-to the gate set, a bypass rule, the recordable actions, a namespace
-declaration, or the enforcement profile changes it. At startup the ledger
-snapshots every served version into `decisionledger.reasoner_registrations`,
-and every bundle records the version it was decided under.
+16 hex digits of the SHA-256 of its canonical form (sets sorted; a binding
+without configuration has no `config` key). Any change to the gate set (a
+binding's configuration included), a bypass rule, the recordable actions, a
+namespace declaration, or the enforcement profile changes it. The ledger
+snapshots every version it serves into `decisionledger.reasoner_registrations`
+(at startup, and when a registration is written over the API), and every
+bundle records the version it was decided under.
 
-Registrations come from two sources: an installed reasoner plugin
-(`ReasonerPlugin.registration`), and the deployment's registration file,
+Registrations come from three sources (DR-33; see
+[Registration](../registration.md)): an installed reasoner plugin
+(`ReasonerPlugin.registration`), the deployment's registration file,
 `DECISIONLEDGER_REGISTRATIONS` (YAML, a list of registrations in their JSON
-shape, validated strictly). A reasoner registered by both refuses startup.
-The ledger serves them read-only, each with its version and source
-(`plugin:<module>` or `file:<path>`): `GET /api/v1/reasoners`,
-`GET /api/v1/reasoners/{reasoner_id}`, and
+shape, validated strictly), and `PUT /api/v1/reasoners/{reasoner_id}` with
+the operator key (the same JSON shape). A reasoner has one source: one
+registered by two refuses startup, and a plugin's or the file's reasoner
+cannot be replaced over the API (409). The ledger serves each with its
+version and source (`plugin:<module>`, `file:<path>`, or `api`):
+`GET /api/v1/reasoners`, `GET /api/v1/reasoners/{reasoner_id}`, and
 `GET /api/v1/reasoners/{reasoner_id}/registrations/{version}`.
 
 ---
@@ -327,13 +332,13 @@ record whose `proposed_action` is outside the registration's
 |---|---|---|---|---|
 | Event schema, ingestion, feature computation, model, scoring | Owns | — | — | — |
 | Choosing the mode and the rule a record cites | Owns (`matching_bypass_rule` helps) | Validates the citation, evaluates every rule, snapshots the checks | — | — |
-| Registration: gate set, bypass rules, recordable actions, namespaces, enforcement profile | Declares (plugin or file) | Validates, versions, snapshots, serves read-only | — | — |
+| Registration: gate set (with each binding's `config`), bypass rules, recordable actions, namespaces, enforcement profile | Declares (plugin or file), or has the operator write it (`PUT`) | Validates and admits it as at startup, versions, snapshots, serves it; keeps the API's registrations; never replaces a declared one | Admits each binding and its `config` (`BindingValidator`) | — |
 | `ReasonerContext` | Assembles, complete | Stores verbatim | Reads | — |
 | `GateContext` per bound gate | Assembles | Checks the set, transports | Validates (`config_model`) and authorizes its own configuration | — |
 | Subject: `entity_id`, `entity_type`, `native_subject` | Names it in its own terms | Checks declared namespaces; calls the resolver under a budget; records the result or the passthrough | Reads the resolved subject (`GateRequest.identity`) | Maps the native subject to the enterprise's subject |
 | Identity resolution: matching, crosswalk, master entity index | — | Implements none | — | Owns |
 | Gate evaluation and its infrastructure (indexes, model clients, rule files) | — | Invokes under a budget; fails closed | Owns | — |
-| Prompts and policy corpus a gate reads | Ships them (`prompts_dir`, `corpus_dir`) | Carries the plugin to the gate | Loads and indexes them | — |
+| Prompts and policy corpus a gate reads | Ships them: with its plugin (`prompts_dir`, `corpus_dir`), or where the gate documents (the RAG gate's asset root) | Carries the plugin to the gate | Loads and indexes them | — |
 | Deployment mandates (`DECISIONLEDGER_MANDATORY_GATES`) | — | Owns | — | — |
 | Enforcement tiers, decision-level rules, the combinator | — | Owns | — | — |
 | Bundle, storage, replay, timelines (`decisionledger.*`) | — | Owns | — | — |
@@ -449,33 +454,56 @@ For a reasoner that runs as its own service, in any language.
    from `GET /api/v1/gates`), your event as `raw_event`, and the mode. A
    Python reasoner can build `core.submission.Submission` directly and use
    `matching_bypass_rule` to pick the mode.
-2. **Register.** Either add your registration to the deployment's
-   registration file (`DECISIONLEDGER_REGISTRATIONS`; `conformance/registrations.yaml`
-   is a worked example), or publish a plugin and install it in the ledger's
-   environment (see [In process](#in-process), steps 1 to 4). A reasoner
-   registered by file has no plugin, so it ships no prompts or corpus to
-   the ledger: it cannot bind the RAG policy gate, which serves only the
-   reasoners whose prompts and corpus it loaded from their plugins
-   (`app.gates.ReasonerScope`). The ledger refuses to start with such a
-   binding rather than refuse every submission. A file registration suits a
-   reasoner whose gates need no per-reasoner assets (the rules gate, a
-   lookup gate, or none).
-3. **Get a key.** The deployment maps your `reasoner_id` to a key in
+2. **Ship your gate assets, if a gate needs them.** A gate that reads
+   per-reasoner assets reads a reasoner without a plugin from where that
+   gate documents. For the RAG policy gate: your prompt templates and your
+   policy corpus under its asset root, `POLICY_RAG_GATE_ASSETS_ROOT`, as
+   `<root>/<reasoner_id>/prompts/*.yaml` and
+   `<root>/<reasoner_id>/corpus/**/*.md` (template ids are global: one
+   another reasoner registers already refuses your binding). The rules
+   gate, a lookup gate, or no gate need nothing here.
+3. **Register.** Pick one source (DR-33; see
+   [Registration](../registration.md)):
+    - **Over HTTP:** the operator sends your registration, in its JSON shape,
+      with `PUT /api/v1/reasoners/{reasoner_id}` and the operator key
+      (`app.client.HttpClient.register` does it). `201` creates it, `200`
+      replaces it with a new version (or finds it unchanged); the ledger
+      keeps it in Postgres and serves it after a restart.
+    - **By file:** add it to the deployment's registration file
+      (`DECISIONLEDGER_REGISTRATIONS`; `conformance/registrations.yaml` is a
+      worked example); it changes when the deployment restarts with a new
+      file, never over the API.
+    - **As a plugin:** publish one and install it in the ledger's
+      environment (see [In process](#in-process), steps 1 to 4).
+
+    Either way the ledger admits your registration exactly as it does at
+    startup: every gate you bind as mandatory must be composed, and every
+    composed gate you bind must accept the binding and its `config`
+    (`app.gates.BindingValidator`; the RAG gate reads your assets here) and
+    then serve you. A refusal names the gate: the deployment does not start
+    with a declared registration a gate refuses, and a `PUT` answers 422
+    `GATE_BINDING_REFUSED` and stores nothing.
+4. **Load your corpus**, if you bound the RAG policy gate: after you are
+   registered, `uv run python -m policy_rag_gate.corpus_loader
+   --reasoner-id <reasoner_id>` indexes `<root>/<reasoner_id>/corpus` (the
+   loader refuses a reasoner the ledger does not register).
+5. **Get a key.** The deployment maps your `reasoner_id` to a key in
    `DECISIONLEDGER_API_KEYS` (comma-separated `reasoner_id:key` pairs) or
-   the key file `DECISIONLEDGER_API_KEYS_FILE`. Send it as
+   the key file `DECISIONLEDGER_API_KEYS_FILE`; the ledger reads its keys
+   when it starts, and registering issues none. Send it as
    `X-DecisionLedger-Key`. Your key writes and reads only your own
    decisions.
-4. **Submit** with `POST /api/v1/decisions` (or
+6. **Submit** with `POST /api/v1/decisions` (or
    `POST /api/v1/decisions:batch` for records), with any HTTP client or
    `app.client.HttpClient`. Switch on the problem document's `code`, never
    its text. A write is not idempotent on the wire: a retried POST records
    twice.
-5. **Check the instance.** Run the conformance suite (`conformance/`,
+7. **Check the instance.** Run the conformance suite (`conformance/`,
    `make conformance`) against the ledger you target. It is a black-box
    HTTP suite that checks the contract you rely on (status codes, receipts,
-   problem codes, tenant isolation, batch, replay, identity), with the
-   example reasoner's payloads as worked requests; see its README for the
-   variables it needs.
+   problem codes, tenant isolation, batch, replay, identity, registration),
+   with the example reasoner's payloads as worked requests; see its README
+   for the variables it needs.
 
 ### In process
 
@@ -572,7 +600,9 @@ in [How to implement a gate](../gates/implementation.md); the steps:
    `decisionledger.gates` entry-point group, named after its `gate_id`:
    `gate_id`, `kind` (`llm`, `lookup`, or `rules`), `deterministic` (Tiers 2
    and 4 are skipped for a deterministic gate), `config_model` (a Pydantic
-   model that validates `gate_config` at intake, or `None`), and
+   model that validates `gate_config` at intake, or `None`), optionally
+   `binding_config_model` (a Pydantic model that validates a registration's
+   `GateBinding.config` for your gate; DR-33), and
    `build(framework) -> Gate`.
 3. **Implement the `Gate`.** `async evaluate(request: GateRequest) ->
    GateOutput` and `close()`. `evaluate` must not block the event loop:
@@ -587,8 +617,14 @@ in [How to implement a gate](../gates/implementation.md); the steps:
    timeouts within the budget.
 5. **Add optional capabilities** when you need them: `ConfigAuthorizer`
    (`authorize_config(config, *, reasoner_id)`, called at intake) to allow
-   a configuration per reasoner, and `ReasonerScope` (`serves(reasoner_id)`,
-   asked at startup) when the gate can serve only some reasoners.
+   a configuration per reasoner; `BindingValidator`
+   (`validate_binding(reasoner_id, config)`, raising `GateConfigError`) to
+   admit or refuse each registration's binding to your gate, asked at
+   startup and when a registration is written over the API (a gate with
+   neither it nor a `binding_config_model` refuses a binding that carries
+   a configuration); and `ReasonerScope` (`serves(reasoner_id)`, asked right
+   after the binding is admitted) when the gate can serve only some
+   reasoners.
 6. **Own your infrastructure**: a `compose.yaml` the root
    `docker-compose.yml` includes, your own schema and DDL (never the
    `decisionledger` schema), a `gate.mk` with suffixed targets appended to
@@ -596,8 +632,10 @@ in [How to implement a gate](../gates/implementation.md); the steps:
    prefix (`RULES_GATE_`, `POLICY_RAG_GATE_`). A gate with no infrastructure
    of its own, like the rules gate, ships only the settings class.
 7. **Stay reasoner-agnostic.** Read only the request; a reasoner's specific
-   assets reach you through its plugin (`framework.reasoners`) or its
-   `gate_config`.
+   assets reach you through its plugin (`framework.reasoners`), its
+   binding's `config`, its `gate_config`, or, for a reasoner registered
+   without a plugin, from where your gate documents (read it when you admit
+   the binding, as the RAG gate reads its asset root).
 8. **Test and evaluate it yourself**: the member's own tests, and its own
    eval harness for anything model-backed (no mocked LLM unit tests).
 9. **Install** it through the root `gates` dependency group with a

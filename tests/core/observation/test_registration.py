@@ -16,10 +16,17 @@ Key contracts (DR-29, DR-30):
   (DR-32), each once; the declarations are unordered in its version, and a
   registration that declares none keeps the version it had before
   registrations could declare them.
+- A gate binding may carry the gate's configuration for the reasoner
+  (``config``, DR-33): JSON data the framework never interprets, part of
+  the registration's version (the order of its keys never matters), and
+  absent from the canonical form when empty, so a registration whose
+  bindings carry none keeps the version it had before bindings could.
+- A registry is written at runtime too (``register``, DR-33).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -55,7 +62,7 @@ ALLOW, CHALLENGE, HOLD, BLOCK = (
 
 
 class _RegistryStub:
-    """Minimal ReasonerRegistry for testing — not the StaticReasonerRegistry."""
+    """Minimal ReasonerRegistry for testing — not the LiveReasonerRegistry."""
 
     def __init__(self, registrations: list[ReasonerRegistration]) -> None:
         self._store = {r.reasoner_id: r for r in registrations}
@@ -70,6 +77,14 @@ class _RegistryStub:
     def is_registered(self, reasoner_id: str) -> bool:
         """Return True if registered."""
         return reasoner_id in self._store
+
+    def register(
+        self, registration: ReasonerRegistration, *, registered_by: str
+    ) -> str:
+        """Serve the registration from now on; return its version."""
+        del registered_by
+        self._store[registration.reasoner_id] = registration
+        return registration_version(registration)
 
 
 def _rule(
@@ -121,6 +136,52 @@ def test_a_gate_binding_is_immutable():
     binding = GateBinding(gate_id="fake")
     with pytest.raises(ValidationError):
         binding.mandatory = True
+
+
+def test_a_gate_binding_hashes_as_it_compares():
+    """Key order is ignored and 1 equals 1.0, so the hashes agree too."""
+    one = GateBinding(gate_id="fake", config={"k": 1, "l": [1, {"x": 2}]})
+    other = GateBinding(gate_id="fake", config={"l": [1.0, {"x": 2}], "k": 1.0})
+    assert one == other
+    assert hash(one) == hash(other)
+    assert len({one, other, GateBinding(gate_id="fake")}) == 2
+    assert isinstance(hash(_registration(gates=(one,))), int)
+
+
+def test_a_gate_binding_carries_no_configuration_by_default():
+    assert GateBinding(gate_id="fake").config == {}
+
+
+def test_a_gate_binding_carries_any_json_configuration():
+    config = {"corpus": "x", "k": 5, "weights": [0.5, 1], "nested": {"on": True}}
+    binding = GateBinding(gate_id="fake", config=config)
+    assert binding.config == config
+    assert GateBinding.model_validate_json(binding.model_dump_json()) == binding
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"k": (1, 2)},
+        {"k": {1, 2}},
+        {"k": b"bytes"},
+        {"k": float("nan")},
+        {"k": [float("inf")]},
+    ],
+    ids=["tuple", "set", "bytes", "nan", "nested-inf"],
+)
+def test_a_gate_binding_refuses_configuration_json_cannot_carry(config):
+    with pytest.raises(ValidationError):
+        GateBinding(gate_id="fake", config=config)
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_a_gate_binding_refuses_a_non_finite_number_spelled_in_json(token):
+    """Python's JSON writes NaN as a bare token; the binding refuses it."""
+    with pytest.raises(ValidationError, match="non-finite"):
+        GateBinding.model_validate_json(
+            f'{{"gate_id": "fake", "config": {{"k": [{token}]}}}}'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +457,7 @@ def test_the_version_does_not_depend_on_the_process_hash_seed():
     [
         {"reasoner_name": "Renamed"},
         {"gates": (GateBinding(gate_id="fake", mandatory=True),)},
+        {"gates": (GateBinding(gate_id="fake", config={"k": 5}),)},
         {"bypass_rules": (_rule(version="2"), _rule("high-score", action=BLOCK))},
         {"recordable_actions": frozenset({ALLOW, BLOCK, HOLD})},
         {"novel_entity_feature": None},
@@ -413,6 +475,7 @@ def test_the_version_does_not_depend_on_the_process_hash_seed():
     ids=[
         "name",
         "gate-set",
+        "binding-config",
         "rule-version",
         "recordable",
         "tier3",
@@ -489,3 +552,74 @@ def test_a_registration_with_namespaces_round_trips_through_its_canonical_form()
         ).model_dump_json()
     )
     assert reloaded == registration
+
+
+# ---------------------------------------------------------------------------
+# Binding configuration (DR-33)
+# ---------------------------------------------------------------------------
+
+
+def test_a_binding_without_configuration_has_no_config_key_in_the_canonical_form():
+    """So every registration whose bindings carry none keeps its version.
+
+    The stub reasoner binds one gate without configuration; its version is
+    pinned to the one it had before bindings could carry one.
+    """
+    from tests._stub_reasoner.registry import STUB_REGISTRATION
+
+    assert canonical_registration(STUB_REGISTRATION)["gates"] == [
+        {"gate_id": "fake", "mandatory": False}
+    ]
+    assert registration_version(STUB_REGISTRATION) == "909c836dc579e075"
+
+
+def test_a_binding_configuration_is_in_the_canonical_form_as_given():
+    config = {"corpora": [{"id": "b"}, {"id": "a"}], "k": 5}
+    registration = _profiled(gates=(GateBinding(gate_id="fake", config=config),))
+    assert canonical_registration(registration)["gates"] == [
+        {"gate_id": "fake", "mandatory": False, "config": config}
+    ]
+
+
+def test_the_order_of_a_binding_configurations_keys_never_changes_the_version():
+    one = _profiled(
+        gates=(GateBinding(gate_id="fake", config={"a": 1, "b": {"x": 1, "y": 2}}),)
+    )
+    other = _profiled(
+        gates=(GateBinding(gate_id="fake", config={"b": {"y": 2, "x": 1}, "a": 1}),)
+    )
+    assert registration_version(one) == registration_version(other)
+
+
+def test_the_order_of_a_list_in_a_binding_configuration_changes_the_version():
+    """Lists are data in their own right: their order is the gate's to read."""
+    one = _profiled(gates=(GateBinding(gate_id="fake", config={"k": [1, 2]}),))
+    other = _profiled(gates=(GateBinding(gate_id="fake", config={"k": [2, 1]}),))
+    assert registration_version(one) != registration_version(other)
+
+
+def test_an_explicitly_empty_configuration_is_no_configuration():
+    assert registration_version(
+        _profiled(gates=(GateBinding(gate_id="fake", config={}),))
+    ) == registration_version(_profiled())
+
+
+def test_binding_configuration_round_trips_through_the_canonical_form():
+    registration = _profiled(
+        gates=(
+            GateBinding(gate_id="fake", config={"k": 5, "tags": ["a"]}),
+            GateBinding(gate_id="other", mandatory=True),
+        )
+    )
+    reloaded = ReasonerRegistration.model_validate_json(
+        json.dumps(canonical_registration(registration))
+    )
+    assert reloaded == registration
+    assert registration_version(reloaded) == registration_version(registration)
+
+
+def test_a_registry_is_written_through_register():
+    registry = _RegistryStub([])
+    version = registry.register(_registration(), registered_by="operator")
+    assert registry.get("stub-reasoner") == _registration()
+    assert version == registration_version(_registration())

@@ -3,10 +3,14 @@
 #
 #   DECISIONLEDGER_REGISTRATIONS=conformance/registrations.yaml
 #
-# An instance that installs the plugin (a default `uv sync` of this
-# repository) registers it already; listing it here too refuses startup
-# (a reasoner registered twice). The shape of each entry is a
-# ReasonerRegistration as JSON (schemas: GET /api/v1/reasoners).
+# or send the entry as JSON with the operator key:
+# PUT /api/v1/reasoners/example-reasoner. An instance that installs the plugin
+# (a default `uv sync` of this repository) registers it already; registering
+# it here or over HTTP too refuses startup or the write (one source per
+# reasoner). The shape of each entry is a ReasonerRegistration as JSON
+# (schemas: GET /api/v1/reasoners). An instance that composes the RAG policy
+# gate needs the example's prompts and corpus under its asset root
+# (POLICY_RAG_GATE_ASSETS_ROOT/example-reasoner/; see README.md).
 registrations:
 - reasoner_id: example-reasoner
   reasoner_name: Example Reasoner

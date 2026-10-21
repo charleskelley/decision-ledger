@@ -19,6 +19,7 @@ from policy_rag_gate.prompt_registry import (
     DEFAULT_SYSTEM_TEXT,
     YamlPromptRegistry,
     _extract_required_vars,
+    load_templates,
 )
 
 if TYPE_CHECKING:
@@ -268,3 +269,51 @@ def test_registry_registered_ids_returns_sorted_list(tmp_path: Path):
 
 def test_registry_satisfies_prompt_registry_protocol(registry):
     assert isinstance(registry, PromptRegistry)
+
+
+# ---------------------------------------------------------------------------
+# YamlPromptRegistry — add-only registration after build (DR-33)
+# ---------------------------------------------------------------------------
+
+
+def test_load_templates_reads_one_directory_with_each_source(tmp_path: Path):
+    path = _write(tmp_path / "prompts", "fixture-v1.yaml", _FIXTURE_V1)
+
+    loaded = load_templates(tmp_path / "prompts")
+
+    assert list(loaded) == ["fixture-v1"]
+    template, source = loaded["fixture-v1"]
+    assert (template.version, source) == ("1.0.0", path)
+    assert load_templates(tmp_path / "missing") == {}
+
+
+def test_load_templates_refuses_one_id_declared_twice_in_a_directory(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(directory, "a.yaml", _FIXTURE_V1)
+    _write(directory, "b.yaml", _FIXTURE_V1)
+
+    with pytest.raises(ValueError, match="'fixture-v1' is declared twice"):
+        load_templates(directory)
+
+
+def test_add_registers_new_templates(registry, tmp_path: Path):
+    directory = tmp_path / "later"
+    _write(directory, "late.yaml", _FIXTURE_V1.replace("fixture-v1", "late-v1"))
+
+    registry.add(load_templates(directory))
+
+    assert registry.get("late-v1").template_id == "late-v1"
+    assert "fixture-v1" in registry.registered_ids()
+
+
+def test_add_is_all_or_nothing_and_never_replaces_a_template(registry, tmp_path: Path):
+    directory = tmp_path / "later"
+    _write(directory, "a.yaml", _FIXTURE_V1.replace("fixture-v1", "fresh-v1"))
+    _write(directory, "b.yaml", _FIXTURE_V1.replace("Score:", "Changed:"))
+    before = registry.get("fixture-v1")
+
+    with pytest.raises(ValueError, match="'fixture-v1' is declared twice"):
+        registry.add(load_templates(directory))
+
+    assert registry.get("fixture-v1") is before
+    assert "fresh-v1" not in registry.registered_ids()

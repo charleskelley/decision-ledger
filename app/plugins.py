@@ -12,9 +12,12 @@ than silently running without a reasoner.
 A reasoner that runs as its own service needs no plugin installed in the
 ledger's deployment: it registers through the deployment's registration file
 (``DECISIONLEDGER_REGISTRATIONS``, DR-31), a YAML list of registrations
-(``load_registration_file``). ``build_registry`` composes both sources into
-the registry the deployment serves — read-only, as the registrations
-resource — and refuses a ``reasoner_id`` declared twice.
+(``load_registration_file``), or over the API
+(``PUT /api/v1/reasoners/{reasoner_id}``, DR-33), which the ledger keeps in
+Postgres. ``build_registry`` composes the three sources into the registry
+the deployment serves and refuses a ``reasoner_id`` registered twice.
+``DECISIONLEDGER_REASONERS`` filters the plugins only: the file's and the
+API's registrations are always served.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.plugin import ReasonerPlugin
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import API_SOURCE, LiveReasonerRegistry
 from core.exceptions import ReasonerPluginError, RegistrationError
 from core.observation import ReasonerRegistration
 
@@ -37,6 +40,7 @@ if TYPE_CHECKING:
     from importlib.metadata import EntryPoint
     from pathlib import Path
 
+    from app.reasoner_registry import RegisteredReasoner, RegistrationWriter
     from app.settings import FrameworkSettings
 
 log = structlog.get_logger(__name__)
@@ -130,23 +134,32 @@ def build_registry(
     plugins: Sequence[ReasonerPlugin],
     *,
     registration_file: Path | None = None,
-) -> StaticReasonerRegistry:
-    """Compose the plugins' registrations and the registration file's.
+    written: Iterable[RegisteredReasoner] = (),
+    writer: RegistrationWriter | None = None,
+) -> LiveReasonerRegistry:
+    """Compose the plugins', the registration file's, and the API's registrations.
 
     Args:
         plugins: Discovered (or explicitly passed) reasoner plugins.
         registration_file: The deployment's registration file
             (``DECISIONLEDGER_REGISTRATIONS``), or ``None`` for none.
+        written: The registrations written over the API earlier, as stored
+            (``ApiRegistrations.load()``).
+        writer: Where the registry stores a registration written over the
+            API from now on (``ApiRegistrations``); ``None`` keeps them in
+            memory only.
 
     Returns:
         Registry keyed by ``reasoner_id``, each entry labelled with its
-        source (``plugin:<module>`` or ``file:<path>``); intake validation,
-        the enforcement profile, and the registrations resource all read
-        from it.
+        source (``plugin:<module>``, ``file:<path>``, or ``api``); intake
+        validation, the enforcement profile, and the registrations resource
+        all read from it, and the registrations resource writes to it.
 
     Raises:
-        RegistrationError: The file cannot be loaded, or it registers a
-            ``reasoner_id`` a plugin (or the file itself) already registers.
+        RegistrationError: The file cannot be loaded, it registers a
+            ``reasoner_id`` a plugin (or the file itself) already registers,
+            or a reasoner registered over the API is also registered by a
+            plugin or the file.
         ValueError: Two plugins share a ``reasoner_id``.
     """
     registrations = [p.registration for p in plugins]
@@ -165,7 +178,19 @@ def build_registry(
                 )
             sources[reasoner_id] = label
             registrations.append(registration)
-    return StaticReasonerRegistry(registrations, sources=sources)
+    written = list(written)
+    for entry in written:
+        if entry.reasoner_id in sources:
+            raise RegistrationError(
+                API_SOURCE,
+                f"reasoner_id {entry.reasoner_id!r} is registered over the API "
+                f"and by {sources[entry.reasoner_id]}; a reasoner has one "
+                "source. Stop declaring it there, or remove its row from "
+                "decisionledger.reasoner_registry (its snapshots stay).",
+            )
+    return LiveReasonerRegistry(
+        registrations, sources=sources, written=written, writer=writer
+    )
 
 
 def load_registration_file(path: Path) -> list[ReasonerRegistration]:
@@ -232,6 +257,10 @@ def load_registration_file(path: Path) -> list[ReasonerRegistration]:
 
 def allowlist_from_settings(fw: FrameworkSettings) -> frozenset[str] | None:
     """Parse ``DECISIONLEDGER_REASONERS`` into an allowlist.
+
+    The allowlist filters the installed plugins only: a reasoner registered
+    by the registration file or over the API is served whether or not the
+    list names it.
 
     Args:
         fw: Framework settings carrying the comma-separated allowlist.

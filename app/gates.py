@@ -8,7 +8,7 @@ group. The framework never imports a gate package: it discovers the plugins
 dispatches to the gates of a decision's gate set by ``gate_id``
 (``app/submit.py``), each through ``invoke_gate``.
 
-The seam is five types:
+The seam is six types:
 
 - ``GateKind`` — what a gate is: ``llm``, ``lookup``, or ``rules``.
 - ``Gate`` — the runtime object: ``evaluate(GateRequest) -> GateOutput`` and
@@ -19,27 +19,38 @@ The seam is five types:
   submitting reasoner, whether a validated ``gate_config`` is allowed (for
   example only resources that reasoner ships). The framework calls it at
   intake, in both modes, right after ``config_model`` validation.
+- ``BindingValidator`` — an optional ``Gate`` capability (DR-33): admit or
+  refuse a reasoner's binding to the gate, with the binding's ``config``.
+  The framework asks at startup for every registration that binds the
+  gate, and again when a registration is written over the API, so a
+  binding the gate cannot serve fails the deployment or the write instead
+  of every submission.
 - ``ReasonerScope`` — an optional ``Gate`` capability: whether the gate can
   serve a reasoner at all (a gate that loads per-reasoner assets serves only
-  the reasoners whose assets it loaded). The framework asks at startup, for
-  every registration that binds the gate, so a reasoner the gate would
-  refuse on every submission fails the deployment instead.
+  the reasoners whose assets it loaded). The framework asks after the
+  binding was admitted: it is the derived read of "has this gate accepted
+  a binding for this reasoner?".
 - ``GatePlugin`` — what the entry point publishes: ``gate_id``, ``kind``,
   ``deterministic``, an optional ``config_model`` that validates
-  ``GateContext.gate_config`` at intake, and ``build(framework) -> Gate``.
+  ``GateContext.gate_config`` at intake, an optional
+  ``binding_config_model`` that validates ``GateBinding.config`` when a
+  binding is admitted, and ``build(framework) -> Gate``.
 - ``ComposedGate`` — a built gate paired with the plugin that declared it,
   and whether the deployment mandates it for every reasoner
   (``DECISIONLEDGER_MANDATORY_GATES``, DR-29); ``FrameworkServices.gates``
   maps ``gate_id`` to one.
 
-A malformed plugin, or a mandated gate the deployment does not compose,
-raises ``GatePluginError`` at startup, so a broken deployment fails before
-it serves a decision. At decision time a gate fails closed instead
-(``invoke_gate``): an exception, a timeout past the request's budget, an
-output that is not a plain ``GateOutput`` for that gate or that the ledger
-could not store as returned, or no gate composed under the id all become a
-``failed`` invocation with the reason, which enforcement holds for review
-(DR-29), and the decision is still written. Tests inject fake gates by passing
+A malformed plugin, a mandated gate the deployment does not compose, or a
+registration whose gate set the composed gates cannot serve
+(``check_gate_set``) raises ``GatePluginError`` at startup, so a broken
+deployment fails before it serves a decision; the registrations resource
+runs the same ``check_gate_set`` when a registration is written. At
+decision time a gate fails closed instead (``invoke_gate``): an exception, a
+timeout past the request's budget, an output that is not a plain
+``GateOutput`` for that gate or that the ledger could not store as returned,
+or no gate composed under the id all become a ``failed`` invocation with
+the reason, which enforcement holds for review (DR-29), and the decision is
+still written. Tests inject fake gates by passing
 plugins explicitly (``create_app(gate_plugins=[...])``,
 ``build_framework_services(..., gate_plugins=[...])``) or explicit
 ``entry_points`` to ``discover_gates``.
@@ -57,10 +68,10 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.monitoring import duration_ms
-from core.exceptions import GatePluginError
+from core.exceptions import GateConfigError, GatePluginError
 from core.gate import EvidenceRef, GateOutput, GateVerdict
 from core.submission import storage_problem
 
@@ -71,7 +82,7 @@ if TYPE_CHECKING:
 
     from app.plugin import FrameworkServices
     from core.gate_request import GateRequest
-    from core.observation import ReasonerRegistration
+    from core.observation import GateBinding, ReasonerRegistration
 
 log = structlog.get_logger(__name__)
 
@@ -159,15 +170,55 @@ class ConfigAuthorizer(Protocol):
 
 
 @runtime_checkable
+class BindingValidator(Protocol):
+    """Optional ``Gate`` capability: admit or refuse a binding (DR-33).
+
+    A registration binds each gate of its gate set with a ``GateBinding``,
+    whose ``config`` the framework never interprets. A built gate that
+    defines ``validate_binding`` is asked about every binding to it: when
+    the deployment starts, for every registration it serves, and when a
+    registration is written over the API, for that registration. The
+    plugin's ``binding_config_model``, when it declares one, has validated
+    the config first. A refusal fails startup (``GatePluginError``) or
+    refuses the write (422), and nothing is stored.
+
+    A gate that serves reasoners from per-reasoner assets uses it to learn a
+    reasoner registered without a plugin. It must be idempotent and
+    add-only: admitting a binding it already admitted changes nothing. The
+    framework asks only after the checks that ask no gate anything passed,
+    but a write another gate then refuses leaves what this gate learned in
+    place until the deployment restarts (intake serves registered reasoners
+    only, so it decides nothing; a gate may still count it, for example as
+    a template id already taken).
+    """
+
+    def validate_binding(
+        self, reasoner_id: str, config: BaseModel | Mapping[str, Any]
+    ) -> None:
+        """Accept ``reasoner_id``'s binding with ``config``, or refuse it.
+
+        Args:
+            reasoner_id: The reasoner whose registration binds this gate.
+            config: The ``binding_config_model`` instance when the plugin
+                declares one, else the binding's raw ``config`` mapping.
+
+        Raises:
+            GateConfigError: The gate refuses the binding; the message says
+                why.
+        """
+        ...
+
+
+@runtime_checkable
 class ReasonerScope(Protocol):
     """Optional ``Gate`` capability: which reasoners the gate can serve.
 
-    A gate that serves reasoners from assets it loads when it is built (a
-    prompt template, a corpus) cannot serve a reasoner registered without
-    them — for example one registered through the deployment's registration
-    file, with no plugin installed — and would refuse every submission it is
-    addressed in. ``build_gates`` asks ``serves`` for every registration that
-    binds the gate and refuses the deployment when the answer is no.
+    A gate that serves reasoners from assets it loads (a prompt template, a
+    policy document) cannot serve a reasoner whose assets it does not have,
+    and would refuse every submission that reasoner addresses to it.
+    ``check_gate_set`` asks ``serves`` for every binding to the gate, after
+    the gate admitted the binding (``BindingValidator``), and refuses the
+    deployment (or the registration being written) when the answer is no.
     """
 
     def serves(self, reasoner_id: str) -> bool:
@@ -195,6 +246,11 @@ class GatePlugin(Protocol):
             request. Enforcement skips Tiers 2 and 4 for deterministic gates.
         config_model: Pydantic model that validates ``gate_config`` at
             intake, or ``None`` when the gate validates on consumption.
+        binding_config_model: Optional (a plugin may leave it out): Pydantic
+            model that validates a ``GateBinding.config`` when a binding is
+            admitted (DR-33), or ``None``. A gate with neither this model
+            nor ``BindingValidator`` takes no binding configuration, and a
+            binding that carries one is refused.
     """
 
     gate_id: str
@@ -330,14 +386,22 @@ def check_gate_plugin(obj: object, *, name: str) -> GatePlugin:
         ) from None
     if not isinstance(obj.deterministic, bool):
         raise GatePluginError(name, "deterministic must be a bool")
-    config_model = obj.config_model
-    if config_model is not None and not (
-        isinstance(config_model, type) and issubclass(config_model, BaseModel)
+    for attribute, model in (
+        ("config_model", obj.config_model),
+        ("binding_config_model", binding_config_model(obj)),
     ):
-        raise GatePluginError(
-            name, "config_model must be a Pydantic BaseModel subclass or None"
-        )
+        if model is not None and not (
+            isinstance(model, type) and issubclass(model, BaseModel)
+        ):
+            raise GatePluginError(
+                name, f"{attribute} must be a Pydantic BaseModel subclass or None"
+            )
     return obj
+
+
+def binding_config_model(plugin: GatePlugin) -> type[BaseModel] | None:
+    """The plugin's ``binding_config_model``, or ``None`` when it declares none."""
+    return getattr(plugin, "binding_config_model", None)
 
 
 def build_gates(
@@ -356,20 +420,10 @@ def build_gates(
             ``plugins``.
 
     Once every gate is built, the gate set of every registration the
-    deployment serves (``framework.registry``: installed plugins and the
-    registration file) is checked against them, so a deployment that cannot
-    serve a reasoner fails here rather than on every decision:
-
-    - a gate a registration binds as mandatory must be composed (an
-      advisory binding to a missing gate is only logged: that reasoner's
-      gated decisions fail closed at that gate);
-    - a composed gate a registration binds must serve that reasoner, when
-      the gate says whom it serves (``ReasonerScope``): otherwise intake
-      would refuse every submission of the reasoner;
-    - a gate the deployment mandates must accept, from every composed
-      reasoner that does not bind it, the empty configuration it will run
-      with: its ``config_model`` validates ``{}`` and, when the built gate
-      is a ``ConfigAuthorizer``, it authorizes that for the reasoner.
+    deployment serves (``framework.registry``: installed plugins, the
+    registration file, and the registrations written over the API) is
+    checked against them (``check_gate_set``), so a deployment that cannot
+    serve a reasoner fails here rather than on every decision.
 
     Returns:
         Composed gates keyed by ``gate_id``, in plugin order, the mandated
@@ -435,37 +489,128 @@ def _check_gate_sets(
 ) -> None:
     """Fail on a reasoner gate set this deployment's gates cannot serve."""
     for registration in registrations:
-        reasoner_id = registration.reasoner_id
-        for binding in registration.gates:
-            composed = gates.get(binding.gate_id)
-            if composed is not None:
-                gate = composed.gate
-                if isinstance(gate, ReasonerScope) and not gate.serves(reasoner_id):
-                    raise GatePluginError(
-                        binding.gate_id,
-                        f"reasoner {reasoner_id!r} binds this gate, which does not "
-                        "serve it (a gate that loads per-reasoner assets serves "
-                        "only the reasoners whose assets it loaded): intake would "
-                        "refuse every submission of that reasoner. Install the "
-                        "reasoner's plugin, or remove the binding.",
-                    )
-                continue
-            if binding.mandatory:
-                raise GatePluginError(
-                    binding.gate_id,
-                    f"reasoner {reasoner_id!r} binds this gate as mandatory, but "
-                    f"the deployment does not compose it (composed: {sorted(gates)})",
-                )
-            log.warning(
-                "gates.advisory_binding_not_composed",
-                component="gates",
-                gate_id=binding.gate_id,
-                reasoner_id=reasoner_id,
-                msg="gated decisions of this reasoner fail closed at this gate",
+        check_gate_set(registration, gates)
+
+
+def check_gate_set(
+    registration: ReasonerRegistration,
+    gates: Mapping[str, ComposedGate],
+) -> None:
+    """Check that the composed gates can serve one registration's gate set.
+
+    The deployment runs it for every registration it serves at startup
+    (``build_gates``), and the registrations resource runs it for a
+    registration written over the API (DR-33), so a reasoner the gates
+    cannot serve is refused before it decides anything. The checks that ask
+    no gate to admit anything run first, so a gate set refused by one of
+    them leaves every gate as it was:
+
+    - a gate the registration binds as mandatory must be composed (an
+      advisory binding to a missing gate is only logged: that reasoner's
+      gated decisions fail closed at that gate);
+    - a gate the deployment mandates must accept, from a reasoner that does
+      not bind it, the empty configuration it will run with: its
+      ``config_model`` validates ``{}`` and, when the built gate is a
+      ``ConfigAuthorizer``, it authorizes that for the reasoner;
+    - then every composed gate the registration binds must admit the
+      binding (``admit_binding``: the plugin's ``binding_config_model``
+      validates the binding's ``config``, then the gate's
+      ``validate_binding`` accepts it), and then serve the reasoner, when
+      the gate says whom it serves (``ReasonerScope``): otherwise intake
+      would refuse every submission of the reasoner.
+
+    Args:
+        registration: The registration whose gate set is checked.
+        gates: The composed gates, keyed by ``gate_id``.
+
+    Raises:
+        GatePluginError: The gate set cannot be served; ``gate_id`` names
+            the gate, ``reason`` says why.
+    """
+    reasoner_id = registration.reasoner_id
+    for binding in registration.gates:
+        if binding.gate_id in gates:
+            continue
+        if binding.mandatory:
+            raise GatePluginError(
+                binding.gate_id,
+                f"reasoner {reasoner_id!r} binds this gate as mandatory, but "
+                f"the deployment does not compose it (composed: {sorted(gates)})",
             )
-        for gate_id, composed in gates.items():
-            if composed.mandatory and gate_id not in registration.gate_ids:
-                _check_unbound_mandate(composed, reasoner_id)
+        log.warning(
+            "gates.advisory_binding_not_composed",
+            component="gates",
+            gate_id=binding.gate_id,
+            reasoner_id=reasoner_id,
+            msg="gated decisions of this reasoner fail closed at this gate",
+        )
+    for gate_id, composed in gates.items():
+        if composed.mandatory and gate_id not in registration.gate_ids:
+            _check_unbound_mandate(composed, reasoner_id)
+    for binding in registration.gates:
+        composed = gates.get(binding.gate_id)
+        if composed is None:
+            continue
+        try:
+            admit_binding(composed, binding, reasoner_id)
+        except ValueError as err:  # GateConfigError, or a validation error
+            raise GatePluginError(
+                binding.gate_id,
+                f"the gate refuses the binding of reasoner {reasoner_id!r}: {err}",
+            ) from err
+        gate = composed.gate
+        if isinstance(gate, ReasonerScope) and not gate.serves(reasoner_id):
+            raise GatePluginError(
+                binding.gate_id,
+                f"reasoner {reasoner_id!r} binds this gate, which does not "
+                "serve it (a gate that loads per-reasoner assets serves only "
+                "the reasoners whose assets it has): intake would refuse "
+                "every submission of that reasoner. Provide the assets the "
+                "gate reads for that reasoner (see the gate's documentation), "
+                "or remove the binding.",
+            )
+
+
+def admit_binding(
+    composed: ComposedGate, binding: GateBinding, reasoner_id: str
+) -> None:
+    """Have a composed gate admit one binding of a reasoner to it (DR-33).
+
+    The plugin's ``binding_config_model``, when it declares one, validates
+    the binding's ``config``; then a gate that is a ``BindingValidator``
+    accepts or refuses the binding. A gate with neither takes no binding
+    configuration: a binding to it with a non-empty ``config`` is refused.
+
+    Args:
+        composed: The gate the binding names.
+        binding: The binding.
+        reasoner_id: The reasoner whose registration holds the binding.
+
+    Raises:
+        GateConfigError: The config does not validate, the gate takes no
+            configuration, or the gate refuses the binding.
+    """
+    model = binding_config_model(composed.plugin)
+    config: BaseModel | Mapping[str, Any] = binding.config
+    if model is not None:
+        try:
+            config = model.model_validate(binding.config)
+        except ValidationError as err:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in e['loc']) or '<root>'}: {e['msg']}"
+                for e in err.errors(include_url=False)
+            )
+            msg = f"the binding's config is invalid: {problems}"
+            raise GateConfigError(msg) from err
+    gate = composed.gate
+    if isinstance(gate, BindingValidator):
+        gate.validate_binding(reasoner_id, config)
+    elif model is None and binding.config:
+        msg = (
+            "the gate takes no binding configuration (its plugin declares no "
+            "binding_config_model and the gate does not validate bindings)"
+        )
+        raise GateConfigError(msg)
 
 
 def _check_unbound_mandate(composed: ComposedGate, reasoner_id: str) -> None:

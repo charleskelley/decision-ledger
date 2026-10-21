@@ -48,7 +48,7 @@ import pytest
 from pydantic import Field
 
 from app.gates import ComposedGate, ConfigAuthorizer, invoke_gate
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.submit import (
     DEFAULT_GATE_BUDGET_MS,
     SKIPPED_FOR_BLOCK,
@@ -134,7 +134,7 @@ def _gate(gates: dict[str, ComposedGate], gate_id: str = "fake") -> Any:
 
 
 def _registry(registration: ReasonerRegistration = STUB_REGISTRATION):
-    return StaticReasonerRegistry([registration])
+    return LiveReasonerRegistry([registration])
 
 
 def _binding(gate_id: str, *, mandatory: bool = False) -> GateBinding:

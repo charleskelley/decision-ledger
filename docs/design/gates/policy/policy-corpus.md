@@ -117,8 +117,8 @@ uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id> [--co
 
 | Option | Meaning |
 |---|---|
-| `--reasoner-id` | Required. The reasoner that owns the corpus: stored on every chunk (the tenant filter at retrieval) and used to find the corpus directory of the installed plugin with that `reasoner_id`. An id no installed plugin has exits 2. |
-| `--corpus-dir` | Index this directory instead of the plugin's `corpus_dir` (for tests, or before the plugin is installed). |
+| `--reasoner-id` | Required. The reasoner that owns the corpus: stored on every chunk (the tenant filter at retrieval) and used to find its corpus directory: the `corpus_dir` of the composed plugin with that `reasoner_id` (plugins filtered by `DECISIONLEDGER_REASONERS`), else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` (DR-33). An id the ledger does not register (plugins, the registration file, the API's registrations), or whose corpus is in neither place, exits 2. |
+| `--corpus-dir` | Index this directory instead (for tests, or a directory the gate does not read); the reasoner must still be registered. |
 | `--wipe` | Delete every chunk of this reasoner from both stores before loading. |
 
 The loader reads the Postgres DSN from the framework settings (the gate's

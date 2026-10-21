@@ -9,6 +9,12 @@ requests a gate received and on its lifecycle. A plugin built with
 gate plus the optional ``ConfigAuthorizer`` capability, refusing exactly
 those reasoners.
 
+Every ``FakeGate`` also admits bindings (the optional ``BindingValidator``
+capability, DR-33): its plugin declares ``FakeBindingConfig`` as the
+``binding_config_model``, the gate records every binding it is asked about
+on ``gate.bindings``, and it refuses a binding whose config says
+``refuse: true``.
+
 ``LOOKUP_PLUGIN`` (``gate_id="fake-lookup"``, deterministic, kind
 ``lookup``) is the lookup-style gate the gate-set tests bind as mandatory:
 like a do-not-contact or sanctions adapter, it answers from a list keyed by
@@ -25,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.gates import GateKind
 from core.actions import DecisionAction
+from core.exceptions import GateConfigError
 from core.gate import EvidenceRef, GateOutput, GateVerdict
 
 if TYPE_CHECKING:
@@ -71,6 +78,20 @@ class FakeGateConfig(BaseModel):
     delay_ms: float = Field(default=0.0, ge=0.0)
 
 
+class FakeBindingConfig(BaseModel):
+    """The fake gate's ``binding_config_model`` — scripts what admission does.
+
+    Attributes:
+        label: Free text, recorded with the binding.
+        refuse: Refuse the binding (``GateConfigError``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str | None = None
+    refuse: bool = False
+
+
 class FakeGate:
     """A scripted gate: returns what its request's ``gate_config`` asks for.
 
@@ -79,6 +100,8 @@ class FakeGate:
         deterministic: The flag it stamps on every output.
         framework: The ``FrameworkServices`` it was built against.
         requests: Every request received, in order.
+        bindings: Every ``(reasoner_id, config)`` binding it was asked to
+            admit, in order.
         closed: ``True`` once ``close()`` ran.
         output_override: When set, returned verbatim from ``evaluate`` —
             lets a test hand the framework a malformed output.
@@ -91,8 +114,19 @@ class FakeGate:
         self.deterministic = deterministic
         self.framework = framework
         self.requests: list[GateRequest] = []
+        self.bindings: list[tuple[str, object]] = []
         self.closed = False
         self.output_override: object | None = None
+
+    def validate_binding(self, reasoner_id: str, config: object) -> None:
+        """Record the binding; refuse it when its config says ``refuse``."""
+        self.bindings.append((reasoner_id, config))
+        if isinstance(config, FakeBindingConfig) and config.refuse:
+            msg = (
+                f"fake gate {self.gate_id!r} was scripted to refuse the binding "
+                f"of reasoner {reasoner_id!r}"
+            )
+            raise GateConfigError(msg)
 
     async def evaluate(self, request: GateRequest) -> GateOutput:
         """Return the scripted ``GateOutput`` (or raise, if scripted to)."""
@@ -197,6 +231,7 @@ class FakeGatePlugin:
         self.kind = kind
         self.deterministic = deterministic
         self.config_model: type[BaseModel] | None = FakeGateConfig
+        self.binding_config_model: type[BaseModel] | None = FakeBindingConfig
         self.refused_reasoners = refused_reasoners
         self.built: list[FakeGate] = []
 
@@ -281,6 +316,9 @@ class FakeLookupGate:
 
 class FakeLookupGatePlugin:
     """``GatePlugin`` for the deterministic lookup-style fake gate.
+
+    It declares no ``binding_config_model`` and its gate does not validate
+    bindings, so a binding to it takes no configuration.
 
     Args:
         gate_id: The id it registers under.

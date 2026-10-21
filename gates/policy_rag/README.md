@@ -41,9 +41,10 @@ so a bare `uv sync` at the repo root is enough. Entry points refresh only on
 reinstall: re-run `uv sync` after editing this `pyproject.toml`.
 
 `build` derives a profile per composed reasoner plugin, loads every
-reasoner's prompt templates, opens its own autocommit Postgres connection to
-the framework's database and applies its DDL, and builds the retriever, the
-models, and the OpenAI client. It opens no Elasticsearch connection, so a
+plugin reasoner's prompt templates, opens its own autocommit Postgres
+connection to the framework's database and applies its DDL, and builds the
+retriever, the models, and the OpenAI client. A reasoner registered without
+a plugin is admitted later, from the asset root (below). It opens no Elasticsearch connection, so a
 deployment whose decisions never reach the gate runs with Elasticsearch
 down.
 
@@ -72,14 +73,24 @@ rejected (`422 GATE_CONFIG_INVALID`).
 
 Who may send what is decided by the gate, not by the reasoner's
 registration. When the gate is built it derives a `ReasonerProfile` for every
-composed reasoner from what it ships: the template ids in its `prompts_dir`
-and the `jurisdiction` front matter of its `corpus_dir` documents. The built
-gate is a `ConfigAuthorizer`: at intake a reasoner may render only templates
-it ships and filter only to jurisdictions its own corpus covers
-(`422 GATE_CONFIG_UNAUTHORIZED` otherwise). It is also a `ReasonerScope`: it
-serves only the reasoners it built a profile for, so a reasoner registered
-through the registration file, with no plugin installed, cannot bind it
-(startup refuses the deployment).
+composed reasoner plugin from what it ships: the template ids in its
+`prompts_dir` and the `jurisdiction` front matter of its `corpus_dir`
+documents. The built gate is a `ConfigAuthorizer`: at intake a reasoner may
+render only templates it ships and filter only to jurisdictions its own
+corpus covers (`422 GATE_CONFIG_UNAUTHORIZED` otherwise).
+
+It is also a `BindingValidator` and a `ReasonerScope` (DR-33). The framework
+asks it to admit every registration that binds it, at startup and when a
+registration is written over the API. A plugin reasoner is admitted as it
+is. A reasoner registered by file or over the API is admitted from the
+asset root, `POLICY_RAG_GATE_ASSETS_ROOT`, laid out
+`<root>/<reasoner_id>/prompts/*.yaml` and `<root>/<reasoner_id>/corpus/**/*.md`:
+the gate reads that directory once, adds its templates to the prompt
+registry (template ids are global, so one already registered refuses the
+binding) and its profile, and serves it from then on. A missing directory,
+no template, a malformed template, or a corpus with no document that parses
+refuses the binding, as does a binding `config` (the gate takes none until
+DR-34). See [Registration](../../docs/design/registration.md).
 
 ## Infrastructure
 
@@ -106,6 +117,7 @@ Postgres):
 | Setting | Default | Used for |
 | --- | --- | --- |
 | `POLICY_RAG_GATE_ELASTICSEARCH_URL` | `http://localhost:9200` | The BM25 store |
+| `POLICY_RAG_GATE_ASSETS_ROOT` | blank (none) | The prompts and corpus of reasoners registered without a plugin |
 | `OPENAI_API_KEY` | none | The gate's model calls; RAGAS in the eval |
 | `ANTHROPIC_API_KEY` | none | The eval's judges |
 
@@ -121,10 +133,12 @@ make build-policy-index-<reasoner_id>   # e.g. make build-policy-index-ato-reaso
 uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id>
 ```
 
-The loader resolves the corpus directory from the installed reasoner plugin
-with that `reasoner_id` (`--corpus-dir` overrides), chunks and embeds every
-Markdown document, and writes both stores, tagging every chunk with the
-`reasoner_id`. `--wipe` first clears that reasoner's chunks from both
+The loader refuses a `reasoner_id` the ledger does not register (a plugin,
+the registration file, or the API's registrations, read from the ledger's
+Postgres). It resolves the corpus directory from the composed reasoner
+plugin with that `reasoner_id`, else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`
+(`--corpus-dir` overrides both), chunks and embeds every Markdown document,
+and writes both stores, tagging every chunk with the `reasoner_id`. `--wipe` first clears that reasoner's chunks from both
 stores. Without it the loader replaces each document's rows in Postgres but
 deletes nothing in Elasticsearch, so re-indexing an already indexed corpus
 without `--wipe` leaves its earlier BM25 documents beside the new ones. See

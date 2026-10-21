@@ -16,14 +16,18 @@ the production code:
   production fold (``core.identity.project_membership``).
 - ``MemorySnapshots`` keeps registration snapshots as canonical JSON and
   reloads them on read, as the table does.
+- ``MemoryApiRegistrations`` keeps the registrations written over the API
+  (DR-33) in a dict and records each version's snapshot in the store's
+  ``MemorySnapshots``, as ``ApiRegistrations`` writes both in one statement;
+  ``load`` returns what a restart would read back.
 - ``MemoryJournal`` keeps resolution attempts in a list and refuses a
   repeated ``(decision_id, sequence)`` the way the table's unique constraint
   does; ``realized_action`` is inherited.
 
 ``memory_framework`` composes them into ``FrameworkServices`` the way the
-bootstrap does (registry, snapshots, the identity step with an optional
-resolver, gates built against the services), and ``TEST_KEYRING`` holds the
-keys the API tests authenticate with.
+bootstrap does (the live registry with its API registrations, snapshots, the
+identity step with an optional resolver, gates built against the services),
+and ``TEST_KEYRING`` holds the keys the API tests authenticate with.
 """
 
 from __future__ import annotations
@@ -39,7 +43,11 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 from app.audit.entity_journal import EntityJournal
-from app.audit.registrations import RegistrationSnapshot, RegistrationSnapshots
+from app.audit.registrations import (
+    ApiRegistrations,
+    RegistrationSnapshot,
+    RegistrationSnapshots,
+)
 from app.audit.resolution_journal import ResolutionJournal
 from app.audit.store import (
     BundleStore,
@@ -60,6 +68,7 @@ from app.identity import (
 )
 from app.plugin import FrameworkServices
 from app.plugins import build_registry
+from app.reasoner_registry import API_SOURCE, RegisteredReasoner
 from app.settings import FrameworkSettings
 from core.bundle import BUNDLE_SCHEMA_VERSION, DecisionBundle
 from core.identity import (
@@ -81,7 +90,7 @@ if TYPE_CHECKING:
     from app.gates import GatePlugin
     from app.identity import IdentityResolverPlugin
     from app.plugin import ReasonerPlugin
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
     from core.resolution import ResolutionAttempt
 
 #: Keys the API tests authenticate with.
@@ -127,6 +136,42 @@ class MemorySnapshots(RegistrationSnapshots):
         return [snapshot for snapshot in found if snapshot is not None]
 
 
+class MemoryApiRegistrations(ApiRegistrations):
+    """The API registrations in a dict; each save also records its snapshot.
+
+    Attributes:
+        rows: ``reasoner_id`` → the entry served now.
+        snapshots: The snapshot store each save records into.
+    """
+
+    def __init__(self, snapshots: RegistrationSnapshots | None = None) -> None:
+        # No connection: the rows live here.
+        self.rows: dict[str, RegisteredReasoner] = {}
+        self.snapshots = snapshots if snapshots is not None else MemorySnapshots()
+
+    def load(self) -> list[RegisteredReasoner]:
+        """The rows a restart would read back, sorted by ``reasoner_id``."""
+        return [self.rows[reasoner_id] for reasoner_id in sorted(self.rows)]
+
+    def save(
+        self, registration: ReasonerRegistration, *, registered_by: str
+    ) -> RegisteredReasoner:
+        """Record the version's snapshot, then create or update the row."""
+        version = self.snapshots.record(registration)
+        now = datetime.now(UTC)
+        current = self.rows.get(registration.reasoner_id)
+        entry = RegisteredReasoner(
+            registration=registration,
+            version=version,
+            source=API_SOURCE,
+            registered_by=registered_by,
+            registered_at=current.registered_at if current else now,
+            updated_at=now,
+        )
+        self.rows[registration.reasoner_id] = entry
+        return entry
+
+
 @dataclass
 class MemoryRow:
     """One stored bundle row."""
@@ -152,7 +197,7 @@ class MemoryBundleStore(BundleStore):
 
     def __init__(  # no connection
         self,
-        registry: StaticReasonerRegistry,
+        registry: LiveReasonerRegistry,
         *,
         snapshots: RegistrationSnapshots | None = None,
     ) -> None:
@@ -439,6 +484,7 @@ def memory_framework(
     journal: ResolutionJournal | None = None,
     resolver_plugin: IdentityResolverPlugin | None = None,
     identity_budget_ms: int = DEFAULT_IDENTITY_BUDGET_MS,
+    api_registrations: MemoryApiRegistrations | None = None,
 ) -> FrameworkServices:
     """Compose in-memory ``FrameworkServices`` the way the bootstrap does.
 
@@ -451,15 +497,27 @@ def memory_framework(
         resolver_plugin: The active identity resolver, built against the
             services; the passthrough when omitted.
         identity_budget_ms: The identity step's budget per resolver call.
+        api_registrations: The registrations written over the API, as a
+            restart reads them back (pass the one an earlier
+            ``memory_framework`` wrote to); a fresh, empty one by default.
+            Its snapshots become the store's.
 
     Returns:
         The services, with a ``MemoryBundleStore`` whose snapshots hold every
         registration the registry serves.
     """
     plugins = tuple(plugins)
-    registry = build_registry(plugins, registration_file=registration_file)
+    written = (
+        api_registrations if api_registrations is not None else MemoryApiRegistrations()
+    )
+    registry = build_registry(
+        plugins,
+        registration_file=registration_file,
+        written=written.load(),
+        writer=written,
+    )
     declared_namespaces(entry.registration for entry in registry.entries())
-    store = MemoryBundleStore(registry)
+    store = MemoryBundleStore(registry, snapshots=written.snapshots)
     for entry in registry.entries():
         store.snapshots.record(entry.registration)
     services = FrameworkServices(

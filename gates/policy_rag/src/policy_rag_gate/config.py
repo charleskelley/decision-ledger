@@ -7,14 +7,17 @@ carries a context the gate could evaluate for shadow evaluation. Its typed field
 replace the convention keys the framework used to check by name.
 
 ``ReasonerProfile`` is what one reasoner may submit to the gate: the prompt
-templates it ships (its ``prompts_dir``) and the jurisdictions its policy
-corpus covers (the ``jurisdiction`` front matter of its ``corpus_dir``
-documents). The gate derives one profile per composed reasoner when it is
-built and authorizes every submission against the submitter's profile at
-intake (``PolicyGate.authorize_config``). This replaces the registration's
-former ``allowed_prompt_template_ids`` / ``allowed_jurisdictions`` (DR-28):
-a reasoner may render only its own templates and may filter retrieval only
-to jurisdictions its own corpus holds.
+templates it ships and the jurisdictions its policy corpus covers (the
+``jurisdiction`` front matter of its corpus documents). The gate derives one
+profile per composed reasoner plugin when it is built (from the plugin's
+``prompts_dir`` and ``corpus_dir``), and one per reasoner registered without
+a plugin when it admits that reasoner's binding (from its directory under
+the asset root, DR-33); it authorizes every submission against the
+submitter's profile at intake (``PolicyGate.authorize_config``). This
+replaces the registration's former ``allowed_prompt_template_ids`` /
+``allowed_jurisdictions`` (DR-28): a reasoner may render only its own
+templates and may filter retrieval only to jurisdictions its own corpus
+holds.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from policy_rag_gate.prompt_registry import YamlPromptRegistry
+from policy_rag_gate.prompt_registry import load_templates
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,13 +64,40 @@ class PolicyGateConfig(BaseModel):
     corpus_version: str = "unknown"
 
 
+def corpus_jurisdictions(corpus_dir: Path) -> frozenset[str]:
+    """The jurisdictions the policy documents under ``corpus_dir`` cover.
+
+    Searches recursively. A document whose front matter fails to parse (or
+    that cannot be read) is skipped, as the corpus loader skips it: it never
+    reaches the index, so a reasoner cannot claim its jurisdiction. A
+    missing directory covers none.
+
+    Args:
+        corpus_dir: A reasoner's directory of Markdown policy documents.
+
+    Returns:
+        The ``jurisdiction`` of every document that parses.
+    """
+    # Imported here: the loader module imports the embedding stack.
+    from policy_rag_gate.corpus_loader import parse_document
+
+    jurisdictions: set[str] = set()
+    for path in sorted(corpus_dir.rglob("*.md")):
+        try:
+            document, _ = parse_document(path)
+        except (OSError, ValueError, KeyError):
+            continue
+        jurisdictions.add(document.jurisdiction)
+    return frozenset(jurisdictions)
+
+
 @dataclass(frozen=True)
 class ReasonerProfile:
     """What one reasoner may submit to the policy gate.
 
     Attributes:
-        template_ids: Prompt templates the reasoner ships in its
-            ``prompts_dir``.
+        template_ids: Prompt templates the reasoner ships (its plugin's
+            ``prompts_dir``, or its ``prompts/`` under the asset root).
         jurisdictions: Jurisdictions its policy corpus covers.
     """
 
@@ -91,21 +121,12 @@ class ReasonerProfile:
             The reasoner's profile.
 
         Raises:
-            ValueError: A prompt template file is malformed.
+            ValueError: A prompt template file is malformed, or two declare
+                one ``template_id``.
         """
-        # Imported here: the loader module imports the embedding stack.
-        from policy_rag_gate.corpus_loader import parse_document
-
-        jurisdictions: set[str] = set()
-        for path in sorted(corpus_dir.rglob("*.md")):
-            try:
-                document, _ = parse_document(path)
-            except (ValueError, KeyError):
-                continue
-            jurisdictions.add(document.jurisdiction)
         return cls(
-            template_ids=frozenset(YamlPromptRegistry([prompts_dir]).registered_ids()),
-            jurisdictions=frozenset(jurisdictions),
+            template_ids=frozenset(load_templates(prompts_dir)),
+            jurisdictions=corpus_jurisdictions(corpus_dir),
         )
 
     def authorize(self, config: PolicyGateConfig) -> None:

@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-32.** The next record is DR-33.
+**Current head: DR-33.** The next record is DR-34.
 
 ### Status values
 
@@ -2474,7 +2474,12 @@ artifacts have not been evaluated.
 
 ## DR-28: Gate contract and gate plugins
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-33: a registration's gate binding carries
+an opaque `config` the gate validates; a `GatePlugin` may declare a
+`binding_config_model`, and a built gate may be a `BindingValidator` the
+framework asks at startup and when a registration is written; the RAG gate
+also serves reasoners registered without a plugin, from its asset root
+`POLICY_RAG_GATE_ASSETS_ROOT`)
 **Category:** Pipeline & System Design
 
 > Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
@@ -3209,7 +3214,11 @@ a threshold, and each sample costs one call per advisory gate.
 
 ## DR-31: Wire submission schema, HTTP surface, registration as data
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-33: registrations are writable over the
+API, `PUT /api/v1/reasoners/{reasoner_id}` with the operator key, kept in
+`decisionledger.reasoner_registry` and served as `source: api`; a reasoner
+registered by file or over the API can bind the RAG gate through its asset
+root)
 **Category:** Pipeline & System Design
 
 > Replaces the in-process handoff that DR-14 describes (see its status).
@@ -3788,3 +3797,222 @@ thread busy while its decision proceeds unresolved.
   `(example-widget, widget_id)` on every submission; its entity ids are
   unchanged, and its `registration_version` moved from `da9c3f8102bb9532`
   to `5ebae2ed3c2f3be1`.)*
+
+---
+
+## DR-33: Registration is a writable, versioned resource; bindings carry gate-validated config
+
+**Status:** Accepted
+**Category:** Pipeline & System Design
+
+> Amends DR-28 (a binding carries the gate's configuration for the
+> reasoner, and a gate admits each binding) and DR-31 (the registration
+> write route it deferred); both records' status lines say so. Phase 1 of
+> the ledger-decoupling program implements it (below).
+
+**Decision.**
+
+- **Three sources, one registry.** Plugin, deployment file, and
+  `PUT /api/v1/reasoners/{reasoner_id}` (operator principal only). All three
+  produce the same `ReasonerRegistration`, the same `registration_version`,
+  the same snapshot row. `source` is `plugin:<module>` | `file:<path>` |
+  `api`.
+- **Persistence.** The table
+  `decisionledger.reasoner_registry(reasoner_id PK, registration_version,
+  source, registered_by, registered_at, updated_at)` holds the *current*
+  API-sourced registrations; the existing `reasoner_registrations` snapshot
+  table keeps every version ever served. At startup the registry composes
+  plugins + file + persisted API rows. Plugin and file remain declared
+  config; a plugin or file id that also exists as an API row refuses startup
+  (the same rule as plugin vs file).
+- **Write semantics.** PUT creates, or replaces an `api`-sourced
+  registration (new version, new snapshot; old bundles replay against their
+  snapshot). PUT on a plugin- or file-sourced id answers
+  `409 REGISTRATION_SOURCE_IMMUTABLE`. No DELETE (bundles reference
+  registrations; deregistration is deferred). The body is the same JSON
+  shape as a file entry.
+- **Admission = the startup check, at write time.** PUT runs exactly what
+  `build_registry` + `declared_namespaces` + the gate-set check run at
+  startup: validation, the native namespace check across the live registry,
+  every bound gate composed if mandatory, every bound gate's
+  `validate_binding` (below) accepted. A refusal is 422 with the gate's
+  reason; nothing is persisted.
+- **Live registry.** The `ReasonerRegistry` protocol gains `register`; the
+  framework's registry (`LiveReasonerRegistry`, formerly
+  `StaticReasonerRegistry`) is backed by a map guarded by a lock plus the
+  Postgres table (single-process MVP; the table is the source of truth on
+  restart). `FrameworkServices.registry` stays the handle.
+- **Per-binding config.** `GateBinding` gains
+  `config: dict[str, JsonValue] = {}` (opaque to the framework, part of the
+  canonical registration, so versioned and snapshotted). `GatePlugin` gains
+  an optional `binding_config_model: type[BaseModel] | None` and the built
+  gate an optional capability
+  `BindingValidator.validate_binding(reasoner_id, config) -> None` (raises
+  `GateConfigError` with a reason), called at startup for every registration
+  and at PUT for the new one. `ReasonerScope.serves` stays as the derived
+  read ("has this gate accepted a binding for this reasoner?").
+- **Gate assets for non-plugin reasoners (RAG gate).** The gate reads
+  reasoner assets from plugins *and* from a mounted asset root
+  `POLICY_RAG_GATE_ASSETS_ROOT` laid out `<reasoner_id>/prompts/*.yaml` and
+  `<reasoner_id>/corpus/**/*.md`. `validate_binding` for a reasoner not yet
+  known reads the root for that reasoner (add-only; template ids stay
+  global and immutable; a collision refuses the binding). The corpus loader
+  resolves `--reasoner-id` via plugin, then asset root, then `--corpus-dir`
+  (an explicit `--corpus-dir` still overrides: see the judgment calls), and
+  refuses an id the registry does not know (it reads the ledger's Postgres,
+  the database it writes to).
+- **Clients and surfaces.** `LedgerClient.register(registration) ->
+  RegisteredReasonerView` on `LocalClient` and `HttpClient`;
+  `GET /reasoners/{id}` shows `source` and `registered_at`; conformance gains
+  a registration suite run with the operator key; the MCP server is
+  unchanged (registering is an operator act).
+
+**Rationale.** DecisionLedger is meant to be a decoupled system of record:
+a reasoner that runs as its own service, in any language, should reach it
+without a plugin installed in the ledger's environment. DR-31 made the
+submission a wire contract and let a reasoner register through a mounted
+file, but left registrations read-only: changing one meant redeploying the
+ledger, and a reasoner registered by file could not bind the RAG policy
+gate, which served only the reasoners whose prompts and corpus it loaded
+from their plugins. A write route closes the first gap; reading
+per-reasoner assets from a mounted root closes the second.
+
+Making the write route the startup check, run at write time, keeps one
+definition of an admissible registration: whatever a deployment would
+refuse to start with, a write is refused, with the same reason, and nothing
+is stored. Content addressing and the snapshot table,
+which DR-31 introduced so a later write route could change a registration
+without breaking replay, carry the rest: a replaced registration is a new
+version with its own snapshot, and every bundle replays against the version
+it cites.
+
+A binding's configuration belongs to the gate, as `gate_config` does (DR-28):
+the framework stores it as opaque JSON in the registration, so it is
+versioned and snapshotted with everything else the decision was made
+under, and asks the gate to validate it when it admits the binding. That is
+the seam DR-34 uses to name the corpora a reasoner's policy gate reads,
+without the framework learning what a corpus is.
+
+What it gives up: a single process holds the lock (two ledger processes on
+one database would not serialize their writes); keys are still deployment
+configuration, so a new reasoner's key needs a restart unless it was
+provisioned in advance; there is no deregistration; and a gate learns
+reasoners only add-only, so a template added to an admitted reasoner's
+directory is read at the next start.
+
+**Rejected alternatives.**
+
+- **A PUT that applies on restart.** It would not meet "easily registered":
+  the reasoner could not decide until the ledger restarted, and a write the
+  gates would refuse would only fail at that restart.
+- **Overriding plugin or file registrations over the API.** Declared
+  configuration must stay declared: a deployment's plugins and file are
+  reviewed with the deployment, and an API override would make the running
+  registration differ from the declared one silently.
+- **Per-reasoner key issuance over the API.** Keys stay deployment
+  configuration; a new reasoner's key is added to `DECISIONLEDGER_API_KEYS`
+  or `DECISIONLEDGER_API_KEYS_FILE`.
+- **An upload API for prompts and corpus.** Deferred: the asset root plus
+  the corpus loader covers the deployment story, and uploads would reverse
+  the load-once prompt registry.
+
+**Cross-references.**
+
+- Amends DR-28 and DR-31 (see their status lines). Builds on DR-31's
+  content-addressed registrations and snapshots, and on DR-32's native
+  namespace declarations (checked across the live registry).
+- Siblings: DR-29 (the gate set a registration declares), DR-30 (the bypass
+  rules a record cites), DR-34 (corpus references on the policy gate's
+  binding config).
+- Design pages: [Registration](registration.md),
+  [Submission contract](reasoners/reasoner-handoff.md#over-http).
+
+**Implementation (Phase 1).**
+
+- **`core/`.** `GateBinding.config` (`dict[str, JsonValue]`, a non-finite
+  number refused however the input spelled it, and a hash that agrees with
+  equality, so bindings stay hashable); `canonical_registration` drops an
+  empty `config` per binding, so every registration whose bindings carry
+  none kept its version (the stub's `909c836dc579e075`, the example's
+  `5ebae2ed3c2f3be1`). `ReasonerRegistry.register(registration, *,
+  registered_by) -> str`. `GateConfigError(ValueError)`.
+- **Registry and storage.** `app/reasoner_registry.py:LiveReasonerRegistry`:
+  lock-free reads over a map a write swaps whole; writes under a re-entrant
+  lock, through a `RegistrationWriter`. `app/audit/registrations.py:
+  ApiRegistrations` writes the version's snapshot and the registry row in
+  one statement (a data-modifying CTE: the shared autocommit connection
+  never opens a transaction block), and `load` reads the rows joined to
+  their snapshots. The table is in `app/audit/sql/02_tables.sql`, with a
+  foreign key into the snapshots and `source = 'api'` checked.
+  `build_registry` composes the written rows; the bootstrap reads them,
+  each under the version of the registration it reloads (a stored value
+  `jsonb` rewrote would otherwise leave the row's version stale; the write
+  route refuses such numbers: `-0.0`, and floats from 1e16 up).
+  `app.bootstrap.read_registry` composes the same registry, read only, for
+  a tool beside the ledger.
+- **Admission.** `app/gates.py:check_gate_set` is the per-registration
+  check startup runs for every registration and PUT for one: the checks
+  that ask no gate anything first (mandatory gates composed, mandated gates
+  accepting an empty configuration), then `admit_binding` per bound gate,
+  which validates `config` against `binding_config_model`, then asks a
+  `BindingValidator`; a gate with neither refuses a non-empty `config`. `binding_config_model` is read with `getattr`, so a plugin
+  written before this record stays well formed.
+- **API and clients.** `PUT /api/v1/reasoners/{reasoner_id}` in
+  `app/api/registrations.py` (`register_reasoner`: parse strictly, 409 for a
+  declared source, unchanged → 200 with nothing written, admit, write; in a
+  worker thread). Codes: `REGISTRATION_INVALID`,
+  `NATIVE_NAMESPACE_CONFLICT`, `GATE_BINDING_REFUSED` (422),
+  `REGISTRATION_SOURCE_IMMUTABLE` (409). The view gains `registered_by`,
+  `registered_at`, and `updated_at`. `LedgerClient.register` on both
+  clients; the OpenAPI document carries `ReasonerRegistration` as the
+  body's component.
+- **RAG gate.** `POLICY_RAG_GATE_ASSETS_ROOT` (blank is none);
+  `policy_rag_gate.assets` checks a reasoner's directory;
+  `PolicyGate.validate_binding` refuses a non-empty `config`, admits a
+  served reasoner as it is, and admits any other from the root (templates
+  into the prompt registry's add-only `add`, then the profile; both or
+  neither, under a lock). The corpus loader resolves the composed plugin's
+  `corpus_dir`, else the root's, and refuses an unregistered id before it
+  loads a model.
+- **Tests.** Core canonicalization and versioning; the registry's
+  register/replace/conflict; every 4xx of the PUT; startup composition with
+  API rows; a restart; a decision under a PUT version replayed after a
+  replacement; the fake gate's `binding_config_model` and
+  `validate_binding`; the gate's admission paths; Postgres integration of
+  the table; the conformance registration suite.
+- **Boundary.** No framework file names where a gate reads a reasoner's
+  assets (the asset root, in any spelling) or the policy gate's
+  `ReasonerProfile`.
+
+**Judgment calls and deviations (Phase 1).**
+
+- **`LiveReasonerRegistry`, not `ReasonerRegistry`.** The plan renamed the
+  framework's registry to `ReasonerRegistry`, the name of the core protocol
+  it implements, which `app/submit.py`, `app/audit/store.py`, and the shadow
+  dimension import; the class is `LiveReasonerRegistry` instead.
+- **`register` takes the registration, not an entry.** Core cannot name the
+  app's `RegisteredReasoner`, so the protocol's `register(registration, *,
+  registered_by)` returns the version, and the registry reads the stored
+  entry back from its writer.
+- **The view's times.** `registered_at` is when the reasoner was first
+  registered over the API, `updated_at` when the version served now was
+  written, `registered_by` who wrote it; all three are `None` for a
+  declared source.
+- **`--corpus-dir` still overrides.** The plan lists the loader's order as
+  plugin, asset root, `--corpus-dir`; an explicit `--corpus-dir` keeps
+  winning (its documented contract), and the order applies when it is
+  omitted. The loader composes plugins with `DECISIONLEDGER_REASONERS`, as
+  the ledger does, and refuses an id the ledger does not register, so a
+  reasoner registered without a plugin is registered first and its corpus
+  loaded after.
+- **The policy gate refuses binding configuration until DR-34.** Its
+  `validate_binding` refuses a non-empty `config` rather than accept one it
+  would ignore. It refuses a reasoner whose root directory is missing or
+  holds no template, a malformed one, or no policy document that parses,
+  and a reasoner id that cannot name one directory.
+- **No new schema file.** No committed schema nests `GateBinding`, so
+  `make schemas` is unchanged; the PUT body's schema is the OpenAPI
+  document's `ReasonerRegistration` component.
+- **An API reasoner may change its own native namespace.** A replacement is
+  not compared with the version it replaces, as a redeployed plugin is not.
+

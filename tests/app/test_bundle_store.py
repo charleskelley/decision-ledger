@@ -44,7 +44,7 @@ import pytest
 from app.audit import build_bundle, replay_bundle
 from app.audit.store import BundleStore
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from core.actions import DecisionAction
 from core.bundle import DecisionBundle, GateRecord
 from core.exceptions import (
@@ -350,7 +350,7 @@ def _gated_bundle(
 
 
 def _store(conn: _FakeConn, *registrations: ReasonerRegistration) -> BundleStore:
-    registry = StaticReasonerRegistry(list(registrations or (STUB_REGISTRATION,)))
+    registry = LiveReasonerRegistry(list(registrations or (STUB_REGISTRATION,)))
     return BundleStore(conn, registry=registry)  # type: ignore[arg-type]
 
 

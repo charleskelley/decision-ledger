@@ -27,7 +27,7 @@ from app.api.models import DecisionReceipt
 from app.client import LocalClient
 from app.gates import ComposedGate, GateKind
 from app.plugin import FrameworkServices
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from ato_reasoner.events import (
     AuthMethod,
     AuthOutcome,
@@ -175,7 +175,7 @@ class _Stack:
             settings=MagicMock(),
             pg_conn=MagicMock(),
             store=self.store,
-            registry=StaticReasonerRegistry([ATO_REGISTRATION]),
+            registry=LiveReasonerRegistry([ATO_REGISTRATION]),
             gates={"policy": ComposedGate(plugin=_PolicyGatePlugin(), gate=self.gate)},
         )
         self.recording = _RecordingClient()

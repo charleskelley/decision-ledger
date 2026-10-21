@@ -1,0 +1,22 @@
+{
+  "reasoner_id": "conformance-reasoner",
+  "reasoner_name": "Conformance Reasoner",
+  "gates": [],
+  "bypass_rules": [
+    {
+      "rule_id": "any-score",
+      "version": "1",
+      "description": "every score may be recorded ALLOW (a registration probe; it never decides)",
+      "predicate": {
+        "kind": "compare",
+        "field": "label_value",
+        "op": "ge",
+        "value": 0
+      },
+      "action": "ALLOW"
+    }
+  ],
+  "recordable_actions": [
+    "ALLOW"
+  ]
+}

@@ -13,11 +13,19 @@ section boundaries, embeds each chunk using sentence-transformers
 - Elasticsearch ``policy-chunks`` index (text + metadata; no embedding).
 
 The policy gate owns both stores; each reasoner owns its corpus directory.
-The loader is invoked with ``--reasoner-id`` and resolves the directory from
-the installed ``ReasonerPlugin`` whose ``registration.reasoner_id`` matches,
-so the gate never hardcodes a corpus path. ``--corpus-dir`` overrides that
-lookup (useful for tests and for indexing a corpus before its plugin is
-installed).
+The loader is invoked with ``--reasoner-id`` and resolves the directory the
+way the gate reads a reasoner's assets, so the gate never hardcodes a corpus
+path: the ``corpus_dir`` of the composed reasoner plugin whose
+``registration.reasoner_id`` matches (plugins filtered by
+``DECISIONLEDGER_REASONERS``, as the ledger filters them), else the
+reasoner's ``corpus/`` directory under the gate's asset root
+(``POLICY_RAG_GATE_ASSETS_ROOT``, DR-33). ``--corpus-dir`` overrides that
+lookup (for tests, or to index a directory the gate does not read).
+
+The loader refuses a ``--reasoner-id`` the ledger's registry does not know:
+a composed plugin's, the registration file's (``DECISIONLEDGER_REGISTRATIONS``),
+or one written over the API (read from the ledger's Postgres, the database
+the loader writes to). Register the reasoner first; then load its corpus.
 
 Chunking rules (from ``docs/design/policy-corpus.md``):
 
@@ -35,11 +43,13 @@ Usage::
         --reasoner-id <reasoner-id> [--corpus-dir <path>] [--wipe]
 
 Options:
-    --reasoner-id  Reasoner that owns this corpus. Stored on every chunk so
-                   the retriever can filter by tenant, and used to resolve
-                   the corpus directory from the matching installed plugin.
+    --reasoner-id  Reasoner that owns this corpus: one the ledger's registry
+                   knows. Stored on every chunk so the retriever can filter
+                   by tenant, and used to resolve the corpus directory (the
+                   matching composed plugin's, else the asset root's).
     --corpus-dir   Explicit corpus root. When omitted, the matching plugin's
-                   ``corpus_dir`` is used.
+                   ``corpus_dir`` is used, else
+                   ``<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus``.
     --wipe         Delete this reasoner's chunks from both stores before
                    loading. Default behavior is to delete existing chunks for
                    each ``(reasoner_id, policy_id)`` before inserting, making
@@ -64,9 +74,11 @@ from elasticsearch.helpers import bulk
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
-from app.plugins import discover_plugins
+from app.bootstrap import read_registry
+from app.plugins import allowlist_from_settings, discover_plugins
 from app.settings import FrameworkSettings
-from core.exceptions import ReasonerPluginError
+from core.exceptions import ReasonerPluginError, RegistrationError
+from policy_rag_gate.assets import reasoner_assets
 from policy_rag_gate.models.corpus import PolicyDocument
 from policy_rag_gate.schema import apply_schema
 from policy_rag_gate.settings import PolicyRagGateSettings
@@ -249,40 +261,105 @@ def resolve_corpus_dir(
     corpus_dir: Path | None = None,
     *,
     plugins: Sequence[ReasonerPlugin] | None = None,
+    assets_root: Path | None = None,
 ) -> Path:
     """Return the corpus directory to index for ``reasoner_id``.
 
-    An explicit ``corpus_dir`` wins. Otherwise the installed reasoner plugins
-    are discovered and the one whose ``registration.reasoner_id`` equals
-    ``reasoner_id`` supplies its ``corpus_dir``.
+    An explicit ``corpus_dir`` wins. Otherwise the reasoner's corpus is
+    where the gate reads it: the ``corpus_dir`` of the composed plugin whose
+    ``registration.reasoner_id`` equals ``reasoner_id``, else the reasoner's
+    ``corpus/`` directory under the asset root (DR-33).
 
     Args:
         reasoner_id: Reasoner whose corpus is being loaded.
         corpus_dir: Explicit override (``--corpus-dir``). Returned as-is when
             provided.
-        plugins: Plugins to search instead of calling ``discover_plugins()``.
-            Tests inject fakes here; production leaves it ``None``.
+        plugins: The composed plugins to search. ``None`` discovers the
+            installed ones, filtered by ``DECISIONLEDGER_REASONERS`` as the
+            ledger filters them; tests inject fakes here.
+        assets_root: The gate's asset root (``POLICY_RAG_GATE_ASSETS_ROOT``),
+            or ``None`` for none.
 
     Returns:
         The directory of Markdown policy documents to index.
 
     Raises:
-        ReasonerPluginError: No installed plugin declares ``reasoner_id``.
-            The message lists the ids that were discovered.
+        ReasonerPluginError: No composed plugin declares ``reasoner_id`` and
+            the asset root holds no corpus directory for it (or cannot: the
+            id does not name a directory). The message lists the plugin ids
+            that were found.
     """
     if corpus_dir is not None:
         return corpus_dir
 
-    found = list(plugins) if plugins is not None else discover_plugins()
+    found = (
+        list(plugins)
+        if plugins is not None
+        else discover_plugins(allow=allowlist_from_settings(FrameworkSettings()))
+    )
     for plugin in found:
         if plugin.registration.reasoner_id == reasoner_id:
             return plugin.corpus_dir
 
+    where = "POLICY_RAG_GATE_ASSETS_ROOT is not set"
+    if assets_root is not None:
+        try:
+            candidate = reasoner_assets(assets_root, reasoner_id).corpus_dir
+            present = candidate.is_dir()
+        except (ValueError, OSError) as err:
+            raise ReasonerPluginError(reasoner_id, str(err)) from err
+        if present:
+            return candidate
+        where = f"the asset root holds no {candidate}"
+
     discovered = sorted(p.registration.reasoner_id for p in found)
     raise ReasonerPluginError(
         reasoner_id,
-        f"no installed reasoner plugin declares reasoner_id {reasoner_id!r}; "
-        f"discovered: {discovered}. Install the plugin or pass --corpus-dir.",
+        f"no composed reasoner plugin declares reasoner_id {reasoner_id!r} "
+        f"(composed: {discovered}) and {where}. Ship the corpus under "
+        "<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus, or pass --corpus-dir.",
+    )
+
+
+def registry_refusal(
+    reasoner_id: str,
+    *,
+    settings: FrameworkSettings,
+    plugins: Sequence[ReasonerPlugin],
+) -> str | None:
+    """Why the ledger's registry does not know ``reasoner_id``, or ``None``.
+
+    Reads the registry the ledger composes with these settings and plugins
+    (``app.bootstrap.read_registry``): the plugins', the registration
+    file's, and the ones written over the API, from the ledger's Postgres.
+
+    Args:
+        reasoner_id: The ``--reasoner-id`` to load a corpus for.
+        settings: The ledger's settings (DSN, registration file).
+        plugins: The plugins the ledger composes.
+
+    Returns:
+        A refusal message, or ``None`` when the reasoner is registered.
+    """
+    try:
+        registry = read_registry(settings, plugins)
+    except RegistrationError as err:
+        return (
+            f"the ledger's registrations do not compose here: {err}. The loader "
+            "composes the installed plugins with DECISIONLEDGER_REASONERS (and "
+            "reads DECISIONLEDGER_REGISTRATIONS) as the ledger does: run it with "
+            "the ledger's values (a plugin the ledger leaves out but a "
+            "registration over the API also names is one reasoner from two "
+            "sources here)"
+        )
+    if registry.is_registered(reasoner_id):
+        return None
+    known = sorted(entry.reasoner_id for entry in registry.entries())
+    return (
+        f"reasoner_id {reasoner_id!r} is not registered with the ledger "
+        f"(registered: {known}); register it first (a plugin, "
+        "DECISIONLEDGER_REGISTRATIONS, or PUT /api/v1/reasoners/{reasoner_id}), "
+        "then load its corpus"
     )
 
 
@@ -475,9 +552,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--reasoner-id",
         required=True,
         help=(
-            "Reasoner that owns this corpus. Stored on every chunk so the "
-            "retriever can filter by tenant, and used to find the installed "
-            "plugin whose corpus_dir is indexed."
+            "Reasoner that owns this corpus (one the ledger's registry knows). "
+            "Stored on every chunk so the retriever can filter by tenant, and "
+            "used to find the corpus: the composed plugin's corpus_dir, else "
+            "<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner-id>/corpus."
         ),
     )
     parser.add_argument(
@@ -485,8 +563,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Explicit corpus root. Default: the corpus_dir of the installed "
-            "plugin whose registration.reasoner_id matches --reasoner-id."
+            "Explicit corpus root. Default: the corpus_dir of the composed "
+            "plugin whose registration.reasoner_id matches --reasoner-id, else "
+            "the reasoner's corpus directory under the asset root."
         ),
     )
     parser.add_argument(
@@ -509,19 +588,33 @@ def main(argv: list[str] | None = None) -> None:
     """
     args = build_parser().parse_args(argv)
 
+    # Read the DSN from FrameworkSettings (the gate's schema lives in the
+    # framework's database) and the ES URL and asset root from the gate's own
+    # settings, so the loader honors whatever the local .env / docker-compose
+    # stack configured. Avoids silently mismatching when POSTGRES_PASSWORD is
+    # anything but the docker-compose default.
+    framework_settings = FrameworkSettings()
+    gate_settings = PolicyRagGateSettings()
+    pg_dsn = framework_settings.postgres_dsn
+    es_url = gate_settings.elasticsearch_url
+    plugins = discover_plugins(allow=allowlist_from_settings(framework_settings))
+
+    refusal = registry_refusal(
+        args.reasoner_id, settings=framework_settings, plugins=plugins
+    )
+    if refusal is not None:
+        log.error("corpus_loader.unregistered_reasoner", error=refusal)
+        sys.exit(2)
     try:
-        corpus_dir = resolve_corpus_dir(args.reasoner_id, args.corpus_dir)
+        corpus_dir = resolve_corpus_dir(
+            args.reasoner_id,
+            args.corpus_dir,
+            plugins=plugins,
+            assets_root=gate_settings.assets_root_path,
+        )
     except ReasonerPluginError as exc:
         log.error("corpus_loader.unknown_reasoner", error=str(exc))
         sys.exit(2)
-
-    # Read the DSN from FrameworkSettings (the gate's schema lives in the
-    # framework's database) and the ES URL from the gate's own settings, so
-    # the loader honors whatever the local .env / docker-compose stack
-    # configured. Avoids silently mismatching when POSTGRES_PASSWORD is
-    # anything but the docker-compose default.
-    pg_dsn = FrameworkSettings().postgres_dsn
-    es_url = PolicyRagGateSettings().elasticsearch_url
 
     log.info(
         "corpus_loader.start",

@@ -109,6 +109,7 @@ upgrade statement is guarded) and are applied three ways:
 | `replay_logs` | One row per replay of a decision's enforcement | `replay_id`, `decision_id` (FK), `replayed_at`, `is_matched`, `diff` |
 | `decision_resolution_attempts` | The append-only log of resolution attempts on held or challenged decisions (DR-18, DR-21) | `attempt_id`, `decision_id` (FK), `attempt_sequence` (unique per decision), `resolver_kind`, `resolver_id`, `status`, `resolution_action`, `payload` (JSONB) |
 | `reasoner_registrations` | Every registration version a bundle can cite (DR-31) | `reasoner_id`, `registration_version` (PK together), `registration` (JSONB), `first_registered_at` |
+| `reasoner_registry` | The registrations written over the API, as served now (DR-33; see [Registration](registration.md)) | `reasoner_id` (PK), `registration_version` (FK to `reasoner_registrations`), `source` (`api`), `registered_by`, `registered_at`, `updated_at` |
 | `entity_events` | The identity journal, append-only (DR-32) | `event_id` (PK), `event_sequence`, `event_type`, `subject_entity_id`, `object_entity_id`, `relationship_type`, `effective_at`, `recorded_at`, `provenance` (JSONB) |
 | `entity_membership` | The membership projection, rebuildable (DR-32) | `subject_entity_id`, `related_entity_id`, `relationship_type`, `valid_from`, `valid_to` |
 
@@ -331,9 +332,12 @@ uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --corp
 
 The loader:
 
-1. Resolves the corpus directory: `--corpus-dir` if given, otherwise the
-   `corpus_dir` of the installed reasoner plugin whose `reasoner_id` matches
-   `--reasoner-id` (for ATO, `ato_reasoner/corpus/`), and reads every
+1. Refuses a `--reasoner-id` the ledger does not register (plugins, the
+   registration file, and the API's registrations, read from Postgres;
+   DR-33), then resolves the corpus directory: `--corpus-dir` if given,
+   otherwise the `corpus_dir` of the composed reasoner plugin whose
+   `reasoner_id` matches (for ATO, `ato_reasoner/corpus/`), otherwise
+   `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`, and reads every
    `**/*.md` file under it.
 2. Parses YAML frontmatter into `PolicyDocument`.
 3. Chunks each document at `##` boundaries, with a `###` secondary split for
@@ -437,13 +441,13 @@ compose file.
 | `POSTGRES_DB` | Framework, Compose | PostgreSQL database | `decisionledger` |
 | `LOG_JSON` | Framework | JSON log rendering | `true` |
 | `LOG_LEVEL` | Framework | Log level | `INFO` |
-| `DECISIONLEDGER_REASONERS` | Framework | Comma-separated allowlist of `reasoner_id`s to compose from the installed plugins | blank (every installed plugin) |
+| `DECISIONLEDGER_REASONERS` | Framework | Comma-separated allowlist of `reasoner_id`s to compose from the installed plugins (plugins only: the file's and the API's registrations are always served) | blank (every installed plugin) |
 | `DECISIONLEDGER_MANDATORY_GATES` | Framework | Comma-separated `gate_id`s run on every decision of every reasoner (DR-29); each must be composed, or startup fails | blank (none) |
 | `DECISIONLEDGER_REGISTRATIONS` | Framework | Path to a YAML file of reasoner registrations, composed with the plugins' (DR-31) | blank (no file) |
 | `DECISIONLEDGER_IDENTITY_RESOLVER` | Framework | The one active identity resolver: an entry-point name in `decisionledger.identity_resolvers` (DR-32); a name that is not installed refuses startup | blank (the passthrough; `passthrough` is the same) |
 | `DECISIONLEDGER_API_KEYS` | Framework | Reasoner API keys as comma-separated `reasoner_id:key` pairs | blank (no reasoner keys; with no key at all, every route but `/health` answers 401) |
 | `DECISIONLEDGER_API_KEYS_FILE` | Framework | Path to a YAML file mapping `reasoner_id` to a key or a list of keys, read in addition | blank (no file) |
-| `DECISIONLEDGER_OPERATOR_KEY` | Framework | The operator key: reads every reasoner's decisions and resolves held ones | blank (operator access disabled) |
+| `DECISIONLEDGER_OPERATOR_KEY` | Framework | The operator key: reads every reasoner's decisions, resolves held ones, and registers reasoners over the API (DR-33) | blank (operator access disabled) |
 | `DECISIONLEDGER_EVAL_REASONER` | Eval harness | Reasoner to evaluate when `--reasoner-id` is not passed | none |
 
 ### Gates
@@ -452,6 +456,7 @@ compose file.
 |----------|---------|-------------|---------|
 | `RULES_GATE_RULESETS_DIR` | Rules gate | Directory of rule-set YAML files the gate registers at startup | blank (no rule sets) |
 | `POLICY_RAG_GATE_ELASTICSEARCH_URL` | RAG policy gate | The gate's Elasticsearch | `http://localhost:9200` |
+| `POLICY_RAG_GATE_ASSETS_ROOT` | RAG policy gate, corpus loader | Asset root of reasoners registered without a plugin: `<root>/<reasoner_id>/prompts/*.yaml` and `corpus/**/*.md` (DR-33; see [Registration](registration.md)) | blank (plugin reasoners only) |
 | `POLICY_RAG_GATE_ELASTICSEARCH_PORT` | Compose (`gates/policy_rag/compose.yaml`) | Elasticsearch host port | `9200` |
 | `OPENAI_API_KEY` | RAG policy gate (and the OpenAI SDK) | The gate's LLM client and its eval's faithfulness scorer | none (required for gated decisions that reach the RAG gate) |
 | `ANTHROPIC_API_KEY` | RAG policy gate (and the Anthropic SDK) | The gate eval's LLM judges | none (required for `make eval-gate-policy_rag`) |

@@ -8,7 +8,9 @@ reasoner:
   through. A *mandatory* gate runs on every decision, recorded or gated; an
   *advisory* gate runs only when the reasoner asks the ledger to gate a
   decision. The deployment may add mandatory gates for every reasoner
-  (``DECISIONLEDGER_MANDATORY_GATES``);
+  (``DECISIONLEDGER_MANDATORY_GATES``). A binding may carry the gate's
+  configuration for this reasoner (``config``, DR-33), which the framework
+  never interprets and the gate validates when it admits the binding;
 - its **bypass rules** (DR-30): the registered, replayable conditions under
   which it may *record* a decision it made without asking the advisory
   gates. A recorded submission cites one by id; the ledger checks the
@@ -24,12 +26,16 @@ reasoner:
 
 What a reasoner may put in a gate's configuration is that gate's business,
 not the registration's (DR-28): a gate validates its own ``gate_config`` and
-may authorize it per reasoner at intake.
+may authorize it per reasoner at intake, and it validates a binding's
+``config`` when it admits the binding (DR-33).
 
 A ``ReasonerRegistry`` is the protocol any registry implementation must
-satisfy. The reference implementation (``StaticReasonerRegistry`` in
-``app/``) loads from a list at startup; a production implementation could
-back it with a database — the framework is agnostic to the backing store.
+satisfy: the reads intake and replay use, and ``register`` for a
+registration written at runtime (DR-33). The reference implementation
+(``LiveReasonerRegistry`` in ``app/``) composes the deployment's declared
+registrations (plugins and the registration file) with the ones written
+over the API, which it keeps in Postgres; the framework is agnostic to the
+backing store.
 
 A registration is data (DR-31): ``registration_version`` content-addresses
 it, every decision bundle records the version in effect when it was made,
@@ -41,9 +47,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 from core.actions import DecisionAction
 from core.gate import Predicate
@@ -64,6 +78,15 @@ class GateBinding(BaseModel):
         mandatory: ``True`` — the gate runs on every decision, including
             recorded ones. ``False`` (advisory) — the gate runs only when
             the reasoner submits in ``gate`` mode.
+        config: How the gate is configured for this reasoner (DR-33):
+            JSON-shaped data the framework never interprets. The gate
+            validates it (its plugin's ``binding_config_model`` and its
+            ``validate_binding``) when the deployment starts and when the
+            registration is written, and may refuse the binding. It is part
+            of the registration, so it is versioned and snapshotted with it.
+            Empty (the default) for a gate that takes no binding
+            configuration. What a single decision asks of the gate stays in
+            that submission's ``GateContext.gate_config``.
     """
 
     model_config = ConfigDict(
@@ -72,6 +95,45 @@ class GateBinding(BaseModel):
 
     gate_id: str = Field(min_length=1)
     mandatory: bool = False
+    config: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("config")
+    @classmethod
+    def _config_is_json(cls, config: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """JSON has no NaN or infinity, however the input spelled them."""
+        if _holds_non_finite(config):
+            msg = "config holds a non-finite number, which JSON cannot carry"
+            raise ValueError(msg)
+        return config
+
+    def __hash__(self) -> int:
+        """Hash by value, as equality compares: the config frozen recursively.
+
+        A frozen model's generated hash fails on the ``config`` dict; this one
+        keeps bindings (and registrations whose other fields hash) hashable,
+        and agrees with ``==`` (key order is ignored, ``1`` equals ``1.0``).
+        """
+        return hash((self.gate_id, self.mandatory, _frozen(self.config)))
+
+
+def _frozen(value: object) -> object:
+    """A hashable form of a JSON value that is equal exactly when it is."""
+    if isinstance(value, dict):
+        return frozenset((key, _frozen(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
+def _holds_non_finite(value: object) -> bool:
+    """Whether a JSON-shaped value holds a NaN or an infinity, at any depth."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_holds_non_finite(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_holds_non_finite(item) for item in value)
+    return False
 
 
 class BypassRule(BaseModel):
@@ -229,7 +291,12 @@ def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]
     Native namespace declarations have no order, so they are sorted by name;
     a registration that declares none has no ``native_namespaces`` key at
     all, so its form (and its version) is the one it had before
-    registrations could declare them (DR-32).
+    registrations could declare them (DR-32). Likewise a gate binding with
+    an empty ``config`` has no ``config`` key, so a registration whose
+    bindings carry no configuration keeps the version it had before
+    bindings could carry one (DR-33). A binding's configuration is data in
+    its own right: lists inside it keep their order, and the version is
+    computed with sorted keys, so the order of its keys never matters.
 
     Args:
         registration: The registration.
@@ -248,6 +315,9 @@ def canonical_registration(registration: ReasonerRegistration) -> dict[str, Any]
         )
     else:
         del data["native_namespaces"]
+    for binding in data["gates"]:
+        if not binding["config"]:
+            del binding["config"]
     return data
 
 
@@ -256,9 +326,10 @@ def registration_version(registration: ReasonerRegistration) -> str:
 
     The first ``REGISTRATION_VERSION_LENGTH`` hex digits of the SHA-256 of
     the canonical form (sorted keys, no whitespace). Equal registrations
-    have equal versions in every process; any change to the gate set, a
-    bypass rule, the recordable actions, a native namespace declaration, or
-    the enforcement profile changes it. Every decision bundle records the
+    have equal versions in every process; any change to the gate set (a
+    binding's configuration included), a bypass rule, the recordable
+    actions, a native namespace declaration, or the enforcement profile
+    changes it. Every decision bundle records the
     version its registration had, and replay reads the snapshot of that
     version.
 
@@ -280,16 +351,19 @@ def registration_version(registration: ReasonerRegistration) -> str:
 
 @runtime_checkable
 class ReasonerRegistry(Protocol):
-    """Protocol for reasoner registries the framework depends on at intake.
+    """Protocol for the reasoner registry the framework reads and writes.
 
-    Any object that provides ``get`` and ``is_registered`` satisfies this
-    protocol. Domain reasoners are not required to interact with the
-    registry directly — it is a framework-side concern used at submission
-    intake and by replay.
+    Any object that provides ``get``, ``is_registered``, and ``register``
+    satisfies this protocol. Domain reasoners are not required to interact
+    with the registry directly — it is a framework-side concern read at
+    submission intake and by replay, and written by the registrations
+    resource (``PUT /api/v1/reasoners/{reasoner_id}``, DR-33).
 
-    The reference implementation (``StaticReasonerRegistry`` in ``app/``)
-    loads from a list at startup. A production implementation could back
-    this with a database or remote config service.
+    The reference implementation (``LiveReasonerRegistry`` in ``app/``)
+    composes the plugins' and the registration file's registrations at
+    startup with the ones written over the API, which it keeps in Postgres.
+    A production implementation could back it with another database or a
+    remote config service.
     """
 
     def get(self, reasoner_id: str) -> ReasonerRegistration:
@@ -314,6 +388,31 @@ class ReasonerRegistry(Protocol):
 
         Returns:
             ``True`` if registered, ``False`` otherwise.
+        """
+        ...
+
+    def register(
+        self, registration: ReasonerRegistration, *, registered_by: str
+    ) -> str:
+        """Add a registration at runtime, or replace one added at runtime.
+
+        The caller has admitted the registration first (the checks a
+        deployment runs at startup). The registry keeps the version's
+        snapshot before it serves the version, so every bundle's
+        ``registration_version`` has one; an unchanged registration is left
+        as it is.
+
+        Args:
+            registration: The registration to serve from now on.
+            registered_by: Who wrote it (a principal label), recorded with it.
+
+        Returns:
+            Its ``registration_version``.
+
+        Raises:
+            RegistrationError: ``registration.reasoner_id`` is registered by
+                the deployment's declared configuration (a plugin or the
+                registration file), which cannot be replaced at runtime.
         """
         ...
 

@@ -63,6 +63,12 @@ class Ledger:
         headers = {KEY_HEADER: key} if key else {}
         return self.client.get(path, headers=headers, **kw)
 
+    def put(
+        self, path: str, body: str | bytes, *, key: str | None = OPERATOR_KEY, **kw: Any
+    ):
+        headers = {KEY_HEADER: key} if key else {}
+        return self.client.put(path, content=body, headers=headers, **kw)
+
     def submit(self, submission: Submission, *, key: str | None = STUB_KEY):
         return self.post("/api/v1/decisions", submission.model_dump_json(), key=key)
 

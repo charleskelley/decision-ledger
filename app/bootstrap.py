@@ -3,14 +3,18 @@
 ``build_framework_services`` turns a ``FrameworkSettings``, the discovered
 reasoner plugins, and the discovered gate plugins into one
 ``FrameworkServices`` object: the Postgres connection (with the canonical
-DDL applied), the bundle store, the resolution journal, the reasoner registry
-(the plugins' registrations plus the registration file's, each version
-snapshotted before the first decision), the composed reasoner plugins, the
-identity step with the deployment's active resolver
-(``DECISIONLEDGER_IDENTITY_RESOLVER``, DR-32), and the composed gates (the
-ones ``DECISIONLEDGER_MANDATORY_GATES`` names flagged mandatory). The FastAPI
-lifespan (``app/main.py``), ``LocalClient``, and the eval harness drivers all
-call it, so there is exactly one description of how the framework is wired.
+DDL applied), the bundle store, the resolution journal, the live reasoner
+registry (the plugins' registrations, the registration file's, and the ones
+written over the API earlier, read back from
+``decisionledger.reasoner_registry``; each version snapshotted before the
+first decision, DR-33), the composed reasoner plugins, the identity step with
+the deployment's active resolver (``DECISIONLEDGER_IDENTITY_RESOLVER``,
+DR-32), and the composed gates (the ones ``DECISIONLEDGER_MANDATORY_GATES``
+names flagged mandatory). The FastAPI lifespan (``app/main.py``),
+``LocalClient``, and the eval harness drivers all call it, so there is
+exactly one description of how the framework is wired. ``read_registry``
+composes the same registry, read only, for a tool that runs beside the
+ledger.
 
 The framework's own infrastructure is Postgres. Each gate builds whatever it
 needs itself (``GatePlugin.build``, DR-28): a retrieving gate opens its own
@@ -26,6 +30,7 @@ from typing import TYPE_CHECKING
 import psycopg
 import structlog
 
+from app.audit.registrations import ApiRegistrations
 from app.audit.resolution_journal import ResolutionJournal
 from app.audit.schema import apply_canonical_schema
 from app.audit.store import BundleStore
@@ -45,6 +50,7 @@ if TYPE_CHECKING:
     from app.gates import GatePlugin
     from app.identity import ComposedResolver, IdentityResolverPlugin
     from app.plugin import ReasonerPlugin
+    from app.reasoner_registry import LiveReasonerRegistry
     from app.settings import FrameworkSettings
 
 log = structlog.get_logger(__name__)
@@ -60,21 +66,25 @@ def build_framework_services(
     """Construct every shared service the framework runs on.
 
     Applies the canonical DDL to Postgres before building anything else so
-    the store and the journal can rely on a fresh schema, then records a
-    snapshot of every registration the deployment serves (a version already
-    recorded is left as it is), so every bundle's ``registration_version``
-    has one. A gate that keeps tables in the same database applies its own
-    DDL, in its own schema, when it is built. The active identity resolver
-    is built next, then the gates, each against the services built so far;
-    a resolver or gate that fails to build closes what was built before it
-    and the Postgres connection, then the error propagates.
+    the store and the journal can rely on a fresh schema, reads back the
+    registrations written over the API, then records a snapshot of every
+    registration the deployment serves (a version already recorded is left
+    as it is), so every bundle's ``registration_version`` has one. A gate
+    that keeps tables in the same database applies its own DDL, in its own
+    schema, when it is built. The active identity resolver is built next,
+    then the gates, each against the services built so far; every gate then
+    admits the bindings of every registration that binds it. A resolver or
+    gate that fails to build, or a registration the gates cannot serve,
+    closes what was built before it and the Postgres connection, then the
+    error propagates.
 
     Args:
         settings: Connection parameters and credentials, and the
             registration file (``DECISIONLEDGER_REGISTRATIONS``).
         plugins: The reasoner plugins this deployment composes. Their
-            registrations, with the registration file's, form the reasoner
-            registry intake and replay read.
+            registrations, with the registration file's and the ones
+            written over the API, form the reasoner registry intake and
+            replay read.
         gate_plugins: The gate plugins this deployment composes. ``None``
             (the default) discovers every plugin installed under the
             ``decisionledger.gates`` entry-point group; tests pass an
@@ -91,17 +101,20 @@ def build_framework_services(
 
     Raises:
         GatePluginError: A gate plugin is malformed, its ``build`` returns
-            something that does not satisfy ``Gate``, or
+            something that does not satisfy ``Gate``,
             ``DECISIONLEDGER_MANDATORY_GATES`` names a gate that is not
-            composed. An exception ``build`` raises propagates as itself.
+            composed, or a registration's gate set cannot be served (a gate
+            refuses a binding, among others). An exception ``build`` raises
+            propagates as itself.
         ResolverPluginError: ``DECISIONLEDGER_IDENTITY_RESOLVER`` names a
             resolver that is not installed, whose plugin is malformed, or
             whose ``build`` returns something other than a synchronous
             ``IdentityResolver``. An exception ``build`` raises propagates
             as itself.
-        RegistrationError: The registration file cannot be loaded, registers
-            a reasoner twice, or two registrations declare one native
-            namespace differently.
+        RegistrationError: The registration file cannot be loaded, a
+            reasoner is registered twice (by two sources, or twice in the
+            file), or two registrations declare one native namespace
+            differently.
     """
     composed_gate_plugins = (
         list(gate_plugins) if gate_plugins is not None else discover_gates()
@@ -117,8 +130,12 @@ def build_framework_services(
     resolver: ComposedResolver | None = None
     try:
         apply_canonical_schema(pg_conn)
+        api_registrations = ApiRegistrations(pg_conn)
         registry = build_registry(
-            plugins, registration_file=settings.registrations_path
+            plugins,
+            registration_file=settings.registrations_path,
+            written=api_registrations.load(),
+            writer=api_registrations,
         )
         declared_namespaces(entry.registration for entry in registry.entries())
         store = BundleStore(conn=pg_conn, registry=registry)
@@ -156,3 +173,39 @@ def build_framework_services(
         identity_resolver=services.identity.resolver_id,
     )
     return dataclasses.replace(services, gates=MappingProxyType(gates))
+
+
+def read_registry(
+    settings: FrameworkSettings, plugins: Sequence[ReasonerPlugin]
+) -> LiveReasonerRegistry:
+    """The registry a ledger with these settings and plugins serves, read only.
+
+    For tools that run beside the ledger against its database (a gate's
+    corpus loader asks whether a reasoner is registered): the plugins'
+    registrations, the registration file's, and the registrations written
+    over the API, composed as the bootstrap composes them. Opens its own
+    short-lived connection, applies no DDL, writes nothing, and builds no
+    gate; a database no ledger of this version has started on yet holds no
+    API registrations.
+
+    Args:
+        settings: The settings the ledger runs with (its DSN and its
+            registration file).
+        plugins: The reasoner plugins the ledger composes (filtered by
+            ``DECISIONLEDGER_REASONERS``, as the ledger filters them).
+
+    Returns:
+        A registry that keeps nothing written to it (no writer).
+
+    Raises:
+        RegistrationError: As at startup: the registration file cannot be
+            loaded, or a reasoner is registered by two sources.
+    """
+    with psycopg.connect(settings.postgres_dsn, autocommit=True) as conn:
+        try:
+            written = ApiRegistrations(conn).load()
+        except psycopg.errors.UndefinedTable:
+            written = []
+    return build_registry(
+        plugins, registration_file=settings.registrations_path, written=written
+    )

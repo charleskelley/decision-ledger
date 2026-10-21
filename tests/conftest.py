@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from core.actions import DecisionAction
 from core.gate import EvidenceRef, GateOutput, GateVerdict
 from core.observation import (
@@ -49,9 +49,9 @@ def stub_registration() -> ReasonerRegistration:
 
 
 @pytest.fixture
-def stub_registry(stub_registration: ReasonerRegistration) -> StaticReasonerRegistry:
+def stub_registry(stub_registration: ReasonerRegistration) -> LiveReasonerRegistry:
     """A registry that knows exactly one reasoner: the stub."""
-    return StaticReasonerRegistry([stub_registration])
+    return LiveReasonerRegistry([stub_registration])
 
 
 # ---------------------------------------------------------------------------

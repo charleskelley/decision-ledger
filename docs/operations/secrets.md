@@ -17,7 +17,7 @@ CI/CD, and production cloud.
 | `OPENAI_API_KEY`     | RAG policy gate calls (`gates/policy_rag`: PolicyGate consumes OpenAILLMClient). | Any decision the RAG policy gate runs on, `make test-smoke` |
 | `ANTHROPIC_API_KEY`  | The RAG policy gate's eval judges, faithfulness and citation (cross-family bias control). | `make eval`, `make eval-gate-policy_rag` |
 | `DECISIONLEDGER_API_KEYS` / `DECISIONLEDGER_API_KEYS_FILE` | The ledger's per-reasoner API keys (`reasoner_id:key` pairs, or a mounted YAML file), checked on the `X-DecisionLedger-Key` header (`app/auth.py`). | Every `/api/v1` route (none configured: 401) |
-| `DECISIONLEDGER_OPERATOR_KEY` | The operator key: reads every reasoner's decisions and resolves held ones. | Resolutions; operator reads |
+| `DECISIONLEDGER_OPERATOR_KEY` | The operator key: reads every reasoner's decisions, resolves held ones, and registers or replaces reasoners over the API (`PUT /api/v1/reasoners/{reasoner_id}`, DR-33: gate sets, bypass rules, recordable actions). | Resolutions; registrations; operator reads |
 | `ATO_LEDGER_KEY`, `DECISIONLEDGER_KEY` | Client-side copies of a reasoner's key: ATO's service (with `ATO_LEDGER_URL`), and the MCP server and conformance suite (with `DECISIONLEDGER_URL`). | Submitting over HTTP |
 
 Framework infrastructure values (Postgres credentials) flow through

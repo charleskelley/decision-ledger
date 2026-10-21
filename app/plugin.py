@@ -8,17 +8,18 @@ plugin publishes the reasoner's registration and the assets its gates read,
 and the reasoner itself runs as its own service (calling the ledger over
 HTTP) or in process through ``app.client.LocalClient``. A reasoner with no
 plugin installed registers through the deployment's registration file
-instead (``DECISIONLEDGER_REGISTRATIONS``).
+(``DECISIONLEDGER_REGISTRATIONS``) or over the API
+(``PUT /api/v1/reasoners/{reasoner_id}``, DR-33) instead.
 
 Two types make up the seam:
 
 - ``FrameworkServices`` — the shared infrastructure and framework components
   built once per process by ``app/bootstrap.py:build_framework_services``:
-  Postgres, the bundle store, the resolution journal, the reasoner registry
-  (every registration, plugin or file), the composed reasoner plugins, and
-  the composed gates (``app/gates.py``), and the identity step with the
-  deployment's active resolver (``app/identity``, DR-32). Gates own their own
-  infrastructure (DR-28), so nothing gate-specific lives here.
+  Postgres, the bundle store, the resolution journal, the live reasoner
+  registry (every registration: plugin, file, or API), the composed reasoner
+  plugins, the composed gates (``app/gates.py``), and the identity step with
+  the deployment's active resolver (``app/identity``, DR-32). Gates own their
+  own infrastructure (DR-28), so nothing gate-specific lives here.
   ``LocalClient`` and the HTTP routes both operate on it.
 - ``ReasonerPlugin`` — the plugin object itself: the registration record and
   the prompt and corpus directories a gate may read. Replay needs no
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
     from app.audit.resolution_journal import ResolutionJournal
     from app.audit.store import BundleStore
     from app.gates import ComposedGate
-    from app.reasoner_registry import StaticReasonerRegistry
+    from app.reasoner_registry import LiveReasonerRegistry
     from app.settings import FrameworkSettings
     from core.observation import ReasonerRegistration
 
@@ -63,11 +64,15 @@ class FrameworkServices:
         pg_conn: Open psycopg connection the bundle store writes through.
         store: Decision-bundle persistence and replay.
         registry: Every registration this deployment serves (installed
-            plugins and the registration file), with versions and sources.
+            plugins, the registration file, and the registrations written
+            over the API), with versions and sources; the registrations
+            resource writes to it.
         reasoners: The composed reasoner plugins, in composition order.
             Gates read reasoner-shipped assets from them (a retrieving gate
             loads each reasoner's ``prompts_dir`` and ``corpus_dir``). A
-            reasoner registered by file has no plugin and no assets here.
+            reasoner registered by file or over the API has no plugin and no
+            assets here: a gate that needs its assets reads them from where
+            the gate documents, when it admits the reasoner's binding.
         gates: Composed gates keyed by ``gate_id`` (each flagged when the
             deployment mandates it). Empty while the gates themselves are
             being built: a gate never reaches another gate.
@@ -82,7 +87,7 @@ class FrameworkServices:
     settings: FrameworkSettings
     pg_conn: psycopg.Connection[Any]
     store: BundleStore
-    registry: StaticReasonerRegistry
+    registry: LiveReasonerRegistry
     reasoners: tuple[ReasonerPlugin, ...] = ()
     gates: Mapping[str, ComposedGate] = field(default_factory=dict)
     journal: ResolutionJournal | None = None

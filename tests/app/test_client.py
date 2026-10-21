@@ -9,6 +9,9 @@ Both run here against one ledger app (``HttpClient`` through
   (status and code) for the same refusal;
 - the same lookup, typed bundle, replay, batch, timeline (with merged and
   related subjects), identity resolution, resolution, and resources;
+- ``register`` (DR-33) writes a registration through the same operation
+  ``PUT /api/v1/reasoners/{id}`` runs, with the operator key over HTTP, and
+  both clients raise the same refusals;
 - ``get_bundle`` refuses a bundle older than schema version 2;
 - ``LocalClient`` acts as the trusted principal unless given another, and
   ``from_settings`` composes the deployment like ``create_app`` and owns it;
@@ -31,6 +34,7 @@ from core.bundle import DecisionBundle
 from core.exceptions import LedgerError
 from core.submission import BypassCitation
 from tests._memory_ledger import OPERATOR_KEY, STUB_KEY
+from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -219,6 +223,54 @@ def test_a_non_problem_error_response_still_raises():
         raise_for_problem(response)
     assert (err.value.status, err.value.code) == (502, "HTTP_502")
     raise_for_problem(httpx.Response(200, request=httpx.Request("GET", "/")))
+
+
+async def test_both_clients_register_a_reasoner_alike(
+    clients: dict[str, LedgerClient],
+):
+    other = STUB_REGISTRATION.model_copy(
+        update={"reasoner_id": "other-reasoner", "reasoner_name": "Other"}
+    )
+
+    created = await clients["http"].register(other)
+    again = await clients["local"].register(other)
+    renamed = await clients["local"].register(
+        other.model_copy(update={"reasoner_name": "Other, renamed"})
+    )
+
+    assert created.source == "api"
+    assert created.registered_by == "operator"
+    assert again == created
+    assert renamed.registration_version != created.registration_version
+    assert renamed.registered_by == "trusted"
+    for client in clients.values():
+        served = await client.reasoner("other-reasoner")
+        assert served.registration_version == renamed.registration_version
+
+
+async def test_both_clients_raise_the_same_registration_refusal(
+    clients: dict[str, LedgerClient],
+):
+    changed = STUB_REGISTRATION.model_copy(update={"reasoner_name": "Changed"})
+    errors = {}
+    for name, client in clients.items():
+        with pytest.raises(LedgerError) as err:
+            await client.register(changed)
+        errors[name] = (err.value.status, err.value.code, err.value.extra)
+    assert errors["local"] == errors["http"]
+    assert errors["local"][:2] == (409, "REGISTRATION_SOURCE_IMMUTABLE")
+
+
+async def test_a_local_client_acting_as_a_reasoner_cannot_register(ledger: Ledger):
+    client = LocalClient(
+        ledger.framework, principal=Principal.for_reasoner("stub-reasoner")
+    )
+    other = STUB_REGISTRATION.model_copy(update={"reasoner_id": "other-reasoner"})
+
+    with pytest.raises(LedgerError) as err:
+        await client.register(other)
+
+    assert (err.value.status, err.value.code) == (403, "OPERATOR_REQUIRED")
 
 
 def test_both_clients_satisfy_the_protocol(ledger: Ledger):
