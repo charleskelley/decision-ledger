@@ -8,8 +8,8 @@ Environment:
   test that writes or reads a decision).
 - ``DECISIONLEDGER_OTHER_KEY`` — another reasoner's key (403 and tenant
   isolation checks; skipped without it).
-- ``DECISIONLEDGER_OPERATOR_KEY`` — the operator key (resolution and
-  operator checks; skipped without it).
+- ``DECISIONLEDGER_OPERATOR_KEY`` — the operator key (resolution,
+  registration, and operator checks; skipped without it).
 """
 
 from __future__ import annotations

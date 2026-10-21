@@ -37,6 +37,13 @@ def example(name: str) -> dict[str, Any]:
     return fresh(payload)
 
 
+def registration(**changes: Any) -> dict[str, Any]:
+    """The example registration (``registration.json``), with ``changes``."""
+    body = json.loads((EXAMPLES / "registration.json").read_text(encoding="utf-8"))
+    body.update(changes)
+    return body
+
+
 def fresh(payload: dict[str, Any], *, entity_id: str | None = None) -> dict[str, Any]:
     """A copy with a unique ``event_id`` (and subject, unless given)."""
     copied = copy.deepcopy(payload)
@@ -63,6 +70,10 @@ class Ledger:
 
     def get(self, path: str, *, key: str | None, **kw: Any):
         return self.http.get(path, headers=self.headers(key), **kw)
+
+    def put(self, path: str, body: Any, *, key: str | None, **kw: Any):
+        content = body if isinstance(body, str | bytes) else json.dumps(body)
+        return self.http.put(path, content=content, headers=self.headers(key), **kw)
 
     def submit(self, submission: dict[str, Any], *, key: str | None = None):
         return self.post("/api/v1/decisions", submission, key=key or self.key)
