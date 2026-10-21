@@ -42,7 +42,7 @@ from app.audit.store import BundleStore
 from app.auth import KEY_HEADER
 from app.gates import ComposedGate
 from app.main import create_app
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.settings import FrameworkSettings
 from app.submit import submit
 from core.actions import DecisionAction
@@ -114,7 +114,7 @@ def written_ids(pg_conn: psycopg.Connection[Any]) -> Iterator[list[str]]:
 
 
 def _store(conn: psycopg.Connection[Any], *registrations) -> BundleStore:
-    registry = StaticReasonerRegistry(list(registrations or (STUB_REGISTRATION,)))
+    registry = LiveReasonerRegistry(list(registrations or (STUB_REGISTRATION,)))
     return BundleStore(conn, registry=registry)
 
 
@@ -165,7 +165,7 @@ async def test_a_mandatory_lookup_gate_raises_a_record_and_it_replays(
         submission=submission,
         gates=_compose(lookup, FakeGatePlugin()),
         store=store,
-        registry=StaticReasonerRegistry([_WITH_LOOKUP]),
+        registry=LiveReasonerRegistry([_WITH_LOOKUP]),
         ingestion_timestamp=_INGESTION_TS,
     )
     written_ids.append(bundle.decision_id)
@@ -217,7 +217,7 @@ async def test_a_gated_decision_through_two_gates_round_trips_and_replays(
         submission=submission,
         gates=_compose(FakeLookupGatePlugin(), FakeGatePlugin()),
         store=store,
-        registry=StaticReasonerRegistry([_WITH_LOOKUP]),
+        registry=LiveReasonerRegistry([_WITH_LOOKUP]),
         ingestion_timestamp=_INGESTION_TS,
     )
     written_ids.append(bundle.decision_id)
@@ -255,7 +255,7 @@ async def test_write_is_idempotent_on_decision_id(pg_conn, written_ids, submissi
         submission=submission,
         gates={},
         store=store,
-        registry=StaticReasonerRegistry([STUB_REGISTRATION]),
+        registry=LiveReasonerRegistry([STUB_REGISTRATION]),
         ingestion_timestamp=_INGESTION_TS,
     )
     written_ids.append(bundle.decision_id)
@@ -400,7 +400,7 @@ async def test_the_store_leaves_no_transaction_open(pg_conn, written_ids, submis
         submission=submission,
         gates={},
         store=store,
-        registry=StaticReasonerRegistry([STUB_REGISTRATION]),
+        registry=LiveReasonerRegistry([STUB_REGISTRATION]),
         ingestion_timestamp=_INGESTION_TS,
     )
     written_ids.append(bundle.decision_id)
@@ -428,7 +428,7 @@ async def test_threads_sharing_the_connection_commit_every_write_and_leave_it_id
     # not leave the connection inside a transaction, and every write must be
     # committed — visible to another session.
     capture = _CapturingStore()
-    registry = StaticReasonerRegistry([STUB_REGISTRATION])
+    registry = LiveReasonerRegistry([STUB_REGISTRATION])
     for _ in range(12):
         await submit(
             submission=submission,
@@ -484,7 +484,7 @@ async def test_recent_recorded_samples_this_runs_records(
     pg_conn, written_ids, reasoner_context
 ):
     store = _store(pg_conn)
-    registry = StaticReasonerRegistry([STUB_REGISTRATION])
+    registry = LiveReasonerRegistry([STUB_REGISTRATION])
     since = datetime.now(UTC)
     bundles: list[DecisionBundle] = []
     for score in (0.05, 0.10, 0.55):  # two records, one gate request

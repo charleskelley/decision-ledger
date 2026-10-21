@@ -22,7 +22,7 @@ from app.client import LocalClient
 from app.gates import ComposedGate, GateKind
 from app.identity import NO_RESOLVER, PASSTHROUGH, passthrough_identity
 from app.plugin import FrameworkServices
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from ato_reasoner.assembler import build_submission
 from ato_reasoner.pipeline import run_ato_decision
 from ato_reasoner.plugin import AtoServices
@@ -137,7 +137,7 @@ async def test_a_decision_through_the_ledger_records_the_account_with_provenance
         settings=MagicMock(),
         pg_conn=MagicMock(),
         store=store,
-        registry=StaticReasonerRegistry([ATO_REGISTRATION]),
+        registry=LiveReasonerRegistry([ATO_REGISTRATION]),
         gates={"policy": ComposedGate(plugin=_PolicyGatePlugin(), gate=gate)},
     )
     services = AtoServices(

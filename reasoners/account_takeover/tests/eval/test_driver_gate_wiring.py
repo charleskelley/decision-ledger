@@ -31,7 +31,7 @@ from app.audit import StoredBundle
 from app.client import LocalClient
 from app.gates import ComposedGate
 from app.plugin import FrameworkServices
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from ato_reasoner.eval.capture_baselines import _bundle_to_case
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.events import AuthMethod, AuthOutcome, Geolocation, LoginEvent
@@ -205,7 +205,7 @@ def _driver(gates: dict[str, Any]) -> PipelineDriver:
         settings=MagicMock(),
         pg_conn=MagicMock(),
         store=_Store(),  # type: ignore[arg-type]
-        registry=StaticReasonerRegistry([ATO_REGISTRATION]),
+        registry=LiveReasonerRegistry([ATO_REGISTRATION]),
         gates=gates,
     )
     driver._client = LocalClient(driver._framework)

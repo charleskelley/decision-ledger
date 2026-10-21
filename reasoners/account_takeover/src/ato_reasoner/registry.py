@@ -1,6 +1,6 @@
 """ATO Reasoner registration record.
 
-The framework's ``StaticReasonerRegistry`` (in ``app/reasoner_registry.py``)
+The framework's ``LiveReasonerRegistry`` (in ``app/reasoner_registry.py``)
 is reasoner-agnostic. Each reasoner declares its own
 ``ReasonerRegistration`` constant in its own package; the deployment
 composer collects them.

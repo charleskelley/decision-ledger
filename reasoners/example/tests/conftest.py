@@ -19,7 +19,7 @@ import pytest
 from app.audit import StoredBundle
 from app.gates import ComposedGate, GateKind
 from app.plugin import FrameworkServices
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from core.actions import DecisionAction
 from core.gate import GateOutput, GateVerdict
 from example_reasoner.registry import EXAMPLE_REGISTRATION
@@ -95,7 +95,7 @@ def ledger(policy_gate: ScriptedPolicyGate) -> FrameworkServices:
         settings=MagicMock(),
         pg_conn=MagicMock(),
         store=MemoryStore(),  # type: ignore[arg-type]
-        registry=StaticReasonerRegistry([EXAMPLE_REGISTRATION]),
+        registry=LiveReasonerRegistry([EXAMPLE_REGISTRATION]),
         gates=MappingProxyType(
             {"policy": ComposedGate(plugin=PolicyPlugin(), gate=policy_gate)}  # type: ignore[arg-type]
         ),

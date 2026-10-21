@@ -26,7 +26,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.gates import ComposedGate, ConfigAuthorizer
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.submit import submit
 from core.actions import DecisionAction
 from core.exceptions import SubmissionContractError
@@ -292,7 +292,7 @@ async def _decide(submission: Any, fixture_reasoner: Any, store: _RecordingStore
         submission=submission,
         gates=_composed(fixture_reasoner),
         store=store,  # type: ignore[arg-type]
-        registry=StaticReasonerRegistry([fixture_reasoner.registration]),
+        registry=LiveReasonerRegistry([fixture_reasoner.registration]),
         ingestion_timestamp=datetime(2026, 10, 13, 12, 0, tzinfo=UTC),
     )
 

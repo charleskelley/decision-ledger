@@ -16,7 +16,7 @@ import pytest
 
 from app.audit import replay_bundle
 from app.gates import ComposedGate
-from app.reasoner_registry import StaticReasonerRegistry
+from app.reasoner_registry import LiveReasonerRegistry
 from app.submit import submit
 from core.actions import DecisionAction
 from core.bundle import DecisionBundle
@@ -45,7 +45,7 @@ async def _decide(submission, gates, registration, store):
         submission=submission,
         gates=gates,
         store=store,  # type: ignore[arg-type]
-        registry=StaticReasonerRegistry([registration]),
+        registry=LiveReasonerRegistry([registration]),
         ingestion_timestamp=datetime(2026, 10, 11, 12, 0, tzinfo=UTC),
     )
 
