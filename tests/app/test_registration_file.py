@@ -1,17 +1,25 @@
-"""Behavioral tests for the deployment's registration file (DR-31).
+"""Behavioral tests for the deployment's declared and written registrations.
 
 A reasoner that runs as its own service, with no plugin installed in the
-ledger's deployment, registers through ``DECISIONLEDGER_REGISTRATIONS``: a
-YAML list of registrations (or ``{registrations: [...]}``), each in the JSON
-shape of a ``ReasonerRegistration`` and validated strictly.
+ledger's deployment, registers through ``DECISIONLEDGER_REGISTRATIONS`` (a
+YAML list of registrations, or ``{registrations: [...]}``, each in the JSON
+shape of a ``ReasonerRegistration`` and validated strictly; DR-31) or over
+the API (DR-33), which the ledger keeps and reads back at startup.
 
 - The file's registrations compose with the plugins', labelled with their
-  source.
+  source, and so do the ones written over the API.
 - A file that cannot be read or parsed, an entry that does not validate, a
   reasoner registered twice in the file, and a reasoner a plugin already
-  registers each raise ``RegistrationError`` naming the file.
-- The bootstrap reads the file named by the settings and snapshots every
-  registration it serves.
+  registers each raise ``RegistrationError`` naming the file; a reasoner
+  registered over the API and by a plugin or the file refuses startup too.
+- The bootstrap reads the file named by the settings and the registrations
+  written over the API, and snapshots every registration it serves.
+- Scope (DR-33): every composed gate a registration binds is asked to admit
+  the binding (``BindingValidator``), with its ``config``, before it is
+  asked whether it serves the reasoner (``ReasonerScope``), so a gate that
+  learns a reasoner when it admits the binding serves a file-registered
+  reasoner; a binding the gate refuses, or a configuration for a gate that
+  takes none, fails startup with the gate's reason.
 """
 
 from __future__ import annotations
@@ -22,10 +30,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from app import bootstrap
+from app.gates import BindingValidator, ReasonerScope
 from app.plugins import build_registry, load_registration_file
 from app.settings import FrameworkSettings
 from core.actions import DecisionAction
-from core.exceptions import GatePluginError, RegistrationError
+from core.exceptions import GateConfigError, GatePluginError, RegistrationError
 from core.gate import AllOf, Compare
 from core.observation import (
     BypassRule,
@@ -34,6 +43,8 @@ from core.observation import (
     canonical_registration,
     registration_version,
 )
+from tests._fake_gate.plugin import FakeLookupGatePlugin
+from tests._memory_ledger import MemoryApiRegistrations
 from tests._stub_reasoner.plugin import PLUGIN
 from tests._stub_reasoner.registry import STUB_REGISTRATION
 
@@ -235,11 +246,173 @@ def test_a_gate_that_cannot_serve_a_bound_reasoner_fails_startup(
     settings = FrameworkSettings(
         decisionledger_registrations=str(_write(tmp_path, _SCOPED_ENTRY))
     )
-    with pytest.raises(GatePluginError, match="'file-reasoner' binds this gate"):
+    with pytest.raises(GatePluginError, match="'file-reasoner' binds this gate") as err:
         bootstrap.build_framework_services(
             settings, [PLUGIN], [_ScopedGatePlugin({"stub-reasoner"})]
         )
+    assert "Install the reasoner's plugin" not in err.value.reason
+    assert "Provide the assets the gate reads" in err.value.reason
     services: Any = bootstrap.build_framework_services(
         settings, [PLUGIN], [_ScopedGatePlugin({"file-reasoner"})]
     )
     assert "scoped" in services.gates
+
+
+class _AdmittingGatePlugin:
+    """A gate that serves the reasoners whose bindings it admitted (DR-33).
+
+    It knows the stub's assets when built and finds ``available`` ones when
+    asked to admit a binding: the shape of a gate that serves reasoners
+    registered without a plugin from assets it reads on admission.
+    """
+
+    gate_id = "scoped"
+    deterministic = True
+    config_model = None
+    binding_config_model = None
+
+    def __init__(self, available: set[str]) -> None:
+        from app.gates import GateKind
+
+        self.kind = GateKind.RULES
+        self.available = available
+        self.admitted: list[tuple[str, object]] = []
+
+    def build(self, framework: Any) -> Any:
+        plugin = self
+
+        class _Gate:
+            def __init__(self) -> None:
+                self.served = frozenset({"stub-reasoner"})
+
+            async def evaluate(self, request: Any) -> Any:
+                raise AssertionError("not called at startup")
+
+            def close(self) -> None:
+                pass
+
+            def validate_binding(self, reasoner_id: str, config: object) -> None:
+                plugin.admitted.append((reasoner_id, config))
+                if reasoner_id not in plugin.available | self.served:
+                    msg = f"no assets for {reasoner_id!r}"
+                    raise GateConfigError(msg)
+                self.served = self.served | {reasoner_id}
+
+            def serves(self, reasoner_id: str) -> bool:
+                return reasoner_id in self.served
+
+        return _Gate()
+
+
+def test_a_gate_admits_a_file_reasoners_binding_before_it_is_asked_to_serve_it(
+    tmp_path: Path, no_postgres: list[str]
+):
+    settings = FrameworkSettings(
+        decisionledger_registrations=str(_write(tmp_path, _SCOPED_ENTRY))
+    )
+    plugin = _AdmittingGatePlugin({"file-reasoner"})
+
+    services: Any = bootstrap.build_framework_services(settings, [PLUGIN], [plugin])
+
+    gate = services.gates["scoped"].gate
+    assert isinstance(gate, BindingValidator)
+    assert isinstance(gate, ReasonerScope)
+    assert plugin.admitted == [("file-reasoner", {})]
+    assert gate.serves("file-reasoner")
+
+
+def test_a_binding_the_gate_refuses_fails_startup_with_the_gates_reason(
+    tmp_path: Path, no_postgres: list[str]
+):
+    settings = FrameworkSettings(
+        decisionledger_registrations=str(_write(tmp_path, _SCOPED_ENTRY))
+    )
+
+    with pytest.raises(GatePluginError) as err:
+        bootstrap.build_framework_services(
+            settings, [PLUGIN], [_AdmittingGatePlugin(set())]
+        )
+
+    assert err.value.gate_id == "scoped"
+    assert "refuses the binding of reasoner 'file-reasoner'" in err.value.reason
+    assert "no assets for 'file-reasoner'" in err.value.reason
+
+
+def test_a_binding_configuration_for_a_gate_that_takes_none_fails_startup(
+    tmp_path: Path, no_postgres: list[str]
+):
+    entry = """\
+- reasoner_id: file-reasoner
+  reasoner_name: File Reasoner
+  gates: [{gate_id: fake-lookup, config: {list: do-not-contact}}]
+"""
+    settings = FrameworkSettings(
+        decisionledger_registrations=str(_write(tmp_path, entry))
+    )
+
+    with pytest.raises(GatePluginError, match="takes no binding configuration"):
+        bootstrap.build_framework_services(settings, [PLUGIN], [FakeLookupGatePlugin()])
+
+
+def _written(registration: ReasonerRegistration) -> MemoryApiRegistrations:
+    stored = MemoryApiRegistrations()
+    stored.save(registration, registered_by="operator")
+    return stored
+
+
+def test_the_api_registrations_compose_with_the_plugins_and_the_file(tmp_path: Path):
+    api = STUB_REGISTRATION.model_copy(update={"reasoner_id": "api-reasoner"})
+
+    registry = build_registry(
+        [PLUGIN],
+        registration_file=_write(tmp_path, _ENTRY),
+        written=_written(api).load(),
+    )
+
+    assert [(e.reasoner_id, e.source) for e in registry.entries()] == [
+        ("agent-reasoner", f"file:{tmp_path / 'registrations.yaml'}"),
+        ("api-reasoner", "api"),
+        ("stub-reasoner", "plugin:tests._stub_reasoner.plugin"),
+    ]
+    assert registry.entry("api-reasoner").registered_by == "operator"
+
+
+@pytest.mark.parametrize("declared_by", ["plugin", "file"])
+def test_a_reasoner_registered_over_the_api_and_declared_refuses_startup(
+    tmp_path: Path, declared_by: str
+):
+    agent = load_registration_file(_write(tmp_path, _ENTRY))[0]
+    written = _written(STUB_REGISTRATION if declared_by == "plugin" else agent)
+
+    with pytest.raises(
+        RegistrationError, match="registered over the API and by"
+    ) as err:
+        build_registry(
+            [PLUGIN],
+            registration_file=tmp_path / "registrations.yaml",
+            written=written.load(),
+        )
+
+    assert err.value.source == "api"
+    assert f"by {declared_by}:" in err.value.reason
+    assert "decisionledger.reasoner_registry" in err.value.reason
+
+
+def test_the_bootstrap_serves_the_registrations_written_over_the_api(
+    monkeypatch: pytest.MonkeyPatch, no_postgres: list[str]
+):
+    api = STUB_REGISTRATION.model_copy(update={"reasoner_id": "api-reasoner"})
+    stored = _written(api)
+    monkeypatch.setattr(bootstrap, "ApiRegistrations", lambda conn: stored)
+
+    services: Any = bootstrap.build_framework_services(
+        FrameworkSettings(_env_file=None), [PLUGIN], []
+    )
+
+    entry = services.registry.entry("api-reasoner")
+    assert (entry.source, entry.registered_by) == ("api", "operator")
+    assert no_postgres == ["api-reasoner", "stub-reasoner"]
+    services.registry.register(
+        api.model_copy(update={"reasoner_name": "Renamed"}), registered_by="operator"
+    )
+    assert stored.rows["api-reasoner"].registration.reasoner_name == "Renamed"

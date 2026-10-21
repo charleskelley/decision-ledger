@@ -13,6 +13,10 @@ exactly the shape an installed gate member declares:
 - ``build_gates`` builds each plugin once, refuses a built object that is not
   a ``Gate``, and closes what it built when a later build fails.
 - ``close_gates`` closes in reverse composition order.
+- A plugin may leave out ``binding_config_model`` (DR-33); one it declares
+  must be a Pydantic model. ``admit_binding`` validates a binding's
+  ``config`` against it, then asks a ``BindingValidator`` gate; a gate with
+  neither refuses a binding that carries a configuration.
 - The installed deployment publishes the policy gate (interim, from the
   framework package) and the rules gate (its own member).
 """
@@ -27,21 +31,27 @@ from pydantic import BaseModel
 
 from app.gates import (
     GATE_GROUP,
+    BindingValidator,
     ComposedGate,
     Gate,
     GateKind,
     GatePlugin,
+    admit_binding,
+    binding_config_model,
     build_gates,
     check_gate_plugin,
     close_gates,
     discover_gates,
 )
-from core.exceptions import GatePluginError
+from core.exceptions import GateConfigError, GatePluginError
+from core.observation import GateBinding
 from tests._fake_gate.plugin import (
     DETERMINISTIC_PLUGIN,
     PLUGIN,
+    FakeBindingConfig,
     FakeGate,
     FakeGatePlugin,
+    FakeLookupGatePlugin,
 )
 
 _MODULE = __name__
@@ -164,6 +174,80 @@ def test_a_pydantic_config_model_is_accepted():
     plugin.config_model = _Config
 
     assert check_gate_plugin(plugin, name="typed-config") is plugin
+
+
+def test_a_plugin_may_leave_out_the_binding_config_model():
+    """It is optional: a plugin written before DR-33 stays well formed."""
+    plugin = FakeLookupGatePlugin()
+
+    assert not hasattr(plugin, "binding_config_model")
+    assert check_gate_plugin(plugin, name="fake-lookup") is plugin
+    assert binding_config_model(plugin) is None
+
+
+def test_a_binding_config_model_that_is_not_a_pydantic_model_is_refused():
+    plugin = FakeGatePlugin("bad-binding")
+    plugin.binding_config_model = dict  # type: ignore[assignment]
+
+    with pytest.raises(GatePluginError, match="binding_config_model must be"):
+        check_gate_plugin(plugin, name="bad-binding")
+
+
+# ---------------------------------------------------------------------------
+# admit_binding (DR-33)
+# ---------------------------------------------------------------------------
+
+
+def _composed(plugin: Any) -> ComposedGate:
+    return ComposedGate(plugin=plugin, gate=plugin.build(None))
+
+
+def test_admit_binding_hands_the_gate_its_typed_configuration():
+    composed = _composed(FakeGatePlugin())
+    gate = composed.gate
+    assert isinstance(gate, BindingValidator)
+
+    admit_binding(composed, GateBinding(gate_id="fake", config={"label": "x"}), "r")
+
+    assert gate.bindings == [("r", FakeBindingConfig(label="x"))]
+
+
+def test_admit_binding_refuses_a_configuration_the_model_does_not_validate():
+    composed = _composed(FakeGatePlugin())
+
+    with pytest.raises(GateConfigError, match="config is invalid: nope"):
+        admit_binding(composed, GateBinding(gate_id="fake", config={"nope": 1}), "r")
+    assert composed.gate.bindings == []
+
+
+def test_admit_binding_relays_the_gates_refusal():
+    composed = _composed(FakeGatePlugin())
+
+    with pytest.raises(GateConfigError, match="scripted to refuse"):
+        admit_binding(
+            composed, GateBinding(gate_id="fake", config={"refuse": True}), "r"
+        )
+
+
+def test_a_gate_that_takes_no_binding_configuration_admits_an_empty_one():
+    composed = _composed(FakeLookupGatePlugin())
+
+    admit_binding(composed, GateBinding(gate_id="fake-lookup"), "r")
+
+    with pytest.raises(GateConfigError, match="takes no binding configuration"):
+        admit_binding(
+            composed, GateBinding(gate_id="fake-lookup", config={"k": 1}), "r"
+        )
+
+
+def test_a_validating_gate_without_a_model_gets_the_raw_configuration():
+    plugin = FakeGatePlugin("raw")
+    plugin.binding_config_model = None
+    composed = _composed(plugin)
+
+    admit_binding(composed, GateBinding(gate_id="raw", config={"k": [1]}), "r")
+
+    assert composed.gate.bindings == [("r", {"k": [1]})]
 
 
 # ---------------------------------------------------------------------------
