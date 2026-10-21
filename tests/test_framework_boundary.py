@@ -73,6 +73,12 @@ Scans and build-metadata checks codify those rules:
   module- or class-level ``UUID(...)`` binding in a reasoner member): a
   reasoner declares its native namespaces in its registration, where the
   passthrough resolver reads them.
+- **Registration resource** (DR-33): a registration may come from a plugin,
+  the registration file, or ``PUT /api/v1/reasoners/{reasoner_id}``, and a
+  gate admits each binding (``BindingValidator``). No framework file names
+  where a gate reads the assets of a reasoner registered without a plugin
+  (the RAG policy gate's asset root, in any spelling) or the policy gate's
+  per-reasoner profile.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -187,8 +193,15 @@ POLICY_GATE_TOKENS = re.compile(
     r"retrieval_query|retrieval_results|retrieval_path|index_version|"
     r"corpus_version|prompt_registry|PromptRegistry|YamlPromptRegistry|"
     r"Elasticsearch|SentenceTransformer|CrossEncoder|OpenAILLMClient|"
-    r"AnthropicLLMClient|register_vector)\b"
+    r"AnthropicLLMClient|register_vector|ReasonerProfile\w*)\b"
 )
+
+#: Where a gate reads the assets of a reasoner registered without a plugin
+#: (DR-33): the RAG policy gate's mounted asset root, in any spelling
+#: (``assets_root``, "asset root", ``ASSETS_ROOT``). The framework only asks a
+#: gate whether it accepts a binding (``BindingValidator``) and whether it
+#: serves a reasoner (``ReasonerScope``); where the gate looks is its own.
+GATE_ASSET_LOCATION = re.compile(r"assets?[\s_-]*root", re.IGNORECASE)
 
 #: Where the reference policy gate lived inside the framework trees until
 #: Phase 1b moved it into ``gates/policy_rag/`` (directories end with ``/``).
@@ -932,6 +945,34 @@ def test_no_member_keeps_a_private_subject_namespace():
         if hits:
             offenders.append((_rel(path), hits))
     assert not offenders, f"members keep a private subject namespace: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Registration resource — a gate admits a binding; the framework never learns
+# where the gate reads a reasoner's assets (DR-33)
+# ---------------------------------------------------------------------------
+
+
+def test_framework_names_no_gate_asset_location():
+    """No framework file names where a gate reads a reasoner's assets (DR-33).
+
+    A reasoner registered over HTTP or by file, with no plugin installed,
+    ships the assets a gate reads for it where that gate looks (the RAG
+    policy gate: its mounted asset root). The framework asks the gate only
+    whether it accepts the reasoner's binding (``BindingValidator``) and
+    whether it serves the reasoner (``ReasonerScope``), at startup and when a
+    registration is written; the asset location, like the gate's setting
+    names and its per-reasoner profile, belongs to the gate member.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in GATE_ASSET_LOCATION.finditer(text)})
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, (
+        f"framework files name where a gate reads reasoner assets: {offenders}"
+    )
 
 
 def test_framework_ddl_creates_no_extension():
