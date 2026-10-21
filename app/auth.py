@@ -9,8 +9,8 @@ to:
   A write naming another reasoner is refused (403 ``REASONER_MISMATCH``);
   another tenant's decision reads as not found.
 - the **operator** principal (one shared key) reads every reasoner's
-  decisions and resolves held ones; it writes no decision (403
-  ``REASONER_KEY_REQUIRED``).
+  decisions, resolves held ones, and registers reasoners over the API
+  (DR-33); it writes no decision (403 ``REASONER_KEY_REQUIRED``).
 - the **trusted** principal is what an in-process caller acts as
   (``LocalClient``): it holds no key and may do everything.
 
@@ -89,7 +89,11 @@ class Principal:
 
     @property
     def may_resolve(self) -> bool:
-        """Whether this principal may resolve held decisions."""
+        """Whether this principal may act as the operator.
+
+        The operator resolves held decisions and writes registrations
+        (DR-33); so does the trusted in-process principal.
+        """
         return self.kind in ("trusted", "operator")
 
 
@@ -263,7 +267,8 @@ api_key_header = APIKeyHeader(
     auto_error=False,
     description=(
         "A reasoner's API key (writes and reads its own decisions) or the "
-        "operator key (reads everything, resolves held decisions)."
+        "operator key (reads everything, resolves held decisions, registers "
+        "reasoners)."
     ),
 )
 
@@ -324,13 +329,17 @@ def require_submitter(principal: Principal, reasoner_id: str) -> None:
     )
 
 
-def require_operator(principal: Principal) -> None:
-    """Refuse a resolution the principal may not make.
+def require_operator(
+    principal: Principal, *, act: str = "resolving a decision"
+) -> None:
+    """Refuse an operator act (a resolution, a registration) to anyone else.
+
+    Args:
+        principal: The caller.
+        act: What the caller is doing, for the refusal's detail.
 
     Raises:
         LedgerError: 403 ``OPERATOR_REQUIRED``.
     """
     if not principal.may_resolve:
-        raise LedgerError(
-            403, "OPERATOR_REQUIRED", "resolving a decision needs the operator key"
-        )
+        raise LedgerError(403, "OPERATOR_REQUIRED", f"{act} needs the operator key")

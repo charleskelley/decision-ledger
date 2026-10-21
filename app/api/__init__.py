@@ -1,4 +1,4 @@
-"""The ledger's HTTP surface (DR-31, DR-32): decisions, subjects, gates.
+"""The ledger's HTTP surface (DR-31, DR-32, DR-33): decisions, subjects, gates.
 
 Every route here is the framework's own — the ledger no longer mounts a
 reasoner's router. Each route authenticates its caller (``app.auth``),
@@ -13,8 +13,9 @@ Modules:
                    and ``include_related``).
     identity:      ``GET /api/v1/identity/resolve`` (a native subject, through
                    the active identity resolver).
-    registrations: ``GET /api/v1/reasoners`` and one registration (any
-                   stored version).
+    registrations: ``GET /api/v1/reasoners``, one registration (any stored
+                   version), and ``PUT /api/v1/reasoners/{reasoner_id}``
+                   (operator).
     gates:         ``GET /api/v1/gates``.
     models:        The wire models the routes return and the clients parse.
     errors:        Problem documents and the handlers that produce them.

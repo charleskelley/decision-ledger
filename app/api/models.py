@@ -328,7 +328,13 @@ class RegisteredReasonerView(_Response):
         reasoner_id: The reasoner.
         reasoner_name: Its display name.
         registration_version: The registration's content address.
-        source: ``plugin:<module>``, ``file:<path>``, or ``inline``.
+        source: ``plugin:<module>``, ``file:<path>``, ``api`` (written over
+            the API, DR-33), or ``inline``.
+        registered_by: Who wrote the version served now (``api`` only; a
+            principal label such as ``operator``).
+        registered_at: When the reasoner was first registered over the API
+            (``api`` only).
+        updated_at: When the version served now was written (``api`` only).
         registration: The registration in its canonical JSON form.
     """
 
@@ -336,6 +342,9 @@ class RegisteredReasonerView(_Response):
     reasoner_name: str
     registration_version: str
     source: str
+    registered_by: str | None = None
+    registered_at: datetime | None = None
+    updated_at: datetime | None = None
     registration: dict[str, Any]
 
 
