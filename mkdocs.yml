@@ -60,6 +60,7 @@ nav:
     - Pipeline: design/pipeline.md
     - Interfaces: design/core.md
     - Identity: design/identity.md
+    - Registration: design/registration.md
     - Infrastructure: design/infrastructure.md
     - Gates:
       - design/gates/index.md

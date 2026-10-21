@@ -124,7 +124,7 @@ make eval-account_takeover
 make eval-gate-policy_rag REASONER=ato-reasoner
 ```
 
-To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
+To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example) or over the API with the operator key (`PUT /api/v1/reasoners/{reasoner_id}`; see [Registration](../design/registration.md)). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
 
 ---
 
@@ -203,7 +203,7 @@ make build-policy-index-ato-reasoner
 uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
 ```
 
-The loader resolves the corpus directory from the installed plugin whose `reasoner_id` matches (`ato_reasoner/corpus/`); pass `--corpus-dir` to override. Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
+The loader resolves the corpus directory from the composed plugin whose `reasoner_id` matches (`ato_reasoner/corpus/`), else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` for a reasoner registered without a plugin; pass `--corpus-dir` to override. It refuses a `reasoner_id` the ledger does not register. Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
 
 If the Elasticsearch index was created before `reasoner_id` was mapped as `keyword`, the loader logs that it is recreating the index. That drops every reasoner's BM25 documents, so run `make build-policy-index` afterward to reload all of them.
 

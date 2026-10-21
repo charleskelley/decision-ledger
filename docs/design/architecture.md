@@ -126,13 +126,13 @@ decision-ledger/
 │   ├── auth.py                   API keys to principals (reasoner, operator, trusted in-process)
 │   ├── client.py                 LedgerClient: LocalClient (in process) and HttpClient (httpx)
 │   ├── submit.py                 decide() and submit(): validate → identity → gate set → gates → enforce → write
-│   ├── gates.py                  Gate seam: GateKind, Gate, GatePlugin, ConfigAuthorizer, ReasonerScope, discovery, invoke_gate
+│   ├── gates.py                  Gate seam: GateKind, Gate, GatePlugin, ConfigAuthorizer, BindingValidator, ReasonerScope, discovery, check_gate_set, invoke_gate
 │   ├── identity/                 The identity step: resolver plugin seam and discovery, the passthrough
 │   ├── enforcement/              Gate-level tiers, decision-level rules, the combinator
-│   ├── audit/                    Bundle assembly, BundleStore and replay, registration snapshots, resolution and entity journals, sql/ (canonical DDL)
+│   ├── audit/                    Bundle assembly, BundleStore and replay, registration snapshots and API registrations, resolution and entity journals, sql/ (canonical DDL)
 │   ├── plugin.py                 ReasonerPlugin protocol, FrameworkServices
 │   ├── plugins.py                Reasoner plugin discovery, the registration file, build_registry
-│   ├── reasoner_registry.py      StaticReasonerRegistry
+│   ├── reasoner_registry.py      LiveReasonerRegistry: plugin, file, and API registrations (DR-33)
 │   ├── bootstrap.py              build_framework_services: the one place the shared services are built
 │   ├── schemas.py                Exports schemas/submission-v2.json and bundle-v2.json (`make schemas`)
 │   ├── monitoring/               Structured logging, duration_ms
