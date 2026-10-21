@@ -8,11 +8,16 @@ never imports it (DR-28).
 ``build`` constructs everything the gate owns, so the framework bootstrap
 builds none of it:
 
-- a ``ReasonerProfile`` per composed reasoner — the templates in its
+- a ``ReasonerProfile`` per composed reasoner plugin — the templates in its
   ``prompts_dir`` and the jurisdictions of its ``corpus_dir`` — which the
   gate authorizes every submission against;
 - a ``YamlPromptRegistry`` over every composed reasoner's ``prompts_dir``
   (two reasoners shipping the same ``template_id`` fail the build);
+- the asset root (``POLICY_RAG_GATE_ASSETS_ROOT``, DR-33) the gate admits a
+  reasoner registered without a plugin from: when the framework asks it to
+  validate that reasoner's binding (at startup, or when the registration is
+  written over the API), the gate reads ``<root>/<reasoner_id>/prompts`` and
+  ``corpus`` and adds the reasoner's templates and profile;
 - its own Postgres connection (autocommit) to the framework's database, on
   which it applies its own DDL — the vector extension and the
   ``policy_rag`` schema with the chunk table — before registering the
@@ -134,12 +139,16 @@ class PolicyGatePlugin:
             its input, so enforcement applies Tiers 2 and 4.
         config_model: ``PolicyGateConfig``, validated by the framework at
             intake.
+        binding_config_model: ``None`` — the gate takes no binding
+            configuration; the built gate's ``validate_binding`` admits
+            each binding (DR-33).
     """
 
     gate_id: str = POLICY_GATE_ID
     kind: GateKind = GateKind.LLM
     deterministic: bool = False
     config_model: type[BaseModel] | None = PolicyGateConfig
+    binding_config_model: type[BaseModel] | None = None
 
     def __init__(self, settings: PolicyRagGateSettings | None = None) -> None:
         """Bind the plugin; defer reading settings to build time."""
@@ -159,7 +168,9 @@ class PolicyGatePlugin:
             framework: Shared services. The gate reads ``settings`` (the
                 Postgres DSN of the database that holds its schema) and
                 ``reasoners`` (each reasoner's ``prompts_dir`` and
-                ``corpus_dir``).
+                ``corpus_dir``). A reasoner registered without a plugin is
+                admitted later, from the asset root, when the framework
+                asks the gate to validate its binding.
 
         Returns:
             The runtime ``PolicyGate``; ``close()`` releases its Postgres
@@ -191,6 +202,7 @@ class PolicyGatePlugin:
             component="policy_gate",
             prompt_templates=prompt_registry.registered_ids(),
             reasoner_ids=sorted(profiles),
+            assets_root=str(settings.assets_root_path or ""),
             embedding_model=EMBEDDING_MODEL,
             cross_encoder_model=CROSS_ENCODER_MODEL,
         )
@@ -200,6 +212,7 @@ class PolicyGatePlugin:
             retriever=retriever,
             profiles=profiles,
             resources=resources,
+            assets_root=settings.assets_root_path,
         )
 
 

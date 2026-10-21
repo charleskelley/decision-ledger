@@ -68,11 +68,17 @@ intake it accepts only a `template_id` the submitter ships and
 `jurisdictions` its own corpus covers, and anything else is `422
 GATE_CONFIG_UNAUTHORIZED`.
 
-It is also a `ReasonerScope`: it serves only the reasoners it built a profile
-for. A reasoner registered through the deployment's registration file
-(`DECISIONLEDGER_REGISTRATIONS`) has no plugin installed, so no prompts or
-corpus, and startup refuses a deployment in which such a reasoner binds this
-gate ([DR-31](../../decisions.md#dr-31-wire-submission-schema-http-surface-registration-as-data)).
+It is also a `BindingValidator` and a `ReasonerScope`
+([DR-33](../../decisions.md#dr-33-registration-is-a-writable-versioned-resource-bindings-carry-gate-validated-config)).
+The framework asks it to admit every registration that binds it, at startup
+and when a registration is written over the API. A plugin reasoner is
+admitted as it is; a reasoner registered by file or over the API is
+admitted from the asset root (`POLICY_RAG_GATE_ASSETS_ROOT`,
+`<root>/<reasoner_id>/prompts/*.yaml` and `corpus/**/*.md`), read once, its
+templates added to the prompt registry and its profile to the gate's. A
+reasoner with no assets there, malformed ones, or a template id another
+reasoner registers is refused, naming the gate (see
+[Registration](../../registration.md)).
 
 ## How it decides
 
@@ -193,10 +199,12 @@ make build-policy-index-<reasoner_id>     # e.g. make build-policy-index-ato-rea
 uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id> [--corpus-dir <path>] [--wipe]
 ```
 
-The loader resolves the corpus directory from the installed reasoner plugin
-with that `reasoner_id` (`--corpus-dir` overrides it), chunks and embeds
-every Markdown document, and writes both stores, tagging every chunk with
-the `reasoner_id`. See [Policy corpus](policy-corpus.md) for the document
+The loader refuses a `reasoner_id` the ledger does not register, resolves
+the corpus directory from the composed reasoner plugin with that
+`reasoner_id`, else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`
+(DR-33; `--corpus-dir` overrides both), chunks and embeds every Markdown
+document, and writes both stores, tagging every chunk with the
+`reasoner_id`. See [Policy corpus](policy-corpus.md) for the document
 format, the chunking rules, and the options.
 
 ## Eval

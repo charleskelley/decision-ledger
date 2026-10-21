@@ -30,6 +30,14 @@ built with per-reasoner ``ReasonerProfile`` objects, ``authorize_config``
 — which the framework calls at intake — accepts only templates the
 submitting reasoner ships and jurisdictions its corpus covers.
 
+Which reasoners it serves is the gate's call too (DR-33): the framework
+asks ``validate_binding`` about every registration that binds the gate, at
+startup and when a registration is written over the API. A reasoner the
+deployment composes as a plugin is served from its plugin's assets; any
+other is admitted from its directory under the asset root
+(``POLICY_RAG_GATE_ASSETS_ROOT``, ``policy_rag_gate.assets``), and
+``serves`` then answers yes.
+
 Strict structured output is enforced at the SDK layer — the ``LLMClient``
 returns a Pydantic-validated ``PolicyGateVerdict`` directly. Any failure to
 reach a verdict (no retrieval query, template render error, LLM error or
@@ -45,13 +53,17 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
 from app.monitoring import duration_ms
+from core.exceptions import GateConfigError
 from core.gate import EvidenceRef, GateOutput
+from policy_rag_gate.assets import load_root_assets
 from policy_rag_gate.config import PolicyGateConfig
 from policy_rag_gate.models import (
     PolicyGateExtra,
@@ -62,7 +74,8 @@ from policy_rag_gate.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
+    from pathlib import Path
 
     from core.gate_request import GateRequest
     from core.llm import LLMClient
@@ -183,10 +196,10 @@ def _policy_gate_output(
 class PolicyGate:
     """LLM-backed policy gate: hybrid retrieval plus a structured LLM verdict.
 
-    Satisfies ``app.gates.Gate`` and its optional ``ConfigAuthorizer``
-    capability. Owns its retriever, prompt registry, LLM client, and
-    per-reasoner profiles; ``close()`` releases the infrastructure handles it
-    was given.
+    Satisfies ``app.gates.Gate`` and its optional ``ConfigAuthorizer``,
+    ``BindingValidator``, and ``ReasonerScope`` capabilities. Owns its
+    retriever, prompt registry, LLM client, and per-reasoner profiles;
+    ``close()`` releases the infrastructure handles it was given.
 
     Args:
         client: SDK-agnostic ``LLMClient`` adapter. Decouples gate
@@ -201,12 +214,17 @@ class PolicyGate:
             ``model_version``. Defaults to ``client.model`` when the client
             exposes a ``model`` property; otherwise an opaque
             ``"<llm-client>"`` placeholder.
-        profiles: What each composed reasoner may submit, keyed by
-            ``reasoner_id`` (the plugin derives them from each reasoner's
-            prompts and corpus). ``None`` authorizes every submission — a
-            gate assembled by hand for a test or a fault-injection run.
+        profiles: What each reasoner may submit, keyed by ``reasoner_id``:
+            the composed plugins' (the plugin derives them from each
+            reasoner's prompts and corpus), to which ``validate_binding``
+            adds the reasoners it admits from the asset root. ``None``
+            authorizes every submission and serves everyone — a gate
+            assembled by hand for a test or a fault-injection run.
         resources: Infrastructure handles the gate owns (connections,
             clients) and closes on ``close()``.
+        assets_root: The asset root a reasoner registered without a plugin
+            ships its prompts and corpus under
+            (``POLICY_RAG_GATE_ASSETS_ROOT``), or ``None`` for none.
     """
 
     def __init__(
@@ -220,6 +238,7 @@ class PolicyGate:
         model_version_label: str | None = None,
         profiles: Mapping[str, ReasonerProfile] | None = None,
         resources: Sequence[_Closeable] = (),
+        assets_root: Path | None = None,
     ) -> None:
         """Initialize the policy gate with its client, registry, and retriever."""
         self._client = client
@@ -234,6 +253,8 @@ class PolicyGate:
         )
         self._profiles = dict(profiles) if profiles is not None else None
         self._resources = tuple(resources)
+        self._assets_root = assets_root
+        self._admission = threading.Lock()
 
     @property
     def client(self) -> LLMClient:
@@ -252,8 +273,17 @@ class PolicyGate:
 
     @property
     def profiles(self) -> Mapping[str, ReasonerProfile] | None:
-        """Per-reasoner profiles the gate authorizes against (``None``: any)."""
+        """Per-reasoner profiles the gate authorizes against (``None``: any).
+
+        A snapshot: admitting a reasoner swaps in a new mapping, so a caller
+        that keeps this one keeps the profiles as they were.
+        """
         return self._profiles
+
+    @property
+    def assets_root(self) -> Path | None:
+        """The asset root reasoners without a plugin are admitted from."""
+        return self._assets_root
 
     def close(self) -> None:
         """Release the infrastructure handles this gate owns."""
@@ -264,10 +294,12 @@ class PolicyGate:
         """Whether this gate can serve ``reasoner_id`` at all.
 
         The gate authorizes each reasoner against the profile it derived
-        from that reasoner's own prompts and corpus when it was built, so a
-        reasoner it has no profile for — one registered without a plugin —
-        would have every submission refused. The framework asks at startup
-        (``ReasonerScope``) and refuses such a deployment instead.
+        from that reasoner's own prompts and corpus — its plugin's, or its
+        directory under the asset root once ``validate_binding`` admitted it
+        — so a reasoner it holds no profile for would have every submission
+        refused. The framework asks after the binding was admitted
+        (``ReasonerScope``): the derived read of "has this gate accepted a
+        binding for this reasoner?".
 
         Args:
             reasoner_id: A reasoner whose registration binds this gate.
@@ -276,7 +308,76 @@ class PolicyGate:
             ``True`` when the gate was built without profiles (it authorizes
             everyone) or holds one for ``reasoner_id``.
         """
-        return self._profiles is None or reasoner_id in self._profiles
+        profiles = self._profiles
+        return profiles is None or reasoner_id in profiles
+
+    def validate_binding(self, reasoner_id: str, config: object) -> None:
+        """Admit ``reasoner_id``'s binding to this gate, or refuse it (DR-33).
+
+        The framework asks for every registration that binds the gate: at
+        startup, and when a registration is written over the API. The gate
+        takes no binding configuration yet, so a non-empty ``config`` is
+        refused. A reasoner the gate already serves (a composed plugin's, or
+        one admitted earlier) is admitted as it is: its assets are not read
+        again. Any other reasoner is admitted from its directory under the
+        asset root: its prompt templates join the prompt registry and its
+        profile is added, both or neither. Add-only: template ids are
+        global and immutable, so a template id the deployment already
+        registers refuses the binding, and nothing is ever removed.
+
+        Args:
+            reasoner_id: The reasoner whose registration binds this gate.
+            config: The binding's ``config`` (raw: the plugin declares no
+                ``binding_config_model``).
+
+        Raises:
+            GateConfigError: The binding carries a configuration; or the
+                reasoner has no plugin composed and the asset root is not
+                set, or does not hold its prompts and corpus, or they do
+                not load, or one of its template ids is registered already.
+        """
+        if config:
+            keys = sorted(config) if isinstance(config, Mapping) else []
+            msg = (
+                "the policy gate takes no binding configuration (the binding's "
+                f"config has keys {keys})"
+            )
+            raise GateConfigError(msg)
+        if self._profiles is None or reasoner_id in self._profiles:
+            return
+        with self._admission:
+            if reasoner_id in self._profiles:
+                return
+            if self._assets_root is None:
+                msg = (
+                    f"reasoner {reasoner_id!r} has no plugin composed in this "
+                    "deployment, and POLICY_RAG_GATE_ASSETS_ROOT is not set: "
+                    "ship its prompts and corpus under "
+                    "<root>/<reasoner_id>/{prompts,corpus}"
+                )
+                raise GateConfigError(msg)
+            profile, templates = load_root_assets(self._assets_root, reasoner_id)
+            add = getattr(self._registry, "add", None)
+            if add is None:
+                msg = (
+                    "this gate's prompt registry cannot register templates "
+                    f"after the gate is built, so reasoner {reasoner_id!r} "
+                    "cannot be admitted"
+                )
+                raise GateConfigError(msg)
+            try:
+                add(templates)
+            except ValueError as err:
+                raise GateConfigError(str(err)) from err
+            self._profiles = {**self._profiles, reasoner_id: profile}
+        log.info(
+            "policy_gate.reasoner_admitted",
+            component="policy_gate",
+            reasoner_id=reasoner_id,
+            source="assets_root",
+            prompt_templates=sorted(profile.template_ids),
+            jurisdictions=sorted(profile.jurisdictions),
+        )
 
     def authorize_config(self, config: object, *, reasoner_id: str) -> None:
         """Check that ``reasoner_id`` may submit ``config`` to this gate.
@@ -295,18 +396,19 @@ class PolicyGate:
             ValueError: The reasoner is not one this gate was built for, or
                 ``config`` falls outside its profile.
         """
-        if self._profiles is None:
+        profiles = self._profiles
+        if profiles is None:
             return
         typed = (
             config
             if isinstance(config, PolicyGateConfig)
             else PolicyGateConfig.model_validate(config)
         )
-        profile = self._profiles.get(reasoner_id)
+        profile = profiles.get(reasoner_id)
         if profile is None:
             msg = (
-                f"reasoner {reasoner_id!r} is not one this gate was built for: "
-                f"{sorted(self._profiles)}"
+                f"reasoner {reasoner_id!r} is not one this gate serves: "
+                f"{sorted(profiles)}"
             )
             raise ValueError(msg)
         profile.authorize(typed)

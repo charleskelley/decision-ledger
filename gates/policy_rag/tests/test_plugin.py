@@ -27,6 +27,7 @@ No Postgres, Elasticsearch, model download, or LLM API is touched.
 from __future__ import annotations
 
 import importlib.metadata as metadata
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -144,10 +145,13 @@ def _framework(*reasoners: Any) -> Any:
     return framework
 
 
-def _plugin() -> PolicyGatePlugin:
+def _plugin(assets_root: str = "") -> PolicyGatePlugin:
+    # Every setting is pinned, so a developer's .env cannot leak into a build.
     return PolicyGatePlugin(
         settings=PolicyRagGateSettings(
-            elasticsearch_url="http://es.example:9200", openai_api_key=""
+            elasticsearch_url="http://es.example:9200",
+            openai_api_key="",
+            assets_root=assets_root,
         )
     )
 
@@ -225,6 +229,26 @@ def test_build_derives_what_each_composed_reasoner_may_submit(
             template_ids=frozenset(), jurisdictions=frozenset()
         ),
     }
+
+
+def test_build_hands_the_asset_root_to_the_gate(infra, fixture_reasoner, tmp_path):
+    gate = _plugin(assets_root=str(tmp_path)).build(_framework(fixture_reasoner))
+
+    assert gate.assets_root == tmp_path
+    assert _plugin().build(_framework(fixture_reasoner)).assets_root is None
+
+
+def test_the_plugin_admits_bindings_through_the_gate_not_a_config_model():
+    assert PLUGIN.binding_config_model is None
+
+
+def test_a_blank_asset_root_is_no_asset_root():
+    """A blank variable is unset, never the current directory."""
+    assert PolicyRagGateSettings(assets_root="").assets_root_path is None
+    assert PolicyRagGateSettings(assets_root="  ").assets_root_path is None
+    assert PolicyRagGateSettings(assets_root="/srv/assets").assets_root_path == (
+        Path("/srv/assets")
+    )
 
 
 def test_two_reasoners_shipping_one_template_id_fail_before_any_connection(

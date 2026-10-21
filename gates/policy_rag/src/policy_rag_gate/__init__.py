@@ -8,7 +8,9 @@ universal ``GateOutput`` the gate returns.
 
 The gate runs hybrid retrieval over the submitting reasoner's corpus,
 constructs prompts from versioned YAML templates (each reasoner plugin ships
-its own ``prompts/`` directory), calls the LLM API, and validates the
+its own ``prompts/`` directory; a reasoner registered without a plugin ships
+its prompts and corpus under the gate's asset root,
+``POLICY_RAG_GATE_ASSETS_ROOT``, DR-33), calls the LLM API, and validates the
 response against the ``PolicyGateVerdict`` schema. Schema validation
 failures route to HOLD — never to silent enforcement. Its own typed models
 (``PolicyGateSnapshot``, ``PolicyGateExtra``, ...) live in
