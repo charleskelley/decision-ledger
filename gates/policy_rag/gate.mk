@@ -23,8 +23,10 @@ GATE_HELP += "    eval-gate-policy_rag              Gate eval: retrieval, faithf
 prepare-gate-policy_rag:
 	uv run python -m policy_rag_gate.schema
 
-# Index one reasoner's corpus: the loader resolves the corpus directory from
-# the installed reasoner plugin whose registration has this reasoner_id.
+# Index one registered reasoner's corpus: the loader resolves the corpus
+# directory from the composed reasoner plugin whose registration has this
+# reasoner_id, else from <POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus
+# (DR-33), and refuses a reasoner_id the ledger does not register.
 build-policy-index-%:
 	uv run python -m policy_rag_gate.corpus_loader --reasoner-id $*
 

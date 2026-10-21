@@ -8,8 +8,9 @@ fixture corpus under ``gates/policy_rag/tests/fixtures/corpus`` (two short
 Markdown policies, ``REGION_A`` and ``REGION_B``). A session fixture applies
 the gate's own DDL (vector extension, ``policy_rag`` schema), then indexes
 that corpus under ``reasoner_id="stub-reasoner"`` with the corpus loader's
-public helpers — exactly what ``corpus_loader --reasoner-id stub-reasoner
---corpus-dir <fixtures>/corpus`` would do — and deletes those rows and
+public helpers — what ``corpus_loader --reasoner-id stub-reasoner
+--corpus-dir <fixtures>/corpus`` would write, without the CLI's check that
+the ledger registers ``stub-reasoner`` — and deletes those rows and
 documents again on teardown, so a shared local stack is left as it was
 found.
 

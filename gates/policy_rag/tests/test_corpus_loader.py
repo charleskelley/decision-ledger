@@ -1,11 +1,18 @@
-"""Behavioral tests for the corpus loader's plugin resolution and index guard.
+"""Behavioral tests for the corpus loader's resolution, registry check, and index guard.
 
 No Postgres or Elasticsearch is touched:
 
-- ``resolve_corpus_dir`` finds the installed plugin whose
+- ``resolve_corpus_dir`` finds the composed plugin whose
   ``registration.reasoner_id`` matches ``--reasoner-id`` and returns its
-  ``corpus_dir``; an explicit ``--corpus-dir`` wins; an unknown id raises
-  ``ReasonerPluginError`` naming every discovered id.
+  ``corpus_dir`` (discovering the installed plugins filtered by
+  ``DECISIONLEDGER_REASONERS`` when none are injected), else the reasoner's
+  ``corpus/`` directory under the gate's asset root (DR-33); an explicit
+  ``--corpus-dir`` wins; an unknown id raises ``ReasonerPluginError`` naming
+  every composed plugin id, and an id that cannot name a directory under the
+  root is refused.
+- ``registry_refusal`` refuses a ``--reasoner-id`` the ledger's registry
+  does not know (plugins, the registration file, and the API's
+  registrations), and ``main`` refuses before it loads a model.
 - ``_ensure_es_index`` creates a missing index, keeps one whose
   ``reasoner_id`` is mapped as ``keyword``, and drops and recreates one whose
   mapping lacks that field (the DR-24 tenant-filter regression) while
@@ -23,12 +30,15 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import APIRouter
 
-from core.exceptions import ReasonerPluginError
+from app.reasoner_registry import LiveReasonerRegistry
+from app.settings import FrameworkSettings
+from core.exceptions import ReasonerPluginError, RegistrationError
 from core.observation import GateBinding, ReasonerRegistration
 from policy_rag_gate import corpus_loader
 from policy_rag_gate.corpus_loader import (
     _ensure_es_index,
     build_parser,
+    registry_refusal,
     resolve_corpus_dir,
 )
 
@@ -160,23 +170,79 @@ def test_resolve_corpus_dir_uses_matching_plugins_corpus_dir(tmp_path: Path):
     assert resolved == tmp_path / "beta" / "corpus"
 
 
-def test_resolve_corpus_dir_discovers_installed_plugins_when_none_injected(
+def test_resolve_corpus_dir_discovers_the_composed_plugins_when_none_injected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Without an injected list, the loader asks ``discover_plugins()``."""
-    plugin = _FakePlugin("gamma-reasoner", tmp_path / "gamma" / "corpus")
-    calls: list[int] = []
+    """Without an injected list, the loader composes plugins as the ledger does.
 
-    def _fake_discover() -> list[_FakePlugin]:
-        calls.append(1)
+    ``discover_plugins`` is asked with the ``DECISIONLEDGER_REASONERS``
+    allowlist, so a plugin the ledger leaves out is not the corpus source.
+    """
+    plugin = _FakePlugin("gamma-reasoner", tmp_path / "gamma" / "corpus")
+    calls: list[frozenset[str] | None] = []
+
+    def _fake_discover(*, allow: frozenset[str] | None = None) -> list[_FakePlugin]:
+        calls.append(allow)
         return [plugin]
 
     monkeypatch.setattr(corpus_loader, "discover_plugins", _fake_discover)
+    monkeypatch.setenv("DECISIONLEDGER_REASONERS", "gamma-reasoner")
 
     resolved = resolve_corpus_dir("gamma-reasoner")
 
     assert resolved == tmp_path / "gamma" / "corpus"
-    assert calls == [1]
+    assert calls == [frozenset({"gamma-reasoner"})]
+
+
+def _root_corpus(root: Path, reasoner_id: str) -> Path:
+    corpus = root / reasoner_id / "corpus"
+    corpus.mkdir(parents=True)
+    return corpus
+
+
+def test_resolve_corpus_dir_falls_back_to_the_asset_root(tmp_path: Path):
+    """A reasoner registered without a plugin ships its corpus under the root."""
+    alpha = _FakePlugin("alpha-reasoner", tmp_path / "alpha" / "corpus")
+    corpus = _root_corpus(tmp_path / "root", "file-reasoner")
+
+    resolved = resolve_corpus_dir(
+        "file-reasoner", plugins=[alpha], assets_root=tmp_path / "root"
+    )
+
+    assert resolved == corpus
+
+
+def test_resolve_corpus_dir_prefers_a_composed_plugin_over_the_asset_root(
+    tmp_path: Path,
+):
+    """The gate serves a composed plugin's reasoner from the plugin's assets."""
+    alpha = _FakePlugin("alpha-reasoner", tmp_path / "alpha" / "corpus")
+    _root_corpus(tmp_path / "root", "alpha-reasoner")
+
+    resolved = resolve_corpus_dir(
+        "alpha-reasoner", plugins=[alpha], assets_root=tmp_path / "root"
+    )
+
+    assert resolved == tmp_path / "alpha" / "corpus"
+
+
+def test_resolve_corpus_dir_refuses_an_id_that_cannot_name_a_directory(
+    tmp_path: Path,
+):
+    _root_corpus(tmp_path, "outside")
+    root = tmp_path / "root"
+    root.mkdir()
+
+    with pytest.raises(ReasonerPluginError, match="cannot name a directory"):
+        resolve_corpus_dir("../outside", plugins=[], assets_root=root)
+
+
+def test_resolve_corpus_dir_names_the_missing_asset_root_directory(tmp_path: Path):
+    with pytest.raises(ReasonerPluginError) as exc_info:
+        resolve_corpus_dir("file-reasoner", plugins=[], assets_root=tmp_path)
+
+    assert str(tmp_path / "file-reasoner" / "corpus") in exc_info.value.reason
+    assert "--corpus-dir" in exc_info.value.reason
 
 
 def test_resolve_corpus_dir_explicit_override_wins_without_discovery(
@@ -184,7 +250,7 @@ def test_resolve_corpus_dir_explicit_override_wins_without_discovery(
 ):
     """``--corpus-dir`` short-circuits plugin discovery entirely."""
 
-    def _should_not_run() -> list[Any]:
+    def _should_not_run(**_: Any) -> list[Any]:
         raise AssertionError("discover_plugins must not be called")
 
     monkeypatch.setattr(corpus_loader, "discover_plugins", _should_not_run)
@@ -368,6 +434,8 @@ def test_main_applies_the_gates_schema_before_writing_postgres(
         calls.append(f"elasticsearch:{url}")
         return MagicMock()
 
+    monkeypatch.setattr(corpus_loader, "discover_plugins", lambda **_: [])
+    monkeypatch.setattr(corpus_loader, "registry_refusal", lambda *_a, **_k: None)
     monkeypatch.setattr(corpus_loader.psycopg, "connect", lambda _dsn: _Conn())
     monkeypatch.setattr(
         corpus_loader, "register_vector", lambda _c: calls.append("register_vector")
@@ -394,3 +462,89 @@ def test_main_applies_the_gates_schema_before_writing_postgres(
     assert calls.index("apply_schema") < calls.index("register_vector")
     assert calls.index("register_vector") < calls.index("write_postgres")
     assert "elasticsearch:http://es.example:9200" in calls
+
+
+# ---------------------------------------------------------------------------
+# The ledger's registry decides which reasoners have a corpus (DR-33)
+# ---------------------------------------------------------------------------
+
+
+def _registration(reasoner_id: str) -> ReasonerRegistration:
+    return ReasonerRegistration(
+        reasoner_id=reasoner_id,
+        reasoner_name=reasoner_id,
+        gates=(GateBinding(gate_id="policy"),),
+    )
+
+
+def test_registry_refusal_accepts_a_reasoner_the_ledger_registers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen: list[list[Any]] = []
+
+    def _read(settings: FrameworkSettings, plugins: list[Any]) -> LiveReasonerRegistry:
+        seen.append(list(plugins))
+        return LiveReasonerRegistry([_registration("api-reasoner")])
+
+    monkeypatch.setattr(corpus_loader, "read_registry", _read)
+
+    refusal = registry_refusal(
+        "api-reasoner", settings=FrameworkSettings(_env_file=None), plugins=[]
+    )
+
+    assert refusal is None
+    assert seen == [[]]
+
+
+def test_registry_refusal_refuses_a_reasoner_the_ledger_does_not_register(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        corpus_loader,
+        "read_registry",
+        lambda settings, plugins: LiveReasonerRegistry([_registration("known")]),
+    )
+
+    refusal = registry_refusal(
+        "unknown-reasoner", settings=FrameworkSettings(_env_file=None), plugins=[]
+    )
+
+    assert refusal is not None
+    assert "'unknown-reasoner' is not registered" in refusal
+    assert "['known']" in refusal
+    assert "PUT /api/v1/reasoners/{reasoner_id}" in refusal
+
+
+def test_registry_refusal_reports_registrations_that_do_not_compose(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def _read(settings: FrameworkSettings, plugins: list[Any]) -> Any:
+        raise RegistrationError("api", "registered twice")
+
+    monkeypatch.setattr(corpus_loader, "read_registry", _read)
+
+    refusal = registry_refusal(
+        "any", settings=FrameworkSettings(_env_file=None), plugins=[]
+    )
+
+    assert refusal is not None
+    assert "do not compose" in refusal
+    assert "DECISIONLEDGER_REASONERS" in refusal
+
+
+def test_main_refuses_an_unregistered_reasoner_before_loading_a_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    def _no_model(_name: str) -> Any:
+        raise AssertionError("no model is loaded for an unregistered reasoner")
+
+    monkeypatch.setattr(corpus_loader, "discover_plugins", lambda **_: [])
+    monkeypatch.setattr(
+        corpus_loader, "registry_refusal", lambda *_a, **_k: "not registered"
+    )
+    monkeypatch.setattr(corpus_loader, "SentenceTransformer", _no_model)
+
+    with pytest.raises(SystemExit) as exc_info:
+        corpus_loader.main(["--reasoner-id", "stranger", "--corpus-dir", str(tmp_path)])
+
+    assert exc_info.value.code == 2
