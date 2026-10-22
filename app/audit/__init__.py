@@ -16,9 +16,12 @@ API are kept by ``ApiRegistrations``, DR-33), and human resolutions of held
 decisions are appended to the ``ResolutionJournal``. Changes to the identity
 graph (merges, detaches, relationships) are appended to the
 ``EntityJournal``, which rebuilds the membership projection a subject's
-timeline reads (DR-32).
+timeline reads (DR-32). The content a gate relied on while deciding may be
+escrowed in the ``ArtifactStore``, content-addressed, so verify can prove it
+later; replay never reads it (DR-34).
 """
 
+from app.audit.artifacts import ArtifactStore
 from app.audit.bundle import build_bundle
 from app.audit.entity_journal import EntityJournal
 from app.audit.registrations import (
@@ -41,6 +44,7 @@ from app.audit.store import (
 
 __all__ = [
     "ApiRegistrations",
+    "ArtifactStore",
     "BundleStore",
     "DecisionSummary",
     "EntityJournal",

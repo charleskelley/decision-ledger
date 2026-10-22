@@ -6,9 +6,9 @@
 -- are tenants distinguished by the `reasoner_id` column on row-level. These
 -- are the audit ledger's tables only: decision bundles, replay logs,
 -- resolution attempts, the reasoner registration snapshots bundles cite, the
--- registrations written over the API (DR-33), and the identity journal and
--- its membership projection (DR-32). Gates keep whatever they store in their
--- own schemas, created by their own DDL.
+-- registrations written over the API (DR-33), the identity journal and its
+-- membership projection (DR-32), and the evidence escrow (DR-34). Gates keep
+-- whatever else they store in their own schemas, created by their own DDL.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -200,6 +200,42 @@ create table if not exists decisionledger.reasoner_registry (
         reasoner_id, registration_version
     ) references decisionledger.reasoner_registrations (
         reasoner_id, registration_version
+    )
+);
+
+-- ---------------------------------------------------------------------------
+-- evidence_artifacts — the evidence escrow (DR-34), content-addressed
+--
+-- One row per distinct artifact a gate relied on while deciding: the bytes
+-- of a source as the gate read them, which the gate handed to the ledger,
+-- keyed by their SHA-256 digest (lowercase hex). The gate records that digest
+-- on its evidence reference (artifact_hash), so verify can prove from the
+-- ledger's own copy what a decision relied on, whatever became of the
+-- source. A row is written the first time its content is escrowed (insert
+-- ... on conflict do nothing), by a gate still deciding, before the bundle
+-- exists: first_decision_id names that decision as the gate received it and
+-- is not a foreign key (a decision can be decided without being written).
+-- The checks pin the key to the content: a 64-character hex digest that is
+-- the SHA-256 of artifact_bytes, and byte_length their length. Rows are never
+-- updated and nothing here deletes one (retention is the deployment's records
+-- rule).
+-- ---------------------------------------------------------------------------
+create table if not exists decisionledger.evidence_artifacts (
+    artifact_hash text primary key,
+    media_type text not null,
+    byte_length bigint not null,
+    artifact_bytes bytea not null,
+    first_seen_at timestamptz not null default now(),
+    first_decision_id text not null,
+    first_gate_id text not null,
+    constraint evidence_artifacts_hash_is_sha256_hex check (
+        artifact_hash ~ '^[0-9a-f]{64}$'
+    ),
+    constraint evidence_artifacts_hash_addresses_content check (
+        artifact_hash = encode(sha256(artifact_bytes), 'hex')
+    ),
+    constraint evidence_artifacts_length_is_content_length check (
+        byte_length = octet_length(artifact_bytes)
     )
 );
 

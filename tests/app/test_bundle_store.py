@@ -34,6 +34,7 @@ dict and answers the store's statements the way psycopg would:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -41,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from app.audit import build_bundle, replay_bundle
+from app.audit import ArtifactStore, build_bundle, replay_bundle
 from app.audit.store import BundleStore
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
 from app.reasoner_registry import LiveReasonerRegistry
@@ -202,6 +203,24 @@ class _FakeCursor:
             ]
             matches.sort(key=lambda item: item[1].created_at, reverse=True)
             self._rows = [(d, json.loads(r.bundle)) for d, r in matches[:limit]]
+        elif text.startswith("INSERT INTO decisionledger.evidence_artifacts"):
+            digest, media_type, length, content, decision_id, gate_id = params
+            assert hashlib.sha256(content).hexdigest() == digest  # the table's check
+            assert length == len(content)
+            if digest not in self._conn.artifacts:
+                self._conn.artifacts[digest] = (
+                    media_type,
+                    content,
+                    decision_id,
+                    gate_id,
+                )
+                self._rows = [(digest,)]  # RETURNING artifact_hash
+        elif text.startswith("SELECT artifact_bytes FROM decisionledger"):
+            found = self._conn.artifacts.get(params[0])
+            self._rows = [] if found is None else [(memoryview(found[1]),)]
+        elif text.startswith("SELECT artifact_hash FROM decisionledger"):
+            (wanted,) = params
+            self._rows = [(h,) for h in wanted if h in self._conn.artifacts]
         else:  # pragma: no cover - guards against an unexpected statement
             raise AssertionError(f"unexpected statement: {query!r}")
 
@@ -246,6 +265,7 @@ class _FakeConn:
         self.replay_logs: list[tuple[Any, ...]] = []
         self.registrations: dict[tuple[str, str], tuple[Any, datetime]] = {}
         self.memberships: list[tuple[Any, ...]] = []
+        self.artifacts: dict[str, tuple[str, bytes, str, str]] = {}
         self.statements = 0
         self.executemany_calls = 0
         self.fail_next = False
@@ -893,3 +913,125 @@ def test_a_timeline_unions_merged_ids_and_related_subjects(submission):
         stray.decision_id,
     }
     assert {r.relationship_type for r in group} == {"fleet"}
+
+
+# ---------------------------------------------------------------------------
+# Evidence escrow (DR-34)
+# ---------------------------------------------------------------------------
+
+_POLICY = b"# Policy A\n\n## 1. Scope\n\nHold thin histories.\n"
+
+
+def test_the_store_escrows_by_default():
+    store = _store(_FakeConn())
+
+    assert isinstance(store.artifacts, ArtifactStore)
+    assert store.artifacts.enabled
+
+
+def test_an_artifact_is_escrowed_once_under_its_digest_and_reads_back():
+    conn = _FakeConn()
+    escrow = ArtifactStore(conn, enabled=True)  # type: ignore[arg-type]
+
+    first = escrow.put(
+        _POLICY, media_type="text/markdown", decision_id="d-1", gate_id="g"
+    )
+    again = escrow.put(_POLICY, media_type="text/plain", decision_id="d-2", gate_id="h")
+
+    assert first == again == hashlib.sha256(_POLICY).hexdigest()
+    # The first decision that escrowed it is the row's; a second put changes
+    # nothing (on conflict do nothing).
+    assert conn.artifacts == {first: ("text/markdown", _POLICY, "d-1", "g")}
+    assert first is not None
+    assert escrow.get(first) == _POLICY
+    assert type(escrow.get(first)) is bytes
+
+
+def test_each_escrow_call_is_one_statement_and_none_opens_a_transaction_block():
+    conn = _FakeConn()
+    escrow = ArtifactStore(conn, enabled=True)  # type: ignore[arg-type]
+
+    digest = escrow.put(
+        _POLICY, media_type="text/markdown", decision_id="d", gate_id="g"
+    )
+    escrow.put(_POLICY, media_type="text/markdown", decision_id="d", gate_id="g")
+    escrow.get(digest or "")
+    escrow.held([digest or ""])
+
+    assert conn.statements == 4
+
+
+def test_escrow_off_stores_nothing_and_returns_no_digest():
+    conn = _FakeConn()
+    escrow = ArtifactStore(conn, enabled=False)  # type: ignore[arg-type]
+
+    digest = escrow.put(
+        _POLICY, media_type="text/markdown", decision_id="d", gate_id="g"
+    )
+
+    assert digest is None
+    assert conn.artifacts == {}
+    assert conn.statements == 0
+    assert not escrow.enabled
+
+
+def test_artifacts_escrowed_earlier_stay_readable_with_escrow_off():
+    conn = _FakeConn()
+    digest = ArtifactStore(conn, enabled=True).put(  # type: ignore[arg-type]
+        _POLICY, media_type="text/markdown", decision_id="d", gate_id="g"
+    )
+    assert digest is not None
+
+    off = ArtifactStore(conn, enabled=False)  # type: ignore[arg-type]
+
+    assert off.get(digest) == _POLICY
+    assert off.held([digest]) == {digest}
+
+
+def test_held_answers_which_digests_the_escrow_holds_in_one_statement():
+    conn = _FakeConn()
+    escrow = ArtifactStore(conn, enabled=True)  # type: ignore[arg-type]
+    digest = escrow.put(
+        _POLICY, media_type="text/markdown", decision_id="d", gate_id="g"
+    )
+    absent = hashlib.sha256(b"never escrowed").hexdigest()
+    assert digest is not None
+    before = conn.statements
+
+    held = escrow.held([digest, absent, digest])
+
+    assert held == {digest}
+    assert conn.statements == before + 1
+
+
+@pytest.mark.parametrize("digest", ["", "nope", "A" * 64, "0" * 63])
+def test_a_malformed_digest_is_held_by_no_row_and_never_queried(digest):
+    conn = _FakeConn()
+    escrow = ArtifactStore(conn, enabled=True)  # type: ignore[arg-type]
+
+    assert escrow.get(digest) is None
+    assert escrow.held([digest]) == frozenset()
+    assert conn.statements == 0
+
+
+@pytest.mark.parametrize(
+    "missing", [{"media_type": " "}, {"decision_id": ""}, {"gate_id": ""}]
+)
+def test_an_artifact_needs_its_media_type_decision_and_gate(missing):
+    escrow = ArtifactStore(_FakeConn(), enabled=True)  # type: ignore[arg-type]
+    fields = {"media_type": "text/markdown", "decision_id": "d", "gate_id": "g"}
+
+    with pytest.raises(ValueError, match="an escrowed artifact needs"):
+        escrow.put(_POLICY, **{**fields, **missing})
+
+
+def test_text_must_be_encoded_before_it_is_escrowed():
+    escrow = ArtifactStore(_FakeConn(), enabled=True)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError):
+        escrow.put("text", media_type="text/plain", decision_id="d", gate_id="g")  # type: ignore[arg-type]
+
+
+def test_the_escrow_refuses_a_connection_that_is_not_autocommit():
+    with pytest.raises(ValueError, match="needs an autocommit connection"):
+        ArtifactStore(_FakeConn(autocommit=False), enabled=True)  # type: ignore[arg-type]

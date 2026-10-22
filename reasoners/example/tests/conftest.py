@@ -1,14 +1,16 @@
 """Fixtures for the example reasoner's tests: no infrastructure.
 
 ``ledger`` is framework services over an in-test store (it keeps written
-bundles and answers lookups as the real store does) and a policy gate
-double, so the example's pipeline and eval driver run through
+bundles, answers lookups as the real store does, and holds an in-test
+evidence escrow) and a policy gate double, so the example's pipeline and
+eval driver run through
 ``LocalClient`` — the same operation the ledger's HTTP route runs — without
 Postgres, Elasticsearch, or an LLM.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from types import MappingProxyType
 from typing import Any
@@ -25,11 +27,35 @@ from core.gate import GateOutput, GateVerdict
 from example_reasoner.registry import EXAMPLE_REGISTRATION
 
 
+class MemoryArtifacts:
+    """The evidence escrow, in a dict keyed by SHA-256 digest (DR-34)."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.rows: dict[str, bytes] = {}
+
+    def put(
+        self, content: bytes, *, media_type: str, decision_id: str, gate_id: str
+    ) -> str:
+        del media_type, decision_id, gate_id
+        digest = hashlib.sha256(content).hexdigest()
+        self.rows.setdefault(digest, content)
+        return digest
+
+    def get(self, artifact_hash: str) -> bytes | None:
+        return self.rows.get(artifact_hash)
+
+    def held(self, artifact_hashes: Any) -> frozenset[str]:
+        return frozenset(h for h in artifact_hashes if h in self.rows)
+
+
 class MemoryStore:
     """Keeps written bundles; answers ``lookup`` as the real store does."""
 
     def __init__(self) -> None:
         self.written: list[Any] = []
+        self.artifacts = MemoryArtifacts()
 
     def write(self, bundle: Any) -> None:
         self.written.append(bundle)

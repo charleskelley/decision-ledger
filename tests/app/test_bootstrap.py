@@ -54,11 +54,13 @@ class _RecordingStore(BundleStore):
 
     last_conn: Any = None
     last_registry: ReasonerRegistry | None = None
+    last_artifacts: Any = None
 
-    def __init__(self, conn: Any, *, registry: Any) -> None:
-        super().__init__(conn, registry=registry)
+    def __init__(self, conn: Any, *, registry: Any, artifacts: Any = None) -> None:
+        super().__init__(conn, registry=registry, artifacts=artifacts)
         _RecordingStore.last_conn = conn
         _RecordingStore.last_registry = registry
+        _RecordingStore.last_artifacts = artifacts
 
 
 class _ExplodingGatePlugin(FakeGatePlugin):
@@ -93,6 +95,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(bootstrap, "BundleStore", _RecordingStore)
     _RecordingStore.last_conn = None
     _RecordingStore.last_registry = None
+    _RecordingStore.last_artifacts = None
     return {"calls": calls, "pg_conn": pg_conn}
 
 
@@ -140,6 +143,31 @@ def test_the_store_gets_the_autocommit_connection_and_needs_no_reasoner_code(
     bootstrap.build_framework_services(settings, [PLUGIN], [])
     assert _RecordingStore.last_conn is fakes["pg_conn"]
     assert not hasattr(PLUGIN, "raw_event_factory")
+
+
+@pytest.mark.parametrize(
+    ("setting", "escrows"), [("on", True), ("off", False), (" OFF ", False)]
+)
+def test_the_store_escrows_unless_the_deployment_turns_escrow_off(
+    fakes: dict[str, Any], setting: str, escrows: bool
+):
+    services = bootstrap.build_framework_services(
+        FrameworkSettings(decisionledger_evidence_escrow=setting), [PLUGIN], []
+    )
+
+    assert services.store.artifacts is _RecordingStore.last_artifacts
+    assert services.store.artifacts.enabled is escrows
+
+
+@pytest.mark.parametrize("setting", ["", "true", "1", "enabled", "of"])
+def test_an_escrow_setting_neither_on_nor_off_refuses_startup_before_postgres(
+    fakes: dict[str, Any], setting: str
+):
+    with pytest.raises(ValueError, match="DECISIONLEDGER_EVIDENCE_ESCROW"):
+        bootstrap.build_framework_services(
+            FrameworkSettings(decisionledger_evidence_escrow=setting), [PLUGIN], []
+        )
+    assert fakes["calls"] == []
 
 
 def test_the_deployments_mandatory_gates_are_composed_flagged(fakes: dict[str, Any]):

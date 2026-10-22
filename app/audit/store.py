@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from pydantic import ValidationError
 
+from app.audit.artifacts import ArtifactStore
 from app.audit.entity_journal import membership_from_row
 from app.audit.registrations import RegistrationSnapshots
 from app.enforcement.resolver import resolve_decision, resolve_gate_output
@@ -359,6 +360,8 @@ class BundleStore:
             of a bundle that cites no registration version.
         snapshots: The registration snapshot store replay reads; defaults
             to one on ``conn``.
+        artifacts: The evidence escrow gates write to and verify reads
+            (DR-34); defaults to one on ``conn``, escrowing.
 
     Raises:
         ValueError: The connection is not in autocommit mode (its writes
@@ -371,6 +374,7 @@ class BundleStore:
         *,
         registry: ReasonerRegistry,
         snapshots: RegistrationSnapshots | None = None,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         """Initialize BundleStore with a connection and the reasoner registry."""
         if not conn.autocommit:
@@ -384,11 +388,19 @@ class BundleStore:
         self._snapshots = (
             snapshots if snapshots is not None else RegistrationSnapshots(conn)
         )
+        self._artifacts = (
+            artifacts if artifacts is not None else ArtifactStore(conn, enabled=True)
+        )
 
     @property
     def snapshots(self) -> RegistrationSnapshots:
         """The registration snapshots replay reads (and the bootstrap writes)."""
         return self._snapshots
+
+    @property
+    def artifacts(self) -> ArtifactStore:
+        """The evidence escrow: gates write to it while deciding, verify reads it."""
+        return self._artifacts
 
     def write(self, bundle: DecisionBundle) -> None:
         """Persist a DecisionBundle (schema version 2).
