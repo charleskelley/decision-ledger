@@ -74,6 +74,7 @@ composition order.
 | `gate_context` | The `GateContext` addressed to this gate: its `gate_config`, already validated against `config_model`. An empty context for a gate the deployment mandates that the reasoner does not bind. |
 | `budget_ms` | The wall-clock budget for this call, enforced by the framework. |
 | `identity` | The decision's subject as the ledger resolved it, before any gate ran ([Identity](../identity.md#the-identity-step)). A gate about a person (a do-not-contact list, a sanctions screen) keys on it rather than on `submission.entity_id`. `None` only when shadow evaluation re-runs a bundle written before the identity contract. |
+| `binding_config` | The `config` of the reasoner's binding to this gate, already admitted by the gate (`binding_config_model`, `validate_binding`): on a live decision, from the registration version the bundle cites; in shadow evaluation, from the registration served now. Empty for a binding without configuration and for a gate the deployment mandates that the reasoner does not bind. The gate reads it here rather than keeping a copy ([DR-34](../decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)). |
 
 A request never carries another gate's output, and every gate in a gate set
 sees the same submission.
@@ -98,8 +99,10 @@ verbatim and never reads.
 (enforcement takes the most conservative), `required_controls` (matched
 against sentinel values, below), `confidence` in [0.0, 1.0],
 `escalate_to_human`, and `escalation_reason`. `EvidenceRef` is
-`source_id`, an optional `locator`, and `jurisdictions` (a set of tags; empty
-for a source with no jurisdiction). All of these models are strict, frozen,
+`source_id`, an optional `locator`, `jurisdictions` (a set of tags; empty
+for a source with no jurisdiction), and an optional `content_hash` (the
+SHA-256, lowercase hex, of the exact text the gate relied on, so anyone
+holding the text can prove it is what the decision used). All of these models are strict, frozen,
 forbid unknown fields, and reject non-finite numbers.
 
 A gate keeps its own typed models in its own package and serializes them
@@ -319,22 +322,33 @@ See [`gates/rules/README.md`](https://github.com/charleskelley/decision-ledger/b
 ### The RAG policy gate
 
 `gates/policy_rag` (package `policy_rag_gate`) is the full shape: `kind`
-`llm`, non-deterministic, its own Postgres schema, Elasticsearch, models,
-LLM adapters, and eval.
+`llm`, non-deterministic, its own retrieval providers (the reference one
+with its own Postgres schema, Elasticsearch, and models), a binding
+configuration, LLM adapters, and eval.
 
-- **Plugin.** `build` derives a `ReasonerProfile` per composed reasoner from
-  the prompts and corpus it ships, loads every reasoner's prompt templates,
-  opens its own Postgres connection and applies its DDL, and builds the
-  retriever and the LLM client.
-- **Capabilities.** The built `PolicyGate` is a `ConfigAuthorizer` (a
-  reasoner may render only its own templates and filter only to
-  jurisdictions its corpus covers) and a `ReasonerScope` (it serves only the
+- **Plugin.** `binding_config_model` is `PolicyBindingConfig`: the corpora
+  a reasoner's binding names, each with its provider and authority tier
+  ([Retrieval providers](policy/providers.md)). `build` derives a
+  `ReasonerProfile` per composed reasoner from the prompts and corpus it
+  ships, loads every reasoner's prompt templates, discovers the retrieval
+  providers into a `ProviderRegistry` (each provider is built the first
+  time a binding names it; the reference provider then opens its own
+  Postgres connection, applies its DDL, and loads its models), and builds
+  the LLM client.
+- **Capabilities.** The built `PolicyGate` is a `BindingValidator` (it
+  admits a binding whose corpora are loaded and whose providers can meet
+  the binding's `min_provenance`), a `ConfigAuthorizer` (a reasoner may
+  render only its own templates and filter only to jurisdictions its own
+  corpus directory covers), and a `ReasonerScope` (it serves only the
   reasoners it built a profile for).
-- **Output.** The universal part of the model's verdict, one `EvidenceRef`
-  per retrieved snippet carrying the snippet's jurisdiction, a
-  `PolicyGateSnapshot` (the retrieval and the exact prompt) as
-  `evidence_snapshot`, and a `PolicyGateExtra` (rationale, citations, token
-  cost, retrieval latency, the failing stage) as `extra`.
+- **Output.** The universal part of the model's verdict (floored at HOLD
+  when a tiered verdict reports disagreeing or insufficient evidence), one
+  `EvidenceRef` per rendered passage carrying its jurisdiction and content
+  hash, a `PolicyGateSnapshot` (version 2: one `CorpusQuery` per bound
+  corpus, the passages under the evidence contract, and the exact prompt)
+  as `evidence_snapshot`, and a `PolicyGateExtra` (rationale, citations,
+  the conflict/gap report, token cost, retrieval latency, the failing
+  stage) as `extra`.
 
 See [Policy gate](policy/index.md).
 

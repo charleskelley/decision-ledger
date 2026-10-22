@@ -37,9 +37,11 @@ cp .env.example .env
 # and ATO's Redis from their own compose.yaml files via include:)
 docker compose up -d
 
-# Index the reference reasoner's corpus into the RAG policy gate and train its
-# scorer if missing
-make prepare-account_takeover
+# Load every reasoner's policy corpus into the RAG policy gate (ATO's
+# ato-policy, the example's example-policy) and train ATO's scorer if missing.
+# The ledger refuses to start until every corpus a served registration binds
+# is loaded.
+make prepare-reasoners
 
 # Verify everything is running
 make check

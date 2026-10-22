@@ -40,7 +40,7 @@ The reference gates: `rules` (`gates/rules`, package `rules_gate`; zero infrastr
 
 The framework is `core/`, `app/`, and `eval/` — the root `decision-ledger` package. Its `[project] dependencies` and wheel never include a reasoner (or xgboost, pandas, redis). `app/` is framework runtime: `app/main.py:create_app()` discovers reasoner plugins (`app/plugins.py`, filtered by `DECISIONLEDGER_REASONERS`) and gate plugins (`app/gates.py`), `app/bootstrap.py` builds the shared infrastructure once, including the identity step (`app/identity/`). Since DR-31 (Phase 3) the ledger serves only its own routes (`app/api/`, API keys in `app/auth.py`) and runs no reasoner code: a reasoner submits over HTTP or in process through `app/client.py` (`HttpClient` / `LocalClient`), and a plugin publishes only its registration and the assets its gates read. There is **no** exception for `app/main.py`: no module under `app/`, `core/`, or `eval/` imports a reasoner or gate package or names an ATO symbol, id, template, feature, or jurisdiction (in `.py`, `.yaml`, `.sql`, or `.json`). `tests/test_framework_boundary.py` enforces this and also asserts the root pyproject declares no reasoner dependency or entry point and that each member declares its own entry points.
 
-DecisionLedger is the framework-owned audit/governance hub. All decision bundles, replay logs, resolution attempts, registration snapshots, and the entity journal live in the `decisionledger.*` Postgres schema; decisions carry `reasoner_id` as the tenant column. The canonical DDL ships as package data in `app/audit/sql/`; Postgres is the framework's only infrastructure. The RAG policy gate keeps its policy chunks in its own `policy_rag` schema (DDL in its `sql/`), its ES mapping in its `es/`, and Elasticsearch in its `compose.yaml`. Each reasoner's policy corpus is loaded via `uv run python -m policy_rag_gate.corpus_loader --reasoner-id <id>` (the loader resolves the plugin's `corpus_dir`) and filtered at retrieval time.
+DecisionLedger is the framework-owned audit/governance hub. All decision bundles, replay logs, resolution attempts, registration snapshots, and the entity journal live in the `decisionledger.*` Postgres schema; decisions carry `reasoner_id` as the tenant column. The canonical DDL ships as package data in `app/audit/sql/`; Postgres is the framework's only infrastructure. The RAG policy gate retrieves through providers (DR-34) from the corpora a reasoner's registration binds it to (`PolicyBindingConfig`: corpus id, provider, authority tier); its reference provider keeps corpora, documents, and chunks in the gate's own `policy_rag` schema (DDL in its `sql/`), its ES mapping in its `es/`, and Elasticsearch in its `compose.yaml`. A corpus is loaded, before the registration that binds it, via `uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id> --reasoner-id <id>` (the loader reads the plugin's `corpus_dir`, else the asset root; `--corpus-dir` overrides).
 
 ## Tech Stack
 
@@ -57,7 +57,7 @@ See `docs/design/decisions.md` (DR-N records) for the full rationale. Load-beari
 
 - **Replay does NOT re-invoke a gate or the LLM.** Deterministic replay re-executes enforcement against the stored gate outputs (including the logged LLM output) under the bundle's registration snapshot (`registration_version`).
 - **ATO's XGBoost scorer trains on a heuristic labeling function**, not human-labeled data. The scorer triages events into confidence bands; it doesn't detect real fraud.
-- **The RAG gate's cross-encoder reranking has a latency-budget bypass.** If reranking exceeds the configured timeout, fall back to RRF-only results. The path taken (`retrieval_path`) is recorded in the gate's `evidence_snapshot` in the Decision Bundle.
+- **The RAG gate's cross-encoder reranking has a latency-budget bypass.** If reranking exceeds the configured timeout, fall back to RRF-only results. The path taken is recorded per corpus (`CorpusQuery.ranking_applied`) in the gate's `evidence_snapshot` in the Decision Bundle.
 - **Prompt versions are immutable.** Never modify an existing prompt YAML. Create a new version file in the reasoner's `prompts/` dir (a top-level `system:` key carries its system message). Every bundle bound to the RAG gate names its template (`gate_config.template_id`), and when the gate runs its `evidence_snapshot` records the active template and version (`prompt_template_id`, `prompt_template_version`).
 - **Reasoners are workspace members discovered by entry point (DR-26).** The framework never imports one; each publishes a `ReasonerPlugin` (registration incl. gate set, bypass rules, native namespaces, and enforcement profile; prompts/corpus dirs) and an `EvalAdapter`, and runs as its own service or in process through `LocalClient` (DR-31).
 - **A reasoner records or gates (DR-29, DR-30).** A `record` submission cites a registered bypass rule and runs only mandatory gates; a `gate` submission runs mandatory then advisory gates. The final action is the most restrictive across the proposal and the gates, with one exception: on a gated decision about a novel entity, Tier 3 holds the advisory gates' verdicts for review (HOLD, or BLOCK when an advisory gate's own Tier 2 fired); mandatory gates, bypass floors, and the proposal still count. A failing gate fails closed (HOLD).
@@ -74,7 +74,7 @@ Invariants to know before touching features, scorer, or policy gate:
 - **A scorer's output type lives in the reasoner package** (ATO: `ScorerOutput` in `ato_reasoner/scorer/output.py`), never in `core/` or `app/`. The assembler translates it into `ReasonerContext` + `GateContext` and picks the mode with `core.submission.matching_bypass_rule` (the strictest registered rule that holds).
 - **A native subject in a declared namespace must agree with the submission's `entity_id` and `entity_type`** (the declaration's derivation); otherwise intake answers 422 `NATIVE_SUBJECT_MISMATCH`.
 - **Score bands are ATO's registered bypass rules** (`ato_reasoner/registry.py`, DR-30): `allow-band` (`< 0.20` → record ALLOW), `block-band` (`> 0.95` → record BLOCK); otherwise ATO asks for the policy gate. The numbers live nowhere in the framework.
-- **Retrieval filter semantics (the RAG gate's retriever):** `reasoner_id` filters both pgvector and Elasticsearch (mandatory for tenant isolation); `jurisdictions` filters both; `risk_tier` filters pgvector only.
+- **Retrieval filter semantics (the RAG gate's reference provider):** `corpus_id` filters both pgvector and Elasticsearch (one query per bound corpus); `reasoner_id` is authorization (the registration's binding names the corpora), not a chunk key; `jurisdictions` filters both; `risk_tier` filters pgvector only. Scores are never compared across corpora.
 - **Audit storage is framework-owned, multi-tenant by row.** All reasoners write to `decisionledger.decision_bundles` with `reasoner_id` as the tenant column; its `entity_id` column is the resolved subject. Reasoner-specific business keys (account_id, content_id) live inside the JSONB bundle, not as scalar columns.
 
 ## Common Commands
@@ -84,7 +84,7 @@ uv sync                        # Install framework + every workspace reasoner, g
 uv sync --all-groups           # Also install the docs group (mkdocs)
 docker compose up -d           # Start infra (Postgres + the included ATO Redis and RAG gate Elasticsearch)
 docker compose down            # Stop infra
-make prepare-account_takeover  # Index ATO corpus; train scorer if missing
+make prepare-reasoners         # Load every reasoner's corpus (the ledger won't start until each bound corpus is loaded); train ATO's scorer if missing
 make serve                     # Run the ledger API (uvicorn --factory app.main:create_app, port 8000)
 make serve-account_takeover    # Run ATO's own service (port 8001); ATO_LEDGER_URL + ATO_LEDGER_KEY submit over HTTP, else the ledger runs in process
 make schemas                   # Regenerate schemas/*.json from the models (tests fail on drift)
@@ -99,7 +99,7 @@ make scenario-account_takeover # Publish 10 baseline_normal events
 make eval-account_takeover     # Framework eval harness for ATO (slow); `make eval` = every reasoner, then every gate
 just diagrams                  # Render D2 diagrams (requires: brew install d2)
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 50
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner
 ```
 
 `make help` lists the per-reasoner targets from each `reasoners/*/reasoner.mk` and the per-gate targets from each `gates/*/gate.mk`.

@@ -1,15 +1,17 @@
 # Policy corpus
 
-A **policy corpus** is the set of Markdown policy documents the
-[RAG policy gate](index.md) retrieves from when it decides for a reasoner.
-The corpus belongs to the reasoner: it ships in the reasoner's package, in
-the directory its plugin exposes as `corpus_dir`, and is versioned with it.
-The gate owns the stores: its corpus loader chunks, embeds, and indexes a
-reasoner's corpus into the gate's Postgres table and Elasticsearch index,
-tagged with that reasoner's `reasoner_id`, and its retriever reads only the
-indexed rows, never the files. Updating a corpus (a new document, a
-corrected threshold) is a reasoner change plus a re-index, never a framework
-or gate change.
+A **policy corpus** is a set of Markdown policy documents the
+[RAG policy gate](index.md) retrieves from. A reasoner's registration names
+the corpora the gate reads for it, on its binding, each by corpus id and
+authority tier ([DR-34](../../decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow));
+two reasoners may bind the same corpus. A reasoner's own corpus ships in its
+package, in the directory its plugin exposes as `corpus_dir` (or under the
+gate's asset root), and is versioned with it. The reference retrieval
+provider owns the stores: the gate's corpus loader chunks, embeds, and loads
+a corpus into its Postgres tables and Elasticsearch index under the corpus
+id the bindings name, and the provider reads only the loaded rows, never the
+files. Updating a corpus (a new document, a corrected threshold) is a change
+to its documents plus a reload, never a framework or gate change.
 
 The first half of this page is the format any reasoner's corpus follows. The
 second half describes the ATO reasoner's reference corpus, which is ATO's
@@ -66,7 +68,7 @@ The front matter validates as the gate's `PolicyDocument`
 
 | Field | Type | Meaning |
 |---|---|---|
-| `policy_id` | string | Stable document id. Becomes every chunk's `policy_id`, the snippet's `document_id`, and the `source_id` of the gate's evidence. |
+| `policy_id` | string | Stable document id. Becomes every chunk's `policy_id`, the passage's `document_id`, and the `source_id` of the gate's evidence. |
 | `title` | string | Human-readable title, stored on every chunk so the retriever can cite without reading the corpus. |
 | `version` | string | The document's version. Quote it (`"1.0"`) so YAML keeps it a string. |
 | `jurisdiction` | string | The regulatory jurisdiction, in the reasoner's own vocabulary. A retrieval filter, the jurisdiction tag on the gate's evidence, and part of what the reasoner may filter to (its profile). |
@@ -79,9 +81,11 @@ The front matter validates as the gate's `PolicyDocument`
 own classification vocabulary and the gate imports none of it. The loader
 finds documents recursively under `corpus_dir` (`*.md`); how a reasoner
 arranges subdirectories is its choice. A document whose front matter is
-missing, malformed, or invalid is skipped, both by the loader (which logs a
-warning) and when the gate derives the reasoner's profile, so a skipped document's
-jurisdiction is never one the reasoner may filter to.
+missing, malformed, or invalid, or holds a value JSON cannot carry, refuses
+the load: a load replaces the corpus, so the loader names the files and
+loads nothing rather than drop the document. When the gate derives the
+reasoner's profile, such a document is skipped, so its jurisdiction is never
+one the reasoner may filter to.
 
 ## Chunking
 
@@ -93,7 +97,11 @@ headings; it uses word counts and needs no tokenizer:
   heading text (`"3. Impossible Travel Detection and Mandatory BLOCK"`).
 - A `##` section longer than 300 words is split at its `###` headings
   instead, with a compound `section_path` (`"4. Action Decision Matrix > 4.2
-  CHALLENGE Criteria"`), so no two chunks of a document share a path. Text
+  CHALLENGE Criteria"`), so a document's chunks rarely share a path. When
+  two do (a preamble indexed as `"Overview"` beside a `## Overview`
+  section, or a `###` heading repeated under one `##`), the later one's
+  chunk id carries its occurrence, and retrieval tells them apart by chunk
+  id. Text
   between the `##` heading and the first `###` becomes its own chunk under
   the `##` path when it has at least 30 words, and is dropped otherwise.
 - Text before the first `##` is indexed as `"Overview"` when it has at
@@ -108,40 +116,60 @@ is invisible to retrieval ([Known simplifications](#known-simplifications)).
 Author so that a long `##` section has `###` subsections as natural split
 points.
 
-## Indexing
+## Loading
 
 ```bash
-make build-policy-index-<reasoner_id>   # e.g. make build-policy-index-ato-reasoner
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id> [--corpus-dir <path>] [--wipe]
+make build-policy-index-<reasoner_id>   # e.g. make build-policy-index-ato-reasoner (as ato-policy)
+uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id> \
+    (--reasoner-id <reasoner_id> | --corpus-dir <path>) [--wipe]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--reasoner-id` | Required. The reasoner that owns the corpus: stored on every chunk (the tenant filter at retrieval) and used to find its corpus directory: the `corpus_dir` of the composed plugin with that `reasoner_id` (plugins filtered by `DECISIONLEDGER_REASONERS`), else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` (DR-33). An id the ledger does not register (plugins, the registration file, the API's registrations), or whose corpus is in neither place, exits 2. |
-| `--corpus-dir` | Index this directory instead (for tests, or a directory the gate does not read); the reasoner must still be registered. |
-| `--wipe` | Delete every chunk of this reasoner from both stores before loading. |
+| `--corpus-id` | Required. The corpus to load: the id reasoners' bindings name, which every chunk, the corpus's documents, and its `corpora` row are keyed by. Letters, digits, `.`, `_`, and `-`. |
+| `--reasoner-id` | Read the documents where the gate reads this reasoner's corpus: the `corpus_dir` of the composed plugin with that `reasoner_id` (plugins filtered by `DECISIONLEDGER_REASONERS`), else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` (DR-33). A reasoner whose corpus is in neither place exits 2. |
+| `--corpus-dir` | Read the documents from this directory (wins over `--reasoner-id`). One of the two is required. |
+| `--wipe` | Delete the corpus's chunks from Elasticsearch before loading (Postgres is replaced in one transaction either way). |
 
-The loader reads the Postgres DSN from the framework settings (the gate's
-schema lives in the framework's database) and the Elasticsearch URL from the
-gate's (`POLICY_RAG_GATE_ELASTICSEARCH_URL`). It applies the gate's DDL,
-embeds every chunk with `all-MiniLM-L6-v2`, and writes:
+The loader asks no registry: a corpus is loaded before the registration
+that binds it is admitted, since the gate refuses a binding to a corpus that
+is not loaded. It reads the Postgres DSN from the framework settings (the
+gate's schema lives in the framework's database) and the Elasticsearch URL
+from the gate's (`POLICY_RAG_GATE_ELASTICSEARCH_URL`). It applies the gate's
+DDL (refusing a schema from before DR-34), embeds every chunk with
+`all-MiniLM-L6-v2`, and replaces the corpus:
 
-- **Postgres** `policy_rag.policy_chunks`: text, metadata, `reasoner_id`,
-  and the 384-dimension embedding. Without `--wipe` it replaces each
-  document's existing chunks for that reasoner.
-- **Elasticsearch** `policy-chunks`: text and metadata, no embedding. The
-  loader creates the index from `policy_rag_gate/es/policy-chunks.json`, and
-  drops and recreates it when an older index does not map `reasoner_id` as a
-  keyword (the tenant filter would silently match nothing); every reasoner's
-  corpus must then be reloaded. Without `--wipe` the loader deletes no
-  Elasticsearch documents, and every chunk gets a new id on each run, so
-  re-indexing an already indexed corpus without `--wipe` leaves its earlier
-  BM25 documents in place beside the new ones. Pass `--wipe` when
-  re-indexing.
+- **Postgres**, in one transaction: the corpus's row in
+  `policy_rag.corpora` (its manifest hash — the SHA-256 over its documents'
+  ids, versions, content hashes, and front matter, so retagging a document's
+  jurisdiction or risk tier without a new version changes it too — document
+  count, load time, and source directory), its documents in
+  `policy_rag.documents` (each body whole, its content hash, its front matter
+  as JSON, its path), and its chunks in `policy_rag.policy_chunks` (text,
+  metadata, `corpus_id`, the span of the text in its document body when it
+  is a contiguous slice of it — located in body order, so text a document
+  repeats gets the span of this chunk's copy — and the 384-dimension
+  embedding). Readers see the old corpus or the new one.
+- **Elasticsearch** `policy-chunks`: text and metadata, no embedding. Every
+  chunk is written under its deterministic id —
+  `sha256(corpus_id, document_id, version, section_path)`, plus its
+  occurrence for a section path the document repeats — so a reload
+  overwrites the copy an earlier load wrote, and the corpus's chunks the load
+  did not write (a removed section or document) are then deleted. The loader
+  creates the index from `policy_rag_gate/es/policy-chunks.json`, and drops
+  and recreates it when an older index does not map `corpus_id` as a keyword
+  (the corpus filter would silently match nothing); every corpus must then be
+  reloaded.
 
-A reasoner's `make prepare-<domain>` target indexes its corpus
-(`make prepare-reasoners` indexes every reasoner's). The API does not index
-at startup.
+A file that does not parse, two files declaring one document version, or a
+directory with no document refuse the load. Two loads of one corpus never
+interleave: the loader holds a Postgres advisory lock on the corpus id until
+both stores are written. Should Elasticsearch still hold a chunk a failed
+load left behind, the reference provider drops it: a passage reaches a
+prompt only if Postgres holds that chunk with that text. A reasoner's
+`make prepare-<domain>` target loads its corpus (`make prepare-reasoners`
+loads every reasoner's). The API does not load at startup, and refuses to
+start while a corpus a served registration binds is not loaded.
 
 ## Retrieval filters
 
@@ -150,11 +178,13 @@ return ([Policy gate](index.md#how-it-decides)):
 
 | Filter | Dense store (pgvector) | Sparse store (Elasticsearch) |
 |---|---|---|
-| `reasoner_id` (always; tenant isolation) | yes | yes |
-| `jurisdictions` | yes | yes |
+| `corpus_id` (always: one query per bound corpus) | yes | yes |
+| `jurisdictions` (narrowed per corpus by the binding's) | yes | yes |
 | `risk_tier` (matches the tier or `null`) | yes | no |
 
-Each retrieved snippet's `jurisdiction` becomes the jurisdiction tag of its
+`corpus_id` is the only key on the chunks; which corpora a reasoner may read
+is its registration's binding (authorization), not a chunk column. Each
+rendered passage's `jurisdiction` becomes the jurisdiction tag of its
 `EvidenceRef`. Enforcement's jurisdiction-conflict tier reads those tags and
 checks them against the reasoner's `jurisdiction_conflict_groups`, so a
 decision whose evidence spans two conflicting groups is held for review.
@@ -168,8 +198,9 @@ queries that target it.
 Everything from here on belongs to the ATO reasoner
 (`reasoners/account_takeover`), whose corpus is
 `reasoners/account_takeover/src/ato_reasoner/corpus/`. It has **32
-documents** across four jurisdictions and four document types, indexed under
-`reasoner_id` `ato-reasoner` (`make build-policy-index-ato-reasoner`, run by
+documents** across four jurisdictions and four document types, loaded as the
+corpus `ato-policy`, which ATO's binding names at tier 1
+(`make build-policy-index-ato-reasoner`, run by
 `make prepare-account_takeover`). ATO's jurisdiction and risk-tier values are
 the string values of its `Jurisdiction` and `RiskTier` enums
 (`ato_reasoner/policy.py`). ATO arranges the corpus by document type:
@@ -354,15 +385,15 @@ held-out attack data the system has not seen.
 regulatory updates.
 
 **What production requires:** a pipeline that monitors regulatory sources,
-ingests new documents, re-indexes the affected chunks in both stores, bumps
-the corpus version the reasoner sends (`corpus_version` in its gate context,
-recorded in the gate's snapshot of every decision), and re-runs the gate's
-retrieval eval to confirm no regression.
+ingests new documents, reloads the corpus, and re-runs the gate's retrieval
+eval to confirm no regression. No submission labels a corpus (DR-34): a
+reload changes the corpus's manifest hash, which the gate records, per bound
+corpus, in the snapshot of every gated decision (`CorpusQuery.state`).
 
-**Impact:** `corpus_version` is recorded on every gated decision but static
-across all of them. Version resolution (V2 ranking above V1) is exercised by
-the two superseded documents (`INT-AUTH-RISK-V1`, `INT-ATO-DETECT-V1`) but by
-no live update.
+**Impact:** the manifest hash recorded on every gated decision is the same
+across all of them, since the corpus never changes. Version resolution (V2
+ranking above V1) is exercised by the two superseded documents
+(`INT-AUTH-RISK-V1`, `INT-ATO-DETECT-V1`) but by no live update.
 
 #### No deep cross-jurisdiction conflict resolution
 

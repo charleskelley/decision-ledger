@@ -158,9 +158,10 @@ ATO's policy corpus is 32 Markdown documents with YAML front matter under
 policy gate owns the format, the chunking, and the stores: its corpus loader
 parses the front matter into the gate's `PolicyDocument`
 (`policy_rag_gate.models.corpus`), splits each body at `##` boundaries (and at `###`
-for a section over 300 words, merging sections under 30 words), and indexes
-the chunks under `reasoner_id=ato-reasoner` in Elasticsearch and in its
-`policy_rag.policy_chunks` table (`make build-policy-index-ato-reasoner`). See
+for a section over 300 words, merging sections under 30 words), and loads
+them as the corpus `ato-policy` — the corpus ATO's registration binds — into
+Elasticsearch and its `policy_rag` tables (`make build-policy-index-ato-reasoner`,
+which passes `--corpus-id ato-policy --reasoner-id ato-reasoner`). See
 [Policy Corpus](../../gates/policy/policy-corpus.md) for the format.
 
 ```python
@@ -268,12 +269,11 @@ illustrative):
     {
       "gate_id": "policy",
       "gate_config": {
-        "template_id": "ato-v3",
+        "template_id": "ato-v4",
         "template_vars": {"risk_score": "0.040", "risk_tier": "STANDARD", "auth_method": "PASSWORD", "...": "..."},
         "jurisdictions": ["INTERNAL", "US_FEDERAL"],
         "risk_tier": "STANDARD",
-        "retrieval_query": "device fingerprint consistency mismatch anomaly password ...",
-        "corpus_version": "ato-v1"
+        "retrieval_query": "device fingerprint consistency mismatch anomaly password ..."
       }
     }
   ],
@@ -309,9 +309,10 @@ class GateVerdict(BaseModel):
 
 # core/gate/output.py
 class EvidenceRef(BaseModel):
-    source_id: str  # the policy gate: the snippet's document id
-    locator: str | None = None  # the policy gate: the snippet's section path
+    source_id: str  # the policy gate: the passage's document id
+    locator: str | None = None  # the policy gate: the passage's section path
     jurisdictions: frozenset[str] = frozenset()  # Tier 5 reads their union
+    content_hash: str | None = None  # SHA-256 of the passage's text (DR-34)
 
 
 class GateOutput(BaseModel):
@@ -333,15 +334,17 @@ The policy gate fills the opaque fields with its own models
 (its eval, ATO's baseline capture) re-validate them:
 
 ```python
-class PolicyGateSnapshot(BaseModel):  # GateOutput.evidence_snapshot
+class PolicyGateSnapshot(BaseModel):  # GateOutput.evidence_snapshot (v2, DR-34)
+    snapshot_version: Literal[2] = 2
     retrieval_query: str  # from gate_config["retrieval_query"]
-    retrieval_results: list[RetrievedSnippet]  # in rank order
-    retrieval_path: str  # "reranked", "rrf_only", or "skipped"
+    corpus_queries: list[CorpusQuery]  # one per bound corpus: ato-policy, tier 1
+    contexts: list[RetrievedContext]  # the passages rendered, in precedence order
+    evidence_layout: str  # "tiered_blocks" for ato-v4, "numbered_list" for ato-v3
+    dedup_merged: int
     index_version: str
     model_version: str  # the LLM model id
-    prompt_template_id: str  # "ato-v3"
+    prompt_template_id: str  # "ato-v4"
     prompt_template_version: str
-    corpus_version: str  # from gate_config["corpus_version"]
     rendered_prompt: str
     prompt_snapshot: PromptSnapshot  # the template text verbatim
     template_vars: dict[str, str]
@@ -354,13 +357,24 @@ class PolicyGateExtra(BaseModel):  # GateOutput.extra
     token_cost: TokenCost | None = None
     retrieval_ms: float = 0.0
     failure: Literal["missing_retrieval_query", "render_error", "llm_error"] | None = None
+    # ato-v4 (tiered evidence) only:
+    governing_corpus_id: str | None = None
+    conflict_detected: bool | None = None
+    evidence_sufficient: bool | None = None
+    protocol_hold: Literal["conflict_detected", "evidence_insufficient"] | None = None
+    verdict_as_returned: GateVerdict | None = None  # the model's own verdict, kept when the gate held it
 ```
 
-The gate asks the LLM for a `PolicyGateVerdict` (the universal verdict plus
-`rationale` and `citations`), converts it to the universal `GateVerdict`, and
-records the rationale and citations in `extra`. Its evidence is one
-`EvidenceRef` per retrieved snippet, carrying that snippet's jurisdiction.
-See [Policy Gate](../../gates/policy/index.md).
+The gate asks the LLM for a `TieredPolicyGateVerdict` under `ato-v4` (the
+universal verdict plus `rationale`, `citations`, and the conflict/gap
+report; `ato-v3` asks for a `PolicyGateVerdict`), converts it to the
+universal `GateVerdict` — flooring it at HOLD for review when the report
+finds disagreeing or insufficient evidence (a model BLOCK stays a BLOCK) —
+and records the rationale,
+citations, and report in `extra`. Its evidence is one `EvidenceRef` per
+rendered passage, carrying that passage's jurisdiction and content hash.
+See [Policy Gate](../../gates/policy/index.md) and
+[Evidence](../../gates/policy/evidence.md).
 
 ---
 

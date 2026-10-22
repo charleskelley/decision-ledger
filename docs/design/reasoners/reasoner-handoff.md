@@ -382,7 +382,7 @@ could not evaluate.
 
 A reasoner keeps the translation into the contract in one place, its
 assembler. The reference is the Account Takeover reasoner's
-`build_submission(event, features, scorer, *, corpus_version)` in
+`build_submission(event, features, scorer, *, template_id)` in
 `reasoners/account_takeover/src/ato_reasoner/assembler.py`. It takes ATO's
 three domain artifacts (`LoginEvent`, `AtoFeatureVector`, `ScorerOutput`)
 and returns one `Submission`; the framework never sees those types. ATO's
@@ -404,12 +404,12 @@ ScorerOutput → ReasonerContext
   attribution                ← AttributionSummary(feature_contributions=top_signals)
 
 LoginEvent + AtoFeatureVector + ScorerOutput → GateContext (gate_id "policy")
-  template_id                = "ato-v3"
-  template_vars              ← rendered strings for each placeholder of ato-v3.yaml
+  template_id                ← AtoSettings.template_id ("ato-v4"; "ato-v3" or "ato-v2" selectable)
+  template_vars              ← rendered strings for each placeholder of ato-v4.yaml
   jurisdictions              ← INTERNAL, plus US_FEDERAL for a US login
   risk_tier                  ← HIGH_VALUE at risk_score ≥ 0.60, else STANDARD
   retrieval_query            ← build_ato_query(event, scorer)
-  corpus_version             ← AtoSettings.corpus_version
+  (the corpus is ATO's binding's, ato-policy at tier 1: DR-34)
 
 LoginEvent → subject
   native_subject             = (ato-account, account_id)
@@ -460,8 +460,12 @@ For a reasoner that runs as its own service, in any language.
    policy corpus under its asset root, `POLICY_RAG_GATE_ASSETS_ROOT`, as
    `<root>/<reasoner_id>/prompts/*.yaml` and
    `<root>/<reasoner_id>/corpus/**/*.md` (template ids are global: one
-   another reasoner registers already refuses your binding). The rules
-   gate, a lookup gate, or no gate need nothing here.
+   another reasoner registers already refuses your binding). Then load the
+   corpus, under the corpus id your binding will name, before you register
+   (the gate refuses a binding to a corpus that is not loaded, DR-34):
+   `uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id>
+   --reasoner-id <reasoner_id>` reads `<root>/<reasoner_id>/corpus`. The
+   rules gate, a lookup gate, or no gate need nothing here.
 3. **Register.** Pick one source (DR-33; see
    [Registration](../registration.md)):
     - **Over HTTP:** the operator sends your registration, in its JSON shape,
@@ -479,14 +483,14 @@ For a reasoner that runs as its own service, in any language.
     Either way the ledger admits your registration exactly as it does at
     startup: every gate you bind as mandatory must be composed, and every
     composed gate you bind must accept the binding and its `config`
-    (`app.gates.BindingValidator`; the RAG gate reads your assets here) and
+    (`app.gates.BindingValidator`; the RAG gate checks the corpora your
+    binding names, `PolicyBindingConfig`, and reads your assets here) and
     then serve you. A refusal names the gate: the deployment does not start
     with a declared registration a gate refuses, and a `PUT` answers 422
     `GATE_BINDING_REFUSED` and stores nothing.
-4. **Load your corpus**, if you bound the RAG policy gate: after you are
-   registered, `uv run python -m policy_rag_gate.corpus_loader
-   --reasoner-id <reasoner_id>` indexes `<root>/<reasoner_id>/corpus` (the
-   loader refuses a reasoner the ledger does not register).
+4. **Reload your corpus** whenever its documents change (the same loader
+   command); a load replaces the corpus, and each decision records the
+   corpus state it read.
 5. **Get a key.** The deployment maps your `reasoner_id` to a key in
    `DECISIONLEDGER_API_KEYS` (comma-separated `reasoner_id:key` pairs) or
    the key file `DECISIONLEDGER_API_KEYS_FILE`; the ledger reads its keys
@@ -565,10 +569,13 @@ reasoners/<domain>/
    and picks between them at startup (`ATO_LEDGER_URL` set: HTTP).
 6. **Ship gate assets.** Prompt templates go in `prompts/` (a top-level
    `system:` key carries the system message; template ids are global
-   across a deployment; a change is a new file). Index the corpus with the
-   RAG gate's loader:
-   `uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id>`
-   (or `make build-policy-index-<reasoner_id>`).
+   across a deployment; a change is a new file). Name your corpus on your
+   binding to the RAG gate (`config: {corpora: [{corpus_id: <corpus_id>,
+   tier: 1}]}`, DR-34) and load it with the gate's loader before the ledger
+   starts:
+   `uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id> --reasoner-id <reasoner_id>`
+   (or `make build-policy-index-<reasoner_id>`, with
+   `POLICY_CORPUS_ID_<reasoner_id> := <corpus_id>` in your `reasoner.mk`).
 7. **Add `reasoner.mk`** (suffixed targets appended to
    `REASONER_INDEX_TARGETS`, `REASONER_PREPARE_TARGETS`,
    `REASONER_EVAL_TARGETS`, and the others; the root `Makefile` includes
@@ -622,9 +629,10 @@ in [How to implement a gate](../gates/implementation.md); the steps:
    admit or refuse each registration's binding to your gate, asked at
    startup and when a registration is written over the API (a gate with
    neither it nor a `binding_config_model` refuses a binding that carries
-   a configuration); and `ReasonerScope` (`serves(reasoner_id)`, asked right
-   after the binding is admitted) when the gate can serve only some
-   reasoners.
+   a configuration; admitting is not remembering: the framework hands the
+   binding's `config` to every request as `GateRequest.binding_config`);
+   and `ReasonerScope` (`serves(reasoner_id)`, asked right after the
+   binding is admitted) when the gate can serve only some reasoners.
 6. **Own your infrastructure**: a `compose.yaml` the root
    `docker-compose.yml` includes, your own schema and DDL (never the
    `decisionledger` schema), a `gate.mk` with suffixed targets appended to

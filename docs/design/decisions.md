@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-33.** The next record is DR-34.
+**Current head: DR-34.** The next record is DR-35.
 
 ### Status values
 
@@ -166,7 +166,10 @@ similarity search.
 policy gate, `gates/policy_rag/src/policy_rag_gate/retriever.py`, which records
 the path taken (`reranked` or `rrf_only`) as `retrieval_path` in its
 `evidence_snapshot`, inside the bundle's record of that gate rather than as a
-bundle field)
+bundle field; amended by DR-34: the hybrid stack is the gate's reference
+retrieval provider, run once per bound corpus, and snapshot version 2
+records the ranking per corpus, `ranking_requested` and `ranking_applied` on
+each `CorpusQuery`, instead of one `retrieval_path`)
 **Category:** Data Storage & Retrieval
 
 ### Context
@@ -1290,8 +1293,9 @@ open `GateOutput`; see the implementation note)
 >   (`PolicyGateSnapshot`); its rationale, citations, and `TokenCost` are in
 >   its `extra` (`PolicyGateExtra`). Both models live in
 >   `policy_rag_gate.models` (`gates/policy_rag/`), which the framework never
->   imports. The reasoner now sends `corpus_version` in the gate's
->   `gate_config` (`PolicyGateConfig`).
+>   imports. The reasoner then sent `corpus_version` in the gate's
+>   `gate_config` (`PolicyGateConfig`); DR-34 removed it, and the gate
+>   records the state of every corpus it queries itself.
 > - **The three states below map to gate records.** A gate not invoked is
 >   `skipped`. A gate that raised, timed out, returned an unusable output, or
 >   is not composed is `failed`, with no output, and Tier 1 holds it. A gate
@@ -1579,7 +1583,9 @@ for any artifact they want captured.
 **Status:** Accepted (amended by DR-28 and DR-30: DR-28 moved
 `RetrievedSnippet` and the policy gate's types, `DocumentType` and
 `PolicyDocument` among them, to the RAG policy gate's `policy_rag_gate.models`
-(`gates/policy_rag/`), and DR-30 deleted `GateRoute` (`core/routes.py`). The
+(`gates/policy_rag/`), and DR-30 deleted `GateRoute` (`core/routes.py`);
+amended by DR-34: `RetrievedContext`, the evidence contract every retrieval
+provider returns, replaced `RetrievedSnippet`. The
 `ResolutionAttempt` subclasses (`core/resolution/`) and `EnforcementDecision`
 (`core/enforcement.py`) stand)
 **Category:** Pipeline & System Design
@@ -1951,7 +1957,10 @@ gate's own `policy_rag` schema, still filtered by `reasoner_id`, and the
 retriever, corpus loader, and Elasticsearch mapping moved to
 `gates/policy_rag/`; amended by DR-31: a bundle stores the reasoner's
 `Submission`, so replay needs no raw-event factory. The framework schema also
-holds DR-31's registration snapshots and DR-32's entity journal)
+holds DR-31's registration snapshots and DR-32's entity journal; amended by
+DR-34: policy chunks are keyed and filtered by `corpus_id`, not
+`reasoner_id`, and a reasoner reads the corpora its registration's binding
+names. Decision bundles keep `reasoner_id` as their tenant column)
 **Category:** Data Storage & Retrieval
 
 > **Implementation note (DR-26, 2026-10):** The storage model below is
@@ -2479,7 +2488,10 @@ an opaque `config` the gate validates; a `GatePlugin` may declare a
 `binding_config_model`, and a built gate may be a `BindingValidator` the
 framework asks at startup and when a registration is written; the RAG gate
 also serves reasoners registered without a plugin, from its asset root
-`POLICY_RAG_GATE_ASSETS_ROOT`)
+`POLICY_RAG_GATE_ASSETS_ROOT`; amended by DR-34: the RAG gate retrieves
+through providers from the corpora a reasoner's binding names, the gate
+receives the binding's `config` with every request, and `EvidenceRef`
+carries a `content_hash`)
 **Category:** Pipeline & System Design
 
 > Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
@@ -3802,7 +3814,10 @@ thread busy while its decision proceeds unresolved.
 
 ## DR-33: Registration is a writable, versioned resource; bindings carry gate-validated config
 
-**Status:** Accepted
+**Status:** Accepted (amended by DR-34: the RAG policy gate's binding
+configuration is `PolicyBindingConfig`, the corpora it reads; the corpus
+loader loads a corpus by corpus id, before the registration that binds it,
+and no longer refuses an unregistered reasoner)
 **Category:** Pipeline & System Design
 
 > Amends DR-28 (a binding carries the gate's configuration for the
@@ -4016,3 +4031,356 @@ directory is read at the next start.
 - **An API reasoner may change its own native namespace.** A replacement is
   not compared with the version it replaces, as a redeployed plugin is not.
 
+
+---
+
+## DR-34: Retrieval providers, corpus references, the evidence contract, and evidence escrow
+
+**Status:** Accepted (part 1 — providers, corpus references, the evidence
+contract — implemented in Phase 2; part 2 — evidence escrow and verify —
+Phase 3)
+**Category:** Pipeline & System Design
+
+> Amends DR-28 (the RAG policy gate retrieves through providers from the
+> corpora a reasoner's binding names, and its evidence carries a content
+> hash) and builds on DR-33 (the binding's gate-validated configuration is
+> how a reasoner names its corpora); DR-28's status line says so. Phase 2
+> of the ledger-decoupling program implements part 1 (below); part 2 is
+> Phase 3.
+
+**Decision.**
+
+*Part 1 (Phase 2) — gate-internal (`policy_rag_gate`):*
+
+- **Provider protocol.** `RetrievalProvider.retrieve(query, corpus:
+  CorpusRef, *, k, jurisdictions, risk_tier) -> ProviderResult` and
+  `describe(corpus) -> CorpusState` (a state marker such as a manifest hash
+  or provider update time, the provenance level the provider can supply,
+  the provider's version). Providers are discovered under the gate-owned
+  entry-point group `policy_rag_gate.providers`; `reference` ships in the
+  member and is the default.
+- **Reference provider** = the former `PolicyRetriever` + corpus loader +
+  `policy_rag` schema, with the chunk key renamed `corpus_id` (was
+  `reasoner_id`), a `policy_rag.corpora(corpus_id PK, manifest_hash,
+  document_count, loaded_at, source_dir)` registry written by the loader,
+  and a `policy_rag.documents` table so the provider can return whole
+  documents. Deterministic chunk ids (`sha256(corpus_id, document_id,
+  version, section_path)`) end the duplicate-document problem in
+  Elasticsearch; a reload replaces by id.
+- **Corpus references on the binding.** The gate's `binding_config_model`
+  is `PolicyBindingConfig(corpora: tuple[CorpusRef, ...] (at least one),
+  k_per_corpus: int = 5)`, `CorpusRef(corpus_id, provider = "reference",
+  resource: str | None, tier: int >= 1 (1 is the highest authority),
+  jurisdictions: frozenset[str] = (), min_provenance: ProvenanceLevel =
+  "text_only")`. `validate_binding` checks that each provider exists, that
+  `describe` succeeds, that the provider can meet `min_provenance`, and that
+  each corpus is bound once. The per-submission `PolicyGateConfig` keeps
+  `template_id`, `template_vars`, `retrieval_query`, `jurisdictions`, and
+  `risk_tier`; `corpus_version` is removed from it (the gate records corpus
+  state itself). Two reasoners may bind the same corpus; the loader loads it
+  once (the jurisdictions a reasoner may filter to are still read from its
+  own corpus directory; see the judgment calls below).
+- **Retrieval.** Fan out to every bound corpus, `k_per_corpus` each, rank
+  within a corpus only (reference: hybrid + RRF + reranker with the latency
+  bypass, as before), never merge scores across corpora. Agreeing passages
+  (the same `content_hash` under the same jurisdiction) are deduplicated
+  before prompting. Rendering
+  groups evidence into blocks by tier, highest tier first, each passage
+  labeled with its corpus, tier, document, version, and section.
+  `{policy_snippets}` receives the grouped rendering; the gate still adds no
+  wording of its own, so templates that want the conflict/gap protocol get a
+  **new version** (`ato-v4`, `example-v2`; old files untouched).
+- **Verdict.** The verdict gains `governing_corpus_id: str | None`,
+  `conflict_detected: bool`, and `evidence_sufficient: bool`. When
+  `conflict_detected` or not `evidence_sufficient`, the gate holds the
+  decision for review (its verdict floored at HOLD, never relaxed); no new
+  enforcement tier.
+- **Evidence contract (required of every provider).** `RetrievedContext`:
+  `corpus_id, provider, resource, tier, document_id, document_uri, title,
+  version (str | None), section_path, span (start, end) | None, text (as
+  retrieved), content_hash (sha256 of text), prompted_text (None unless
+  transformed), rank, scores: dict[str, float], provider_chunk_id,
+  provenance_level ∈ {pinned_version, uri_and_hash, text_only},
+  document_metadata: dict (opaque; carries GRC lineage such as a policy
+  version id, an approver, effective and valid-to dates when the owner put
+  them in metadata), artifact_hash: str | None`. Snapshot v2 adds a
+  per-corpus `CorpusQuery(corpus_ref, state: CorpusState, k, filters,
+  ranking_requested, ranking_applied, duration_ms)`, `evidence_layout`, and
+  `dedup_merged`, and keeps `prompt_snapshot`, `rendered_prompt`, and
+  `model_version`; `retrieval_path` becomes per corpus. The gate eval
+  (`policy_rag_gate.eval`) gains per-corpus retrieval metrics and an
+  authority-violation rate (a lower-tier passage cited as governing while a
+  higher-tier passage on point was retrieved).
+
+*Part 1 (Phase 2) — framework:*
+
+- `core/gate/output.py:EvidenceRef` gains `content_hash: str | None = None`
+  (the SHA-256, lowercase hex, of the exact text the gate relied on).
+  Nothing else in `core/` learns the words corpus, provider, or policy.
+
+*Part 2 (Phase 3) — framework and gates:*
+
+- **Evidence escrow.** `decisionledger.evidence_artifacts(artifact_hash PK,
+  media_type, byte_length, content bytea, first_seen_at, first_decision_id,
+  first_gate_id)`; `store.artifacts.put(blob, *, decision_id, gate_id) ->
+  hash` (idempotent) and `get(hash)`; `EvidenceRef.artifact_hash`. Setting
+  `DECISIONLEDGER_EVIDENCE_ESCROW` = `on | off` (default `on`). A gate
+  writes through `framework.store.artifacts` during evaluation (after the
+  first copy it is a hash lookup). Retention is the deployment's records
+  rule; nothing here deletes.
+- **Verify.** `POST /api/v1/decisions/{decision_id}/verify` (a reasoner key
+  for its own decisions, the operator for any). Framework part: for every
+  `EvidenceRef` with an `artifact_hash`, escrow present or missing.
+  Delegated part: a gate implementing `EvidenceVerifier.verify(ref,
+  snapshot) -> EvidenceStatus` (`intact | source_changed |
+  source_unavailable | not_verifiable`) is called per reference; the RAG
+  gate recomputes the passage hash from its stored snapshot text and, in
+  live mode (`?live=true`), asks the provider to fetch the current document
+  (`DocumentFetcher.fetch_document`, an optional provider capability) and
+  compares. Replay is unchanged and never touches a provider.
+  `LedgerClient.verify(decision_id, live=False)`; MCP gains
+  `verify_decision`; conformance covers escrow present and a
+  `not_verifiable` path.
+- **Rules gate** escrows the rule-set text it applied, proving the mechanism
+  is gate-agnostic.
+
+**Rationale.** A research pass on production RAG corpus partitioning
+(`zoo/research/rag-corpus-partitioning-2026-10/`) found that deployments
+converge on one governed container per owning group or authority tier
+behind one query plane that fans out with a fixed per-corpus quota and
+labels evidence by source; that scores are not comparable across indexes
+and LLM routers choose the right corpus only 45–63% of the time; that
+models adopt wrong retrieved text more than 60% of the time and recognize
+conflicts less than 45%; that no platform versions its corpus; and that
+the copy actually relied on is the legally binding artifact (Moffatt v. Air
+Canada). So the gate is engine-agnostic behind a provider seam, a corpus is
+a reference a reasoner's binding names with an authority tier (precedence is
+data on the binding), retrieval never fuses scores across corpora, and the
+gate holds a decision when its evidence disagrees or falls short rather
+than trusting the model to resolve it. And the bundle is the evidence, the
+corpus only a source: the gate captures by value what the model saw, by
+reference how it was produced, under a contract every provider must meet;
+part 2 adds a framework-owned escrow and a verify operation separate from
+replay. Retrieval and generation are never promised reproducible.
+
+**Rejected alternatives.**
+
+- **One gate instance per corpus or tier.** Precedence would ride the
+  mandatory/advisory combinator, but at N LLM calls per decision and with a
+  parameterized gate plugin; revisit if a deployment needs hard separation
+  of LLM calls.
+- **Cross-corpus score fusion, or an LLM router choosing a corpus.** Scores
+  are incomparable across indexes, routers are 45–63% accurate, and an
+  omitted corpus is a silent gap.
+- **Escrow inside the gate's schema.** Other gates could not share it, and
+  the framework could not verify generically.
+- **Promising retrieval reproduction.** Corpus growth and model changes move
+  results, and providers do not version their corpora.
+
+**Cross-references.**
+
+- Amends DR-28 (see its status line). Builds on DR-33 (binding
+  configuration validated by the gate), DR-13 (the reference provider's
+  dual-analyzer BM25), DR-23 (LLM SDKs confined to the gate's adapters), and
+  DR-24 (the keyword mapping of the filter key, now `corpus_id`).
+- Design pages: [Policy gate](gates/policy/index.md),
+  [Retrieval providers](gates/policy/providers.md),
+  [Evidence](gates/policy/evidence.md),
+  [Policy corpus](gates/policy/policy-corpus.md),
+  [Registration](registration.md).
+
+**Implementation (Phase 2, part 1).**
+
+- **`core/` and `app/`.** `EvidenceRef.content_hash` (pattern
+  `^[0-9a-f]{64}$`; `schemas/bundle-v2.json` regenerated).
+  `GateRequest.binding_config`: the framework hands the gate the binding's
+  `config` from the registration the decision is made under, with every
+  request (`app/submit.py`; shadow evaluation, from the registration served
+  now). `effective_gate_set` keeps a binding's `config` when the deployment
+  upgrades it to mandatory, and `check_gate_set` checks that a gate the
+  deployment mandates for a reasoner that does not bind it accepts an empty
+  binding configuration (its `binding_config_model` validates `{}`).
+- **Gate member.** `policy_rag_gate/corpus.py` (`ProvenanceLevel`,
+  `CorpusRef`, `CorpusState`, `PolicyBindingConfig`, the plugin's
+  `binding_config_model`); `providers/` (`protocol.py`: `RetrievalProvider`,
+  `ProviderResult`, `ProviderPlugin`, `ProviderServices`,
+  `ProviderContractError`; `__init__.py`: entry-point discovery and a
+  `ProviderRegistry` that builds each provider on first use;
+  `reference.py`: the reference provider over the unchanged
+  `PolicyRetriever`); `models/context.py` (`RetrievedContext`, replacing
+  `RetrievedSnippet`); `models/snapshot.py` (snapshot v2 with
+  `CorpusQuery`); `models/verdict.py` (`TieredPolicyGateVerdict`);
+  `gate.py` (`retrieve_evidence`: fan-out, contract checks, precedence,
+  merging; the two layouts; the hold; admission of `PolicyBindingConfig`);
+  the DDL (`corpora`, `documents`, chunks keyed by `corpus_id` with
+  deterministic text ids and spans; a schema from before this record is
+  refused); the Elasticsearch mapping (`corpus_id` keyword); the loader
+  (`--corpus-id` required; replace semantics in both stores); the eval
+  (per-corpus metrics; `authority.py`).
+- **Reasoners.** ATO binds `ato-policy` and the example `example-policy`,
+  each at tier 1 with `min_provenance: pinned_version` (their
+  registration versions change). New templates `ato-v4` and `example-v2`
+  with `evidence_layout: tiered_blocks` and the conflict/gap protocol; ATO
+  sends `ato-v4` unless `ATO_TEMPLATE_ID` names another (it replaces
+  `ATO_CORPUS_VERSION`), the example sends `example-v2`. Neither assembler
+  sends `corpus_version`. Each `reasoner.mk` declares the corpus id its
+  binding names (`POLICY_CORPUS_ID_<reasoner_id>`), which
+  `build-policy-index-<reasoner_id>` loads.
+- **Boundary.** No framework file names the gate's retrieval vocabulary
+  (corpus references, providers, the evidence contract, provenance levels,
+  the conflict/gap fields, the tiered layout), in any spelling, and no
+  framework identifier is built on `corpus`, `provider`, `tier`, or `policy`
+  beyond enforcement's numbered tiers and listed exceptions. No reasoner or
+  integration member's source imports the provider seam, by module or by
+  any of its names from another of the gate's modules, and a reasoner
+  member declares only the framework's two entry-point groups. A gate
+  member may own entry-point groups under its own package.
+
+**Judgment calls and deviations (Phase 2).**
+
+- **The binding travels with every request.** The plan has the gate
+  validate the binding at admission but does not say how a decision learns
+  it. A gate-held copy would run a decision under a binding its
+  registration version does not name (a replaced registration admitted
+  before its write commits, a write another gate then refuses, shadow
+  evaluation), so `GateRequest.binding_config` carries it from the
+  registration the framework used; the gate keeps no copy.
+- **A corpus is loaded before it is bound.** `describe` must succeed at
+  admission, so a binding to a corpus the provider does not hold refuses
+  startup or the write (a typo in a corpus id is caught there, not as
+  empty retrieval). The order is: load the corpus, then start the
+  deployment or write the registration. The corpus loader therefore no
+  longer refuses an unregistered `--reasoner-id` (DR-33's check guarded the
+  `reasoner_id` chunk key, which is gone); `--reasoner-id` only locates the
+  documents, and `--corpus-dir` still overrides it.
+- **The hold floors the verdict, not just the escalation flag.** In this
+  enforcement, `escalate_to_human` alone does not route to HOLD (only a
+  conflict-worded escalation does, through the jurisdiction-conflict tier).
+  So when the tiered report finds disagreement or a gap, the gate floors its
+  verdict at HOLD and escalates: of the actions the model permitted, those
+  at least as restrictive as HOLD are kept (enforcement takes the most
+  conservative permitted action, so a model BLOCK stays a BLOCK), and HOLD
+  replaces the milder ones; holding never makes a decision milder. The
+  escalation reason is the gate's own constant text, with nothing the model
+  wrote in it (the corpus the model named governing is kept in `extra`),
+  worded without "conflict" or "jurisdiction" so the jurisdiction-conflict
+  tier never claims it. The model's verdict is kept in `extra`
+  (`verdict_as_returned`, `protocol_hold`). Enforcement accepts the gate's
+  verdict, and its other tiers still apply: an adversarial probe still
+  blocks, and a hold whose model confidence is below enforcement's
+  threshold is credited to the low-confidence tier, which holds it as it
+  holds any low-confidence HOLD or BLOCK (`protocol_hold` says it was the
+  protocol).
+- **Two response schemas, chosen by the template.** A template declares its
+  `evidence_layout`. `numbered_list` (the default) renders exactly as
+  before and asks for `PolicyGateVerdict` — whose name, docstring, and
+  fields the structured-output SDK sends to the model, so they are
+  unchanged (a test pins the schema's hash) — so a template written before
+  this record behaves as it did. `tiered_blocks` renders the tiers and asks
+  for `TieredPolicyGateVerdict`. The plan has `PolicyGateVerdict` gain the
+  fields; that would have changed what every old template's request sends.
+- **`RetrievedContext` keeps a `jurisdiction`.** The plan's field list
+  omits it, but the reference provider filters by it and enforcement's
+  jurisdiction-conflict tier reads it through the evidence references.
+- **The contract is checked at retrieval too.** Besides the return model,
+  the gate refuses an answer for another corpus, provider, or tier, more
+  passages than the quota, ranks out of order, or a passage below the
+  binding's `min_provenance` (the provider's declared level is checked at
+  admission). A provider answer that is not a `ProviderResult` is refused,
+  and so is a passage that is not a `RetrievedContext` whose `content_hash`
+  is the SHA-256 of its text, or a state that is not a `CorpusState`: a
+  result built without validation (`model_construct`) cannot record a
+  digest the model never saw.
+- **Snapshot details.** `contexts` holds the passages rendered (after
+  merging); each `CorpusQuery` also records how many passages it
+  `returned`, how many were `merged`, and why it was `skipped`; the
+  snapshot carries `snapshot_version: 2`. A passage is merged only into one
+  with the same text under the same jurisdiction: the same words in another
+  jurisdiction's document are other evidence, and enforcement's
+  jurisdiction-conflict tier reads every rendered passage's jurisdiction.
+  Merging applies within a corpus too. A `CorpusRef`'s jurisdictions
+  serialize sorted, so every process records a snapshot alike. A binding's
+  jurisdictions for a corpus narrow the submission's
+  filter for it, and a corpus the submission's filter excludes is not
+  queried. `k_per_corpus` is bounded at 50.
+- **`DocumentFetcher` waits for part 2,** with its first implementation and
+  the escrow it serves.
+- **The eval's new metrics need no core change.** Per-corpus metrics are
+  `per_corpus.<corpus_id>.<metric>` entries of the retrieval dimension's
+  result (report-only); the authority-violation rate is computed from
+  captured tiered gate outputs (a reasoner's `authority/golden_outputs.yaml`,
+  which ATO's baseline capture writes) and reported, report-only, with the
+  citation dimension. The gate eval reads each reasoner's binding from the
+  registry the ledger composes (`app.bootstrap.read_registry`).
+- **The loader replaces a corpus.** One Postgres transaction replaces its
+  documents and chunks; Elasticsearch gets every chunk by id and loses the
+  corpus's chunks the load did not write. Because a load replaces the
+  corpus, any file that does not parse (or whose front matter JSON cannot
+  carry) refuses the whole load, naming the files, instead of silently
+  dropping its document; so do two files declaring one document version. A
+  section path a document repeats is told apart in its chunk id, and a
+  chunk's span is located in body order (text a document repeats gets the
+  span of this chunk's copy). The manifest hash, the reference provider's
+  state marker, covers each document's id, version, text, and front matter,
+  so retagging a jurisdiction or risk tier without a new version changes it.
+  A Postgres advisory lock on the corpus id, held until both stores are
+  written, keeps two loads of one corpus from interleaving.
+- **Postgres is authoritative in the reference provider.** A hit, dense or
+  sparse, reaches the prompt only if `policy_rag.policy_chunks` holds that
+  chunk id with that exact text; anything else (an Elasticsearch document a
+  failed or interrupted load left behind) is dropped, logged, and the ranks
+  close up, so a passage labeled `pinned_version` is always one the provider
+  holds whole. The plan keeps the hybrid stack unchanged; this check sits
+  after it and changes nothing while the stores agree. A query that finds
+  nothing reports the ranking it requested as applied, so an empty corpus
+  query does not read as a reranker bypass.
+- **Fusion is keyed on the chunk id.** Reciprocal rank fusion used to key a
+  chunk by `(document_id, version, section_path)`, which merged two chunks
+  sharing a section path (a preamble indexed as `"Overview"` beside a
+  `## Overview` section) and kept the lower-ranked one. The deterministic
+  chunk id is the same in both stores, so fusion keys on it; results are
+  unchanged on corpora without repeated section paths (ATO's and the
+  example's have none).
+- **ATO's template is a setting with three choices.** `ATO_TEMPLATE_ID`
+  (replacing `ATO_CORPUS_VERSION`) accepts `ato-v2`, `ato-v3`, and `ato-v4`,
+  the templates ATO's assembler fills; any other value refuses startup.
+  `ato-v1` stays in `prompts/` for the bundles that cite it, but its
+  unescaped JSON example cannot be rendered again.
+- **Jurisdiction authorization still reads the reasoner's own corpus
+  directory (a limitation).** At intake the gate accepts only jurisdictions
+  the submitting reasoner's own corpus directory covers (its plugin's
+  `corpus_dir`, or `corpus/` under the asset root), and an asset-root
+  reasoner still needs a `corpus/` directory with a parseable document. So
+  two reasoners may bind one corpus, and it is loaded once, but a reasoner
+  that only shares another's corpus can filter only to jurisdictions its own
+  documents cover. Moving authorization to the bound corpora needs the
+  binding at intake — `authorize_config` receives none, a framework
+  protocol change — or a gate-held copy of it, which the binding-travels-
+  with-the-request call above rejects. Left for a plan revision.
+- **The retrieval thresholds assume one corpus (a limitation).** The gate
+  eval's thresholds (precision 0.40, MRR 0.70, version resolution 1.0) were
+  calibrated on a one-corpus binding at k = 5, and the overall metrics score
+  the merged precedence order at k = `k_per_corpus` × the corpora bound, so
+  a binding that adds a corpus needs thresholds of its own (the per-corpus
+  metrics are reported for that). Every binding today names one corpus.
+- **A binding without configuration is refused (a compatibility break).**
+  The policy gate's binding configuration names at least one corpus, so a
+  registration that binds `policy` with no `config` (or `{}`) — a file, a
+  plugin, or a row written over the API before this record — is refused at
+  admission, and the ledger does not start. The plan's "existing files
+  validate unchanged" still holds for the registration schema, not for this
+  gate's admission. Migration: load the corpus and add `config.corpora` to
+  the file or plugin; delete a persisted API registration's
+  `decisionledger.reasoner_registry` row (it is re-admitted at every
+  start), start the ledger, and write it again with its binding
+  configuration.
+- **Every bound corpus is loaded before the ledger starts.** With
+  `DECISIONLEDGER_REASONERS` blank the ledger serves ATO and the example,
+  whose bindings name `ato-policy` and `example-policy`, so the quickstarts
+  load both (`make prepare-reasoners`); loading only ATO's corpus, as they
+  did before, now refuses startup.
+- **ATO's fault injection.** The driver's `corpus_mismatch` kind relabeled
+  `corpus_version` and never changed behavior; it left with the label. The
+  driver builds its raising stand-in providers through the composed gate's
+  registry, so ATO's source never imports the provider seam; a member's
+  tests may build stand-in providers.

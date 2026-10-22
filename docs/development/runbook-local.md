@@ -27,9 +27,11 @@ uv sync
 #    reasoners/account_takeover/compose.yaml)
 docker compose up -d
 
-# 3. Prepare the reasoners: index each policy corpus into the RAG policy gate
-#    under its reasoner_id, and train ATO's scorer if the artifact is missing
-make prepare-account_takeover prepare-example
+# 3. Prepare the reasoners: load each policy corpus into the RAG policy gate
+#    under the corpus id its binding names (ato-policy, example-policy), and
+#    train ATO's scorer if the artifact is missing. The ledger does not start
+#    until every corpus a served registration binds is loaded.
+make prepare-reasoners   # = make prepare-account_takeover prepare-example
 
 # 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
@@ -193,26 +195,32 @@ docker compose down -v       # Full reset — destroys all data
 
 ## 2. Policy Corpus
 
-A reasoner's corpus must be loaded before the RAG policy gate can retrieve for it. This is a prerequisite for any decision that gate runs on.
+A corpus must be loaded before the RAG policy gate admits a binding that names it (DR-34): the ledger does not start, and a registration write is refused, while a corpus a binding names is not loaded. ATO's binding names `ato-policy`, the example's `example-policy`.
 
 ### Load
 
 ```bash
 make build-policy-index-ato-reasoner
 # equivalent to:
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner
 ```
 
-The loader resolves the corpus directory from the composed plugin whose `reasoner_id` matches (`ato_reasoner/corpus/`), else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` for a reasoner registered without a plugin; pass `--corpus-dir` to override. It refuses a `reasoner_id` the ledger does not register. Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
+The loader loads the corpus under `--corpus-id` (the id the binding names), reading its documents from the composed plugin whose `reasoner_id` matches `--reasoner-id` (`ato_reasoner/corpus/`), else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` for a reasoner registered without a plugin; pass `--corpus-dir` to override. It asks no registry, so load before you register. A load replaces the corpus, so a file that does not parse (or whose front matter JSON cannot carry) refuses the whole load, naming the files, rather than dropping its document; two loads of one corpus never interleave (an advisory lock per corpus covers both stores). Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
 
-If the Elasticsearch index was created before `reasoner_id` was mapped as `keyword`, the loader logs that it is recreating the index. That drops every reasoner's BM25 documents, so run `make build-policy-index` afterward to reload all of them.
+If the Elasticsearch index was created before `corpus_id` was mapped as `keyword` (any index from before DR-34), the loader logs that it is recreating the index. That drops every corpus's BM25 documents, so run `make build-policy-index` afterward to reload all of them. A Postgres `policy_rag` schema from before DR-34 is refused outright: run `docker compose down -v` (or `drop schema policy_rag cascade`), start the stack again, and reload every corpus.
+
+**Registrations from before DR-34.** A registration that binds `policy` without a `config` (or with `config: {}`) is refused at admission, because the gate's binding configuration names at least one corpus, so the ledger does not start. Load the corpus, then add `config.corpora` to the registration file or plugin (see `conformance/registrations.yaml` for the shape). A registration written over the API before DR-34 is stored in `decisionledger.reasoner_registry` and re-admitted at every start, so it blocks startup until its row is deleted (`delete from decisionledger.reasoner_registry where reasoner_id = '<id>'`, or `docker compose down -v` locally); start the ledger, then `PUT` the registration again with its binding config.
 
 ### Verify
 
 ```bash
+# PostgreSQL — the loaded corpora (manifest hash, documents, load time)
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "SELECT corpus_id, document_count, manifest_hash, loaded_at FROM policy_rag.corpora;"
+
 # PostgreSQL — chunk count per policy document
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "SELECT policy_id, COUNT(*) AS chunks FROM policy_rag.policy_chunks GROUP BY policy_id ORDER BY chunks DESC LIMIT 10;"
+  -c "SELECT corpus_id, policy_id, COUNT(*) AS chunks FROM policy_rag.policy_chunks GROUP BY corpus_id, policy_id ORDER BY chunks DESC LIMIT 10;"
 
 # PostgreSQL — total chunk count
 docker compose exec postgres psql -U decisionledger -d decisionledger \
@@ -230,11 +238,11 @@ curl -s 'localhost:9200/policy-chunks/_search?size=1' | python3 -m json.tool | h
 ### Reload (after corpus changes)
 
 ```bash
-# Safe re-run — deletes per policy_id before inserting, no duplicates
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
+# Safe re-run — a load replaces the corpus (chunk ids are deterministic)
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner
 
-# Wipe this reasoner's chunks from both stores, then reload
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --wipe
+# Delete the corpus's Elasticsearch documents first, then reload
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner --wipe
 ```
 
 ---
@@ -443,7 +451,7 @@ print(f"DLQ reason: {dlq2[0][1]['reason']}")  # lateness
 
 ## 5. Hybrid Retrieval
 
-Query the RAG policy gate's retriever directly, after loading a corpus.
+Query the RAG policy gate's reference provider, and the retriever inside it, directly, after loading a corpus.
 
 ### Interactive retrieval (Python REPL)
 
@@ -464,38 +472,67 @@ register_vector(pg)
 es = Elasticsearch("http://localhost:9200")
 model = SentenceTransformer("all-MiniLM-L6-v2")
 retriever = PolicyRetriever(pg, es, model)
-RID = "ato-reasoner"  # tenant filter: always pass it, as the pipeline does
+CORPUS = "ato-policy"  # the corpus ATO's binding names: always pass it, as the reference provider does
 ```
 
 ```python
 # Dense search — MFA query
-results = retriever.dense_search("multi-factor authentication TOTP requirement", k=5, reasoner_id=RID)
+results = retriever.dense_search("multi-factor authentication TOTP requirement", k=5, corpus_id=CORPUS)
 for s in results:
     print(f"{s.document_id:30s} | {s.section_path:40s} | {s.relevance_score:.4f}")
 ```
 
 ```python
-# Sparse BM25 search (returns hits only if reasoner_id is mapped as keyword)
-results = retriever.sparse_search("account lockout authentication failure threshold", k=5, reasoner_id=RID)
+# Sparse BM25 search (returns hits only if corpus_id is mapped as keyword)
+results = retriever.sparse_search("account lockout authentication failure threshold", k=5, corpus_id=CORPUS)
 for s in results:
     print(f"{s.document_id:30s} | {s.section_path}")
 ```
 
 ```python
-# Hybrid retrieval (dense + BM25 → RRF → rerank), as the policy gate calls it.
-# In the pipeline the query string comes from ato_reasoner.retrieval_query.build_ato_query.
-snippets, path = retriever.retrieve(
+# Hybrid retrieval (dense + BM25 → RRF → rerank) over one corpus, as the
+# reference provider runs it. In the pipeline the query string comes from
+# ato_reasoner.retrieval_query.build_ato_query.
+chunks, path = retriever.retrieve(
     "impossible travel new device failed password login from Paris",
     k=5,
-    reasoner_id=RID,
+    corpus_id=CORPUS,
     jurisdictions=["US_FEDERAL", "INTERNAL"],
 )
 print(f"Retrieval path: {path}")
-for s in snippets:
-    print(f"  {s.document_id:30s} | {s.relevance_score:.4f} | {s.section_path}")
+for c in chunks:
+    print(f"  {c.document_id:30s} | {c.relevance_score:.4f} | {c.section_path}")
 ```
 
-Expected: `path = "rrf_only"` here, because this retriever was built without a cross-encoder (the gate's own `policy_rag_gate.plugin.open_retriever` passes one, giving `"reranked"` unless the latency budget is exceeded). Geographic risk and ATO detection policy chunks should surface.
+Expected: `path = "rrf_only"` here, because this retriever was built without a cross-encoder (the reference provider's `open_reference_provider` passes one, giving `"reranked"` unless the latency budget is exceeded). Geographic risk and ATO detection policy chunks should surface.
+
+```python
+# Through the provider seam, as the policy gate asks for one bound corpus: the
+# passages come back under the evidence contract (RetrievedContext). Opening
+# the provider applies the gate's DDL and loads both models.
+from policy_rag_gate.corpus import CorpusRef
+from policy_rag_gate.providers.reference import open_reference_provider
+
+provider = open_reference_provider(
+    postgres_dsn=FrameworkSettings().postgres_dsn,
+    elasticsearch_url="http://localhost:9200",
+)
+corpus = CorpusRef(corpus_id=CORPUS, tier=1)
+print(provider.describe(corpus))  # manifest hash, document count, load time
+result = provider.retrieve(
+    "impossible travel new device failed password login from Paris",
+    corpus,
+    k=5,
+    jurisdictions=["US_FEDERAL", "INTERNAL"],
+    risk_tier=None,
+)
+print(result.ranking_requested, result.ranking_applied)
+for c in result.contexts:
+    print(f"  {c.rank} {c.document_id:30s} v{c.version} | {c.content_hash[:12]} | {c.section_path}")
+provider.close()
+```
+
+The provider returns only passages Postgres holds with that exact text (an Elasticsearch document a failed load left behind is dropped), each with `pinned_version` provenance and its document's front matter.
 
 ---
 
@@ -505,7 +542,7 @@ Expected: `path = "rrf_only"` here, because this retriever was built without a c
 # Unit tests (no Docker required)
 make test
 
-# Integration tests (requires docker compose up -d and make prepare-account_takeover)
+# Integration tests (requires docker compose up -d and make prepare-reasoners)
 make test-integration
 
 # Smoke tests (bundle replay and the ledger API, plus the ATO scenario smoke run)

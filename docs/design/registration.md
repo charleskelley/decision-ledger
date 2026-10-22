@@ -130,13 +130,26 @@ does. What a single decision asks of a gate stays in that submission's
   gates:
   - gate_id: policy
     mandatory: false
-    config: {}        # the RAG policy gate takes no binding configuration yet
+    config:           # the RAG policy gate's PolicyBindingConfig (DR-34)
+      corpora:
+      - {corpus_id: example-policy, provider: reference, tier: 1, min_provenance: pinned_version}
+      k_per_corpus: 5
 ```
 
 The gate validates the configuration when it admits the binding. A gate
 declares the shape it accepts as its plugin's `binding_config_model`; the
-RAG policy gate declares none and refuses a non-empty configuration until
-its corpus references arrive (DR-34).
+RAG policy gate's is `PolicyBindingConfig`, the corpora it reads for the
+reasoner, each at an authority tier
+([Retrieval providers](gates/policy/providers.md)), and it refuses a binding
+whose corpus its provider cannot describe (for the reference provider: a
+corpus that is not loaded), and a binding with no configuration at all — so
+a registration that bound `policy` before DR-34, with none, is refused
+until its binding names a corpus (for one written over the API, delete its
+`decisionledger.reasoner_registry` row, start the ledger, and write it
+again). The framework hands the gate the binding's
+configuration with every request (`GateRequest.binding_config`), from the
+registration version the decision is made under, so a replaced
+registration takes effect with the next decision.
 
 ## A reasoner without a plugin, and its gate assets
 
@@ -155,7 +168,9 @@ $POLICY_RAG_GATE_ASSETS_ROOT/
 The gate reads a reasoner's directory once, the first time it admits the
 reasoner's binding (at startup for a file or API registration, or when the
 registration is written): its templates join the prompt registry and its
-profile (template ids, the jurisdictions its corpus covers) is added. It is
+profile (template ids, the jurisdictions its corpus covers — the
+jurisdictions it may filter to, even when its binding names another
+reasoner's corpus) is added. It is
 add-only: a template id the deployment already registers refuses the
 binding, nothing is removed, and a template added later to an admitted
 reasoner's directory is read at the next start. A reasoner the deployment
@@ -164,23 +179,20 @@ root, if any, is not read. The gate refuses a reasoner whose directory is
 missing, holds no template or a malformed one, or no policy document whose
 front matter parses.
 
-The corpus loader indexes the same directory, after the reasoner is
-registered:
+The corpus loader loads the same directory as the corpus the reasoner's
+binding names, before the reasoner is registered (the gate refuses a binding
+to a corpus that is not loaded):
 
 ```bash
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id>
+uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id> --reasoner-id <reasoner_id>
 ```
 
-It resolves the corpus as the gate reads it: the composed plugin's
-`corpus_dir` (plugins filtered by `DECISIONLEDGER_REASONERS`), else
+It reads the corpus where the gate reads the reasoner's assets: the
+composed plugin's `corpus_dir` (plugins filtered by
+`DECISIONLEDGER_REASONERS`, so run it with the ledger's value), else
 `<root>/<reasoner_id>/corpus`; an explicit `--corpus-dir` overrides both. It
-refuses a `--reasoner-id` the ledger's registry does not know (plugins, the
-registration file, and the API's registrations, read from the ledger's
-Postgres) before it loads a model. It composes that registry as the ledger
-does, so run it with the ledger's `DECISIONLEDGER_REASONERS`,
-`DECISIONLEDGER_REGISTRATIONS`, and `POLICY_RAG_GATE_ASSETS_ROOT` (in `.env`,
-or on the command line). So the order for a new reasoner is: assets under
-the root, register, load the corpus, decide.
+asks no registry. So the order for a new reasoner is: assets under the root,
+load the corpus, register, decide.
 
 ## Persistence and restart
 
@@ -194,7 +206,7 @@ again with the gates, and a reasoner a plugin or the file also registers
 refuses startup. Every process that starts the ledger on that database (a
 restart, `LocalClient.from_settings`, an eval driver) does the same, so it
 needs what the gates need to admit those registrations (for the RAG gate,
-`POLICY_RAG_GATE_ASSETS_ROOT`). `app.bootstrap.read_registry` composes the
+`POLICY_RAG_GATE_ASSETS_ROOT` and the corpora the bindings name, loaded). `app.bootstrap.read_registry` composes the
 same registry, read only, for a tool that runs beside the ledger.
 
 ## Keys

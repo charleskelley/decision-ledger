@@ -162,9 +162,10 @@ from that reasoner's `EvalAdapter.datasets_dir`:
 
 | Dataset | Dimension |
 |---|---|
-| `retrieval/golden_queries.yaml` | Retrieval, through the gate's own hybrid retriever, filtered to the reasoner |
+| `retrieval/golden_queries.yaml` | Retrieval, through the gate's own retrieval over the reasoner's binding (every corpus it names, through its provider, merged as the gate renders it), with report-only per-corpus metrics (`per_corpus.<corpus_id>.<metric>`: precision at the quota, mean reciprocal rank, hit rate, passages returned, reranker bypass rate) |
 | `faithfulness/golden_outputs.yaml` | Faithfulness (RAGAS and an LLM judge) |
 | `citations/golden_outputs.yaml` | Citation (LLM judges) |
+| `authority/golden_outputs.yaml` | Optional (DR-34): captured gate outputs of a template with tiered evidence; the citation dimension reports, report-only, the authority-violation rate — verdicts naming a lower-tier corpus as governing while a higher-tier passage on point was retrieved |
 
 ```bash
 make eval-gate-policy_rag                    # every installed reasoner whose adapter ships one of these datasets
@@ -179,9 +180,12 @@ is ATO only. It writes one report per reasoner, to
 A missing dataset is a skipped dimension, which fails that report. It needs
 `OPENAI_API_KEY` (RAGAS) and `ANTHROPIC_API_KEY` (the judges), and exits `2`
 without writing a report when either is missing, when no installed adapter
-ships a dataset, or when the named reasoner has no adapter. The retrieval
-dimension needs the gate's stores up with the reasoner's corpus indexed
-(`make build-policy-index-<reasoner_id>`). Exit `0` means every report
+ships a dataset, when the named reasoner has no adapter, or when the
+ledger's registrations do not compose. The retrieval dimension reads the
+reasoner's binding from the registry the ledger composes (run it with the
+ledger's `DECISIONLEDGER_REASONERS` and `DECISIONLEDGER_REGISTRATIONS`;
+a reasoner that does not bind the gate to a corpus skips it) and needs the
+binding's corpora loaded (`make build-policy-index-<reasoner_id>`). Exit `0` means every report
 passed, `1` that a dimension failed or was skipped.
 
 The judges run on Anthropic (`claude-sonnet-4-6` by default) and RAGAS on
@@ -216,6 +220,13 @@ one or two relevant documents each, which caps precision at five well below
 0.80 even with perfect ranking; recall and MRR are the primary signal.
 Version resolution checks the top three rather than the top result
 ([DR-25](decisions.md#dr-25-mvp-eval-calibration-bimodal-scorer-thresholds-top-k-version-resolution-realistic-faithfulness-floor)).
+
+These thresholds were calibrated on a binding that names one corpus, at
+k = 5. The overall metrics score the passages in the order the gate renders
+them, at k = `k_per_corpus` × the corpora the binding names, so a binding
+that adds a corpus needs thresholds of its own (the report-only per-corpus
+metrics are there to calibrate them); every binding today names one corpus
+([DR-34](decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)).
 
 ### Faithfulness
 

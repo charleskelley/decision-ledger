@@ -245,7 +245,7 @@ release receipt.
 uv sync                        # Install the framework + every workspace reasoner, gate, and integration
 cp .env.example .env           # Then paste your OPENAI_API_KEY and ANTHROPIC_API_KEY
 docker compose up -d           # Start Postgres (the framework's), Elasticsearch (the RAG gate's), Redis (ATO's)
-make prepare-account_takeover  # Index ATO's policy corpus into the RAG gate; train the scorer if missing
+make prepare-reasoners         # Load every reasoner's policy corpus into the RAG gate; train ATO's scorer if missing
 make install-hooks             # Install the pre-commit and pre-push hooks (gitleaks + ruff)
 
 # Run the ledger API (port 8000) with a key for ATO and an operator key
@@ -269,6 +269,11 @@ make test-smoke
 make eval-account_takeover
 make eval-gate-policy_rag REASONER=ato-reasoner
 ```
+
+The ledger refuses to start until every corpus a served registration binds
+is loaded: with `DECISIONLEDGER_REASONERS` blank it serves ATO and the example
+reasoner, whose bindings name `ato-policy` and `example-policy`, and
+`make prepare-reasoners` loads both.
 
 All infrastructure runs locally via `docker compose up`; no cloud account is
 required. Two provider keys are needed: `OPENAI_API_KEY` for the RAG policy
