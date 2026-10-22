@@ -128,11 +128,13 @@ class PolicyGatePlugin:
 
         Args:
             framework: Shared services. The gate reads ``settings`` (the
-                Postgres DSN of the database that holds its schema) and
+                Postgres DSN of the database that holds its schema),
                 ``reasoners`` (each reasoner's ``prompts_dir`` and
-                ``corpus_dir``). A reasoner registered without a plugin is
-                admitted later, from the asset root, when the framework
-                asks the gate to validate its binding.
+                ``corpus_dir``), and the store's evidence escrow
+                (``store.artifacts``, DR-34), which it writes to while
+                deciding and reads when verifying. A reasoner registered
+                without a plugin is admitted later, from the asset root,
+                when the framework asks the gate to validate its binding.
 
         Returns:
             The runtime ``PolicyGate``; ``close()`` releases the providers
@@ -171,6 +173,7 @@ class PolicyGatePlugin:
             providers=providers,
             profiles=profiles,
             assets_root=settings.assets_root_path,
+            escrow=framework.store.artifacts,
         )
 
 

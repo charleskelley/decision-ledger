@@ -17,6 +17,7 @@ provider seam is tested without Postgres, Elasticsearch, or a model.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,7 +47,11 @@ from policy_rag_gate.corpus import (
     ProvenanceLevel,
 )
 from policy_rag_gate.models import RetrievedContext, TokenCost, content_hash
-from policy_rag_gate.providers import ProviderResult
+from policy_rag_gate.providers import (
+    DocumentBlob,
+    DocumentNotHeldError,
+    ProviderResult,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -334,6 +339,144 @@ class FakeProvider:
         self.closed = True
 
 
+class FetchingProvider(FakeProvider):
+    """A ``FakeProvider`` that also fetches whole documents (``DocumentFetcher``).
+
+    Each ``(document_id, version)`` of a corpus is one document: a title
+    line, then its passages' texts in corpus order. Every passage it
+    retrieves carries its ``span`` in that text. Tests edit or drop a
+    document, drop a corpus, or make fetching fail between deciding and
+    verifying.
+
+    Args:
+        corpora: As ``FakeProvider``.
+        fetch_error: Raised by ``fetch_document``.
+        **kwargs: As ``FakeProvider``.
+
+    Attributes:
+        documents: ``(corpus_id, document_id, version)`` → text (editable;
+            delete a key to drop that version).
+        fetched: Every ``(corpus_id, document_id, version)`` fetched, in
+            order.
+    """
+
+    def __init__(
+        self,
+        corpora: Mapping[str, Sequence[FakePassage]],
+        *,
+        fetch_error: Exception | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(corpora, **kwargs)
+        self.fetch_error = fetch_error
+        self.fetched: list[tuple[str, str, str | None]] = []
+        self.documents: dict[tuple[str, str, str | None], str] = {}
+        self._spans: dict[tuple[str, str, str | None, str], tuple[int, int]] = {}
+        for corpus_id, passages in self._corpora.items():
+            grouped: dict[tuple[str, str | None], list[FakePassage]] = {}
+            for passage in passages:
+                grouped.setdefault((passage.document_id, passage.version), []).append(
+                    passage
+                )
+            for (document_id, version), members in grouped.items():
+                text = f"# {members[0].title or document_id}\n\n"
+                for passage in members:
+                    start = len(text)
+                    text += passage.text
+                    self._spans[(corpus_id, document_id, version, passage.text)] = (
+                        start,
+                        len(text),
+                    )
+                    text += "\n\n"
+                self.documents[(corpus_id, document_id, version)] = text
+
+    def drop_corpus(self, corpus_id: str) -> None:
+        """The corpus is no longer held (as if deleted from the provider)."""
+        del self._corpora[corpus_id]
+
+    def retrieve(
+        self,
+        query: str,
+        corpus: CorpusRef,
+        *,
+        k: int,
+        jurisdictions: Sequence[str] | None,
+        risk_tier: str | None,
+    ) -> Any:
+        result = super().retrieve(
+            query, corpus, k=k, jurisdictions=jurisdictions, risk_tier=risk_tier
+        )
+        if not isinstance(result, ProviderResult):
+            return result
+        return result.model_copy(
+            update={
+                "contexts": tuple(
+                    c.model_copy(
+                        update={
+                            "span": self._spans.get(
+                                (c.corpus_id, c.document_id, c.version, c.text)
+                            )
+                        }
+                    )
+                    for c in result.contexts
+                )
+            }
+        )
+
+    def fetch_document(
+        self, corpus: CorpusRef, document_id: str, version: str | None
+    ) -> DocumentBlob:
+        self.fetched.append((corpus.corpus_id, document_id, version))
+        if self.fetch_error is not None:
+            raise self.fetch_error
+        if corpus.corpus_id not in self._corpora:
+            msg = f"corpus {corpus.corpus_id!r} is not held by {self.provider_id!r}"
+            raise LookupError(msg)
+        text = self.documents.get((corpus.corpus_id, document_id, version))
+        if text is None:
+            msg = f"{corpus.corpus_id}/{document_id} version {version!r} is not held"
+            raise DocumentNotHeldError(msg)
+        return DocumentBlob(
+            corpus_id=corpus.corpus_id,
+            document_id=document_id,
+            version=version,
+            title=f"Policy {document_id}",
+            text=text,
+            content_hash=content_hash(text),
+            metadata={"held_by": self.provider_id},
+        )
+
+
+class MemoryEscrow:
+    """The ledger's evidence escrow in a dict (``EvidenceEscrow``).
+
+    Args:
+        enabled: ``False`` stores nothing and returns no digest (escrow off).
+
+    Attributes:
+        rows: Digest → the bytes escrowed (tests delete or replace one).
+        puts: Every ``(media_type, decision_id, gate_id)`` put, in order.
+    """
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.rows: dict[str, bytes] = {}
+        self.puts: list[tuple[str, str, str]] = []
+
+    def put(
+        self, content: bytes, *, media_type: str, decision_id: str, gate_id: str
+    ) -> str | None:
+        self.puts.append((media_type, decision_id, gate_id))
+        if not self.enabled:
+            return None
+        digest = hashlib.sha256(content).hexdigest()
+        self.rows.setdefault(digest, content)
+        return digest
+
+    def get(self, artifact_hash: str) -> bytes | None:
+        return self.rows.get(artifact_hash)
+
+
 #: The fixture corpus as fake passages (two documents, two jurisdictions).
 STUB_PASSAGES: tuple[FakePassage, ...] = (
     FakePassage(
@@ -363,6 +506,18 @@ def fake_provider() -> type[FakeProvider]:
 def fake_passage() -> type[FakePassage]:
     """``FakePassage`` as a fixture."""
     return FakePassage
+
+
+@pytest.fixture
+def fetching_provider() -> type[FetchingProvider]:
+    """``FetchingProvider`` as a fixture."""
+    return FetchingProvider
+
+
+@pytest.fixture
+def memory_escrow() -> MemoryEscrow:
+    """An empty, enabled in-memory evidence escrow."""
+    return MemoryEscrow()
 
 
 @pytest.fixture

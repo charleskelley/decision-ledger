@@ -74,8 +74,13 @@ class RetrievedContext(BaseModel):
             reference provider: the document's front matter, which carries
             any lineage its owner put there, such as an approver or an
             effective date).
-        artifact_hash: The hash of the escrowed source artifact, once the
-            gate escrows one (DR-34 part 2); ``None`` until then.
+        artifact_hash: The SHA-256 (lowercase hex) of the whole document
+            the gate escrowed for this passage when it decided (the
+            document's text as the provider's ``DocumentFetcher`` returned
+            it, UTF-8), set only from what the ledger's evidence escrow
+            returned (DR-34 part 2). ``None`` when nothing was escrowed:
+            escrow off, a provider that cannot fetch documents, or a gate
+            built without the framework's escrow.
     """
 
     model_config = ConfigDict(
@@ -101,7 +106,7 @@ class RetrievedContext(BaseModel):
     provider_chunk_id: str | None = None
     provenance_level: ProvenanceLevel
     document_metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    artifact_hash: str | None = None
+    artifact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _digest_and_span_hold(self) -> RetrievedContext:

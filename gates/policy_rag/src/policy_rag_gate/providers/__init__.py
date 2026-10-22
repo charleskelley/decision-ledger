@@ -16,6 +16,8 @@ binding), so a deployment opens only the providers its registrations use.
 Public API:
     RetrievalProvider, ProviderResult, ProviderPlugin, ProviderServices,
     ProviderContractError: the seam (``policy_rag_gate.providers.protocol``).
+    DocumentFetcher, DocumentBlob, DocumentNotHeldError: the optional
+    capability to fetch whole documents (escrow and verification).
     ProviderRegistry: discovered plugins, built on first use.
     discover_provider_plugins: read the entry-point group.
 """
@@ -29,6 +31,9 @@ from typing import TYPE_CHECKING
 import structlog
 
 from policy_rag_gate.providers.protocol import (
+    DocumentBlob,
+    DocumentFetcher,
+    DocumentNotHeldError,
     ProviderContractError,
     ProviderPlugin,
     ProviderResult,
@@ -179,6 +184,9 @@ class ProviderRegistry:
 
 __all__ = [
     "PROVIDER_GROUP",
+    "DocumentBlob",
+    "DocumentFetcher",
+    "DocumentNotHeldError",
     "ProviderContractError",
     "ProviderPlugin",
     "ProviderRegistry",

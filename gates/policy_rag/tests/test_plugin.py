@@ -145,6 +145,16 @@ def test_build_opens_no_provider_until_a_binding_names_one(infra, fixture_reason
     assert gate.providers._built == {}
 
 
+def test_the_gate_escrows_through_the_frameworks_store(infra, fixture_reasoner):
+    # DR-34 part 2: the plugin hands the gate the store's evidence escrow;
+    # the gate never reads the escrow setting itself.
+    framework = _framework(fixture_reasoner)
+
+    gate = _plugin().build(framework)
+
+    assert gate.escrow is framework.store.artifacts
+
+
 def test_providers_are_built_with_the_frameworks_dsn_and_the_gates_settings(
     infra, monkeypatch, fixture_reasoner, stub_provider
 ):
