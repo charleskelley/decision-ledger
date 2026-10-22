@@ -16,6 +16,12 @@ failed or interrupted load left behind never reaches a prompt. A corpus it
 does not hold cannot be described, so the gate refuses a binding that names
 one: load the corpus first.
 
+It is a ``DocumentFetcher`` too (DR-34 part 2): ``fetch_document`` returns
+one document version whole from ``policy_rag.documents``, over the
+provider's own Postgres connection (Elasticsearch is never involved), for
+the gate to escrow when it decides and to compare with when it verifies
+live.
+
 Published as ``reference`` under the ``policy_rag_gate.providers`` entry-point
 group (``PLUGIN``); the gate builds it the first time a binding names it.
 """
@@ -33,7 +39,12 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from policy_rag_gate.corpus import CorpusRef, CorpusState
 from policy_rag_gate.models.context import RetrievedContext, content_hash
-from policy_rag_gate.providers.protocol import ProviderResult, ProviderServices
+from policy_rag_gate.providers.protocol import (
+    DocumentBlob,
+    DocumentNotHeldError,
+    ProviderResult,
+    ProviderServices,
+)
 from policy_rag_gate.retriever import PolicyRetriever
 from policy_rag_gate.schema import apply_schema
 
@@ -67,6 +78,19 @@ _HELD_CHUNKS = """
             and c.policy_id = d.document_id
             and c.policy_version = d.document_version
     where c.corpus_id = %s and c.chunk_id = any(%s)
+"""
+
+# One document version, whole; no row means the corpus is not loaded, a row
+# with no body that it holds no such version.
+_DOCUMENT = """
+    select d.title, d.body, d.metadata
+    from policy_rag.corpora as c
+    left join policy_rag.documents as d
+        on
+            c.corpus_id = d.corpus_id
+            and d.document_id = %s
+            and d.document_version = %s
+    where c.corpus_id = %s
 """
 
 log = structlog.get_logger(__name__)
@@ -128,24 +152,12 @@ class ReferenceProvider:
             ValueError: The reference names a ``resource``.
             CorpusNotLoadedError: No corpus by that id is loaded.
         """
-        if corpus.resource is not None:
-            msg = (
-                f"the reference provider takes no resource (corpus "
-                f"{corpus.corpus_id!r} names {corpus.resource!r}): it holds each "
-                "corpus under its corpus_id"
-            )
-            raise ValueError(msg)
+        _takes_no_resource(corpus)
         with self._pg.cursor(row_factory=dict_row) as cur:
             cur.execute(_CORPUS_STATE, (corpus.corpus_id,))
             row = cur.fetchone()
         if row is None:
-            msg = (
-                f"corpus {corpus.corpus_id!r} is not loaded in the reference "
-                "provider: load it with python -m policy_rag_gate.corpus_loader "
-                f"--corpus-id {corpus.corpus_id} (and --reasoner-id or --corpus-dir "
-                "to say where its documents are)"
-            )
-            raise CorpusNotLoadedError(msg)
+            raise CorpusNotLoadedError(_not_loaded(corpus))
         return CorpusState(
             corpus_id=corpus.corpus_id,
             provider=REFERENCE_PROVIDER_ID,
@@ -232,6 +244,81 @@ class ReferenceProvider:
             str(row["chunk_id"]): (str(row["chunk_text"]), dict(row["metadata"] or {}))
             for row in rows
         }
+
+    def fetch_document(
+        self, corpus: CorpusRef, document_id: str, version: str | None
+    ) -> DocumentBlob:
+        """Return one loaded document version whole (``DocumentFetcher``).
+
+        Reads ``policy_rag.documents`` over the provider's own Postgres
+        connection; Elasticsearch is never involved. ``text`` is the body the
+        loader stored (front matter stripped), which every chunk's span
+        indexes.
+
+        Args:
+            corpus: The reference (the reference provider takes no
+                ``resource``).
+            document_id: The document.
+            version: The version: required, since a corpus may hold several
+                versions of one document.
+
+        Returns:
+            The document, its front matter as ``metadata``.
+
+        Raises:
+            ValueError: The reference names a ``resource``, or no version is
+                given.
+            CorpusNotLoadedError: No corpus by that id is loaded.
+            DocumentNotHeldError: The corpus is loaded, but not that
+                document version (removed or re-versioned by a reload).
+        """
+        _takes_no_resource(corpus)
+        if version is None:
+            msg = (
+                f"the reference provider fetches {corpus.corpus_id}/{document_id} "
+                "by version: a corpus may hold several versions of one document"
+            )
+            raise ValueError(msg)
+        with self._pg.cursor(row_factory=dict_row) as cur:
+            cur.execute(_DOCUMENT, (document_id, version, corpus.corpus_id))
+            row = cur.fetchone()
+        if row is None:
+            raise CorpusNotLoadedError(_not_loaded(corpus))
+        if row["body"] is None:
+            msg = (
+                f"corpus {corpus.corpus_id!r} holds no version {version!r} of "
+                f"document {document_id!r}"
+            )
+            raise DocumentNotHeldError(msg)
+        text = str(row["body"])
+        return DocumentBlob(
+            corpus_id=corpus.corpus_id,
+            document_id=document_id,
+            version=version,
+            title=str(row["title"]),
+            text=text,
+            content_hash=content_hash(text),
+            metadata=dict(row["metadata"] or {}),
+        )
+
+
+def _takes_no_resource(corpus: CorpusRef) -> None:
+    if corpus.resource is not None:
+        msg = (
+            f"the reference provider takes no resource (corpus "
+            f"{corpus.corpus_id!r} names {corpus.resource!r}): it holds each "
+            "corpus under its corpus_id"
+        )
+        raise ValueError(msg)
+
+
+def _not_loaded(corpus: CorpusRef) -> str:
+    return (
+        f"corpus {corpus.corpus_id!r} is not loaded in the reference "
+        "provider: load it with python -m policy_rag_gate.corpus_loader "
+        f"--corpus-id {corpus.corpus_id} (and --reasoner-id or --corpus-dir "
+        "to say where its documents are)"
+    )
 
 
 def _context(

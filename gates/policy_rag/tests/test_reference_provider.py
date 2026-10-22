@@ -29,7 +29,11 @@ import pytest
 
 from policy_rag_gate.corpus import CorpusRef
 from policy_rag_gate.models import content_hash
-from policy_rag_gate.providers import ProviderServices
+from policy_rag_gate.providers import (
+    DocumentFetcher,
+    DocumentNotHeldError,
+    ProviderServices,
+)
 from policy_rag_gate.providers import reference as reference_module
 from policy_rag_gate.providers.reference import (
     PLUGIN,
@@ -42,6 +46,7 @@ from policy_rag_gate.retriever import ScoredChunk
 from policy_rag_gate.settings import PolicyRagGateSettings
 
 _LOADED_AT = datetime(2026, 10, 21, 9, 30, tzinfo=UTC)
+_BODY_A = "# Stub Widget Policy A\n\n## 2. Calibration Review\n\nHold thin histories.\n"
 
 
 class _Cursor:
@@ -59,7 +64,29 @@ class _Cursor:
 
     def execute(self, sql: str, params: Any) -> None:
         self._conn.executed.append((" ".join(sql.split()), params))
-        if "from policy_rag.corpora" in sql:
+        if "left join policy_rag.documents" in sql:
+            document_id, version, corpus_id = params
+            if corpus_id not in self._conn.corpora:
+                self._rows = []
+                return
+            found = [
+                row
+                for row in self._conn.documents
+                if (row["corpus_id"], row["document_id"], row["document_version"])
+                == (corpus_id, document_id, version)
+            ]
+            self._rows = (
+                [
+                    {
+                        "title": found[0]["title"],
+                        "body": found[0]["body"],
+                        "metadata": found[0]["metadata"],
+                    }
+                ]
+                if found
+                else [{"title": None, "body": None, "metadata": None}]
+            )
+        elif "from policy_rag.corpora" in sql:
             (corpus_id,) = params
             row = self._conn.corpora.get(corpus_id)
             self._rows = [row] if row is not None else []
@@ -111,12 +138,16 @@ class _Conn:
                 "corpus_id": "stub-policy",
                 "document_id": "STUB-POLICY-A",
                 "document_version": "1.0",
+                "title": "Stub Widget Policy A",
+                "body": _BODY_A,
                 "metadata": {"policy_id": "STUB-POLICY-A", "approver": "risk-office"},
             },
             {
                 "corpus_id": "stub-policy",
                 "document_id": "STUB-POLICY-B",
                 "document_version": "1.0",
+                "title": "Stub Widget Policy B",
+                "body": "# Stub Widget Policy B\n\nRelease after inspection.\n",
                 "metadata": None,
             },
         ]
@@ -408,3 +439,73 @@ def test_close_releases_the_index_client_then_the_connection(infra):
     provider.close()
 
     assert order == ["es", "pg"]
+
+
+# ---------------------------------------------------------------------------
+# fetch_document (DocumentFetcher, DR-34 part 2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_reference_provider_fetches_whole_documents():
+    provider, _, _ = _provider()
+
+    assert isinstance(provider, DocumentFetcher)
+
+
+def test_a_document_version_is_returned_whole_from_postgres():
+    provider, _, conn = _provider()
+
+    document = provider.fetch_document(_REF, "STUB-POLICY-A", "1.0")
+
+    assert (document.corpus_id, document.document_id, document.version) == (
+        "stub-policy",
+        "STUB-POLICY-A",
+        "1.0",
+    )
+    assert document.title == "Stub Widget Policy A"
+    assert document.text == _BODY_A
+    assert document.content_hash == content_hash(_BODY_A)
+    assert document.media_type == "text/markdown"
+    assert document.metadata == {
+        "policy_id": "STUB-POLICY-A",
+        "approver": "risk-office",
+    }
+    # One statement, keyed by the corpus, the document, and its version.
+    [(sql, params)] = conn.executed
+    assert "left join policy_rag.documents" in sql
+    assert params == ("STUB-POLICY-A", "1.0", "stub-policy")
+
+
+def test_a_version_the_loaded_corpus_does_not_hold_is_not_held():
+    provider, _, _ = _provider()
+
+    with pytest.raises(DocumentNotHeldError, match=r"no version '2\.0'"):
+        provider.fetch_document(_REF, "STUB-POLICY-A", "2.0")
+
+
+def test_a_document_of_a_corpus_that_is_not_loaded_cannot_be_fetched():
+    provider, _, _ = _provider()
+
+    with pytest.raises(CorpusNotLoadedError, match="--corpus-id gone"):
+        provider.fetch_document(
+            CorpusRef(corpus_id="gone", tier=1), "STUB-POLICY-A", "1.0"
+        )
+
+
+@pytest.mark.parametrize(
+    ("corpus", "version", "match"),
+    [
+        (_REF, None, "by version"),
+        (
+            CorpusRef(corpus_id="stub-policy", tier=1, resource="projects/p"),
+            "1.0",
+            "takes no resource",
+        ),
+    ],
+)
+def test_a_fetch_needs_a_version_and_no_resource(corpus, version, match):
+    provider, _, conn = _provider()
+
+    with pytest.raises(ValueError, match=match):
+        provider.fetch_document(corpus, "STUB-POLICY-A", version)
+    assert conn.executed == []

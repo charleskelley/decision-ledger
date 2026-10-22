@@ -59,6 +59,7 @@ from policy_rag_gate.corpus_loader import (
     write_postgres,
 )
 from policy_rag_gate.models import content_hash
+from policy_rag_gate.providers import DocumentNotHeldError
 from policy_rag_gate.providers.reference import (
     CorpusNotLoadedError,
     ReferenceProvider,
@@ -412,3 +413,37 @@ def test_the_reference_provider_describes_and_retrieves_a_loaded_corpus(
         assert context.document_metadata["policy_id"] == context.document_id
     with pytest.raises(CorpusNotLoadedError):
         provider.describe(CorpusRef(corpus_id="no-such-corpus", tier=1))
+
+
+def test_the_reference_provider_fetches_what_it_retrieved_from_whole(
+    retriever, pg_conn, stores
+):
+    # DR-34 part 2: each passage retrieved is a slice of the document the
+    # provider returns whole, from Postgres alone.
+    provider = ReferenceProvider(retriever=retriever, pg_conn=pg_conn)
+    corpus = CorpusRef(corpus_id=_STUB, tier=1)
+    result = provider.retrieve(
+        "widget calibration review", corpus, k=3, jurisdictions=None, risk_tier=None
+    )
+    assert result.contexts
+
+    for context in result.contexts:
+        document = provider.fetch_document(corpus, context.document_id, context.version)
+        assert (document.document_id, document.version) == (
+            context.document_id,
+            context.version,
+        )
+        assert document.content_hash == content_hash(document.text)
+        if context.span is not None:
+            start, end = context.span
+            assert content_hash(document.text[start:end]) == context.content_hash
+        else:
+            assert context.text in document.text
+
+    first = result.contexts[0]
+    with pytest.raises(DocumentNotHeldError):
+        provider.fetch_document(corpus, first.document_id, "0.0-never-loaded")
+    with pytest.raises(CorpusNotLoadedError):
+        provider.fetch_document(
+            CorpusRef(corpus_id="no-such-corpus", tier=1), first.document_id, "1.0"
+        )
