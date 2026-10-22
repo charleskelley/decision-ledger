@@ -10,11 +10,13 @@ unknown, belongs to another reasoner, or cannot evaluate.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from core.actions import DecisionAction
 from core.gate import EvidenceRef, GateOutput
-from rules_gate import RulesGate, RulesGateSnapshot, parse_ruleset
+from rules_gate import RulesGate, RulesGateSnapshot, canonical_ruleset, parse_ruleset
 
 
 @pytest.fixture
@@ -27,12 +29,17 @@ async def _evaluate(gate, submission_for, request_for, **kwargs) -> GateOutput:
     return await gate.evaluate(request_for(submission_for(**kwargs)))
 
 
+def _digest(ruleset_data) -> str:
+    """The digest every reference carries: the applied rule set's canonical JSON."""
+    return hashlib.sha256(canonical_ruleset(parse_ruleset(ruleset_data))).hexdigest()
+
+
 def _snapshot(output: GateOutput) -> RulesGateSnapshot:
     return RulesGateSnapshot.model_validate(output.evidence_snapshot, strict=False)
 
 
 async def test_no_matching_rule_permits_the_default_action(
-    gate, submission_for, request_for
+    gate, submission_for, request_for, ruleset_data
 ):
     output = await _evaluate(gate, submission_for, request_for)
 
@@ -44,7 +51,11 @@ async def test_no_matching_rule_permits_the_default_action(
     assert output.verdict.required_controls == []
     assert output.verdict.confidence == 1.0
     assert output.evidence == (
-        EvidenceRef(source_id="widget-guardrails@1.0.0", locator="default_action"),
+        EvidenceRef(
+            source_id="widget-guardrails@1.0.0",
+            locator="default_action",
+            content_hash=_digest(ruleset_data),
+        ),
     )
     snapshot = _snapshot(output)
     assert snapshot.default_applied is True
@@ -52,7 +63,7 @@ async def test_no_matching_rule_permits_the_default_action(
 
 
 async def test_a_matching_rule_permits_its_action_and_requires_its_controls(
-    gate, submission_for, request_for
+    gate, submission_for, request_for, ruleset_data
 ):
     output = await _evaluate(gate, submission_for, request_for, thin_history=True)
 
@@ -60,7 +71,11 @@ async def test_a_matching_rule_permits_its_action_and_requires_its_controls(
     assert output.verdict.permitted_actions == [DecisionAction.HOLD]
     assert output.verdict.required_controls == ["calibration_review"]
     assert output.evidence == (
-        EvidenceRef(source_id="widget-guardrails@1.0.0", locator="thin-history-hold"),
+        EvidenceRef(
+            source_id="widget-guardrails@1.0.0",
+            locator="thin-history-hold",
+            content_hash=_digest(ruleset_data),
+        ),
     )
     assert _snapshot(output).matched_rule_ids == ["thin-history-hold"]
 

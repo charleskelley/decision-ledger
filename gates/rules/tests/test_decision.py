@@ -37,7 +37,7 @@ class _RecordingStore:
 @pytest.fixture
 def gates(write_ruleset) -> dict[str, ComposedGate]:
     plugin = RulesGatePlugin(RulesGateSettings(rulesets_dir=str(write_ruleset())))
-    return {"rules": ComposedGate(plugin=plugin, gate=plugin.build(framework=None))}  # type: ignore[arg-type]
+    return {"rules": ComposedGate(plugin=plugin, gate=plugin.build(framework=None))}
 
 
 async def _decide(submission, gates, registration, store):

@@ -24,11 +24,20 @@ A reasoner selects a registered rule set by id through its gate context
 (``gate_config = {"ruleset_id": "widget-guardrails"}``, validated by
 ``RulesGateConfig``); it never submits rules itself, so the rules a decision
 is held to are the deployment's, not the submitter's.
+
+``load_rulesets`` returns each rule set with the file it came from, so the
+gate can read the file again when a decision is verified live (DR-34 part
+2). ``canonical_ruleset`` is the rule set's canonical JSON: what the gate
+escrows when it applies the rule set and what it hashes into its evidence
+references, so the same rules always have the same digest whatever the
+file's layout.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -139,14 +148,73 @@ def parse_ruleset(data: object) -> RuleSet:
     return RuleSet.model_validate(data, strict=False)
 
 
-def load_rulesets(directory: Path) -> dict[str, RuleSet]:
+def canonical_json(value: Any) -> bytes:
+    """``value`` as canonical JSON: sorted keys, no spaces, UTF-8.
+
+    Args:
+        value: JSON-shaped data (a rule set's ``model_dump(mode="json")``).
+
+    Returns:
+        The bytes a digest of the data is taken over.
+    """
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def canonical_ruleset(ruleset: RuleSet) -> bytes:
+    """The canonical JSON of a rule set (``model_dump(mode="json")``).
+
+    What the gate snapshots, escrows, and hashes: the rules as evaluated, so
+    a file reformatted or commented without changing them keeps its digest.
+    """
+    return canonical_json(ruleset.model_dump(mode="json"))
+
+
+def read_ruleset(path: Path) -> RuleSet:
+    """Read and validate one rule-set file.
+
+    Args:
+        path: A YAML rule-set file.
+
+    Returns:
+        The validated ``RuleSet``.
+
+    Raises:
+        OSError: The file cannot be read.
+        yaml.YAMLError: It is not YAML.
+        ValueError: It is not a YAML mapping.
+        pydantic.ValidationError: It is not a well-formed rule set.
+    """
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        msg = f"Rule-set file {path} must contain a YAML mapping"
+        raise ValueError(msg)
+    return parse_ruleset(data)
+
+
+@dataclass(frozen=True)
+class LoadedRuleSet:
+    """A registered rule set and the file it was loaded from.
+
+    Attributes:
+        ruleset: The validated rule set.
+        origin: Its file's name, relative to the rule-set directory.
+    """
+
+    ruleset: RuleSet
+    origin: str
+
+
+def load_rulesets(directory: Path) -> dict[str, LoadedRuleSet]:
     """Load every ``*.yaml`` / ``*.yml`` rule set under ``directory``.
 
     Args:
         directory: Directory of rule-set files, one rule set per file.
 
     Returns:
-        Rule sets keyed by ``ruleset_id``, in file-name order.
+        Rule sets with their files, keyed by ``ruleset_id``, in file-name
+        order.
 
     Raises:
         FileNotFoundError: ``directory`` does not exist.
@@ -158,20 +226,14 @@ def load_rulesets(directory: Path) -> dict[str, RuleSet]:
         msg = f"Rule-set directory not found: {directory}"
         raise FileNotFoundError(msg)
     paths = sorted([*directory.glob("*.yaml"), *directory.glob("*.yml")])
-    rulesets: dict[str, RuleSet] = {}
-    origins: dict[str, str] = {}
+    loaded: dict[str, LoadedRuleSet] = {}
     for path in paths:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            msg = f"Rule-set file {path} must contain a YAML mapping"
-            raise ValueError(msg)
-        ruleset = parse_ruleset(data)
-        if ruleset.ruleset_id in rulesets:
+        ruleset = read_ruleset(path)
+        if ruleset.ruleset_id in loaded:
             msg = (
                 f"Duplicate ruleset_id {ruleset.ruleset_id!r} in {path.name} "
-                f"(already loaded from {origins[ruleset.ruleset_id]})"
+                f"(already loaded from {loaded[ruleset.ruleset_id].origin})"
             )
             raise ValueError(msg)
-        rulesets[ruleset.ruleset_id] = ruleset
-        origins[ruleset.ruleset_id] = path.name
-    return rulesets
+        loaded[ruleset.ruleset_id] = LoadedRuleSet(ruleset=ruleset, origin=path.name)
+    return loaded
