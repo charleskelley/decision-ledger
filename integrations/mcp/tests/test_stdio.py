@@ -63,6 +63,7 @@ def test_the_stdio_server_answers_the_lifecycle_and_lists_its_tools():
         "gate_decision",
         "lookup_decision",
         "replay_decision",
+        "verify_decision",
         "list_decisions_for_entity",
         "resolve_hold",
     ]

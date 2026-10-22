@@ -1,6 +1,6 @@
 # decisionledger-mcp
 
-DecisionLedger as six [Model Context Protocol](https://modelcontextprotocol.io)
+DecisionLedger as seven [Model Context Protocol](https://modelcontextprotocol.io)
 tools, so an agent can record and gate its decisions in the ledger and read
 them back. A uv workspace member; import package `decisionledger_mcp`;
 distribution `decisionledger-mcp`. It is a client of the ledger: it calls a
@@ -12,6 +12,7 @@ ledger service through `app.client.HttpClient` and publishes no plugin.
 | `gate_decision` | `submission` | Ask the ledger's gates to decide (mandatory and advisory gates) |
 | `lookup_decision` | `decision_id` | Read a decision's full bundle |
 | `replay_decision` | `decision_id` | Re-run enforcement on a decision's stored evidence |
+| `verify_decision` | `decision_id`; optional `live` | How the evidence a decision relied on stands now: the ledger's escrow, and each gate's check against its record (`live`: its sources) |
 | `list_decisions_for_entity` | `entity_id`; optional `reasoner_id`, `limit`, `before`, `before_id`, `include_related` | A subject's decisions, newest first |
 | `resolve_hold` | `decision_id`, `resolution_action` (ALLOW or BLOCK), `resolver_id`, `note`; optional `reviewer_role`, `reference_ticket_id` | A human's terminal resolution of a held decision (operator key) |
 
