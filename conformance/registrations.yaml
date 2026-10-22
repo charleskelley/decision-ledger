@@ -10,13 +10,21 @@
 # reasoner). The shape of each entry is a ReasonerRegistration as JSON
 # (schemas: GET /api/v1/reasoners). An instance that composes the RAG policy
 # gate needs the example's prompts and corpus under its asset root
-# (POLICY_RAG_GATE_ASSETS_ROOT/example-reasoner/; see README.md).
+# (POLICY_RAG_GATE_ASSETS_ROOT/example-reasoner/) and the corpus loaded as
+# example-policy, the corpus the binding below names (DR-34; see README.md).
 registrations:
 - reasoner_id: example-reasoner
   reasoner_name: Example Reasoner
   gates:
   - gate_id: policy
     mandatory: false
+    config:
+      corpora:
+      - corpus_id: example-policy
+        provider: reference
+        tier: 1
+        min_provenance: pinned_version
+      k_per_corpus: 5
   bypass_rules:
   - rule_id: low-score
     version: '1'
