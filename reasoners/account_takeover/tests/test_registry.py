@@ -24,7 +24,7 @@ from ato_reasoner.plugin import PLUGIN
 from ato_reasoner.registry import ALLOW_BAND, ATO_REGISTRATION, BLOCK_BAND
 from core.actions import DecisionAction
 from core.gate import evaluate_predicate
-from core.observation import GateBinding, LabelType, ReasonerContext
+from core.observation import LabelType, ReasonerContext
 from core.submission import matching_bypass_rule
 from policy_rag_gate.config import ReasonerProfile
 
@@ -53,7 +53,24 @@ def test_ato_registration_has_correct_reasoner_id():
 
 
 def test_ato_registration_binds_only_the_policy_gate_as_advisory():
-    assert ATO_REGISTRATION.gates == (GateBinding(gate_id="policy", mandatory=False),)
+    [binding] = ATO_REGISTRATION.gates
+    assert (binding.gate_id, binding.mandatory) == ("policy", False)
+
+
+def test_ato_binds_the_policy_gate_to_its_corpus_at_tier_one():
+    # DR-34: the corpus is a reference on the binding, loaded as ato-policy.
+    from policy_rag_gate.corpus import PolicyBindingConfig
+
+    [binding] = ATO_REGISTRATION.gates
+    config = PolicyBindingConfig.model_validate(binding.config)
+    [corpus] = config.corpora
+    assert (corpus.corpus_id, corpus.provider, corpus.tier) == (
+        "ato-policy",
+        "reference",
+        1,
+    )
+    assert corpus.min_provenance == "pinned_version"
+    assert config.k_per_corpus == 5
 
 
 def test_ato_registers_the_two_score_bands_as_bypass_rules():
@@ -100,7 +117,7 @@ def test_the_bands_never_overlap():
 
 
 def test_the_policy_gate_lets_ato_use_every_shipped_template_version():
-    assert _gate_profile().template_ids == {"ato-v1", "ato-v2", "ato-v3"}
+    assert _gate_profile().template_ids == {"ato-v1", "ato-v2", "ato-v3", "ato-v4"}
 
 
 def test_the_policy_gate_lets_ato_claim_exactly_its_corpus_jurisdictions():

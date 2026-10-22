@@ -100,7 +100,7 @@ async def run_ato_decision(
 
     # --- Assembly (mode, gate context, and the domain-owned retrieval query) ---
     submission = build_submission(
-        event, features, scorer_output, corpus_version=services.corpus_version
+        event, features, scorer_output, template_id=services.template_id
     )
 
     # --- Hand off to the ledger ---

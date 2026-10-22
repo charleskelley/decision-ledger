@@ -59,7 +59,7 @@ class _Services:
         self.feature_svc.compute.return_value = features
         self.scorer = MagicMock()
         self.scorer.score.return_value = scorer
-        self.corpus_version = "ato-v1"
+        self.template_id = "ato-v4"
         self.closed = False
 
     def close(self) -> None:

@@ -1,0 +1,86 @@
+# ato-v4 adds the conflict/gap protocol of DR-34. The policy gate renders the
+# retrieved evidence in blocks by authority tier (evidence_layout:
+# tiered_blocks), each passage labeled with its corpus, tier, document,
+# version, and section, and asks for a TieredPolicyGateVerdict: the corpus
+# that governs, whether passages on point disagree, and whether the evidence
+# covers the login. When passages disagree or fall short, the gate holds the
+# login for human review. The event section, the template variables, and the
+# system framing are ato-v3's; the JSON schema example ato-v3 carried is gone
+# (the gate's structured output enforces the schema). ato-v3 stays on disk
+# and selectable (ATO_TEMPLATE_ID=ato-v3), so its behavior stays
+# reproducible.
+template_id: ato-v4
+version: 4.0.0
+description: >
+  ATO Reasoner policy gate with the conflict/gap protocol: evaluates an
+  authentication event against policy evidence grouped by authority tier,
+  names the governing corpus, and reports evidence that disagrees or does not
+  cover the event, with a structured decision and citations.
+evidence_layout: tiered_blocks
+
+system: >-
+  You evaluate authentication risk for the policy gate.
+  Respond with a TieredPolicyGateVerdict that conforms strictly to the schema.
+
+template: |
+  You are a policy compliance gate for an Account Takeover (ATO) risk decisioning
+  system. Your role is to evaluate the authentication event below against the
+  retrieved policy evidence and produce a structured JSON decision.
+
+  Assess only what the policy evidence supports. Do not invent rules or controls
+  that are not grounded in the retrieved documents.
+
+  ## Authentication Event
+
+  Risk score: {risk_score}
+  Risk tier: {risk_tier}
+  Auth method: {auth_method}
+  Outcome: {outcome}
+  Jurisdiction: {jurisdiction}
+  Top risk signals: {top_signals}
+  Impossible travel: {impossible_travel}
+  Velocity (1 min / 5 min / 60 min): {velocity_1min} / {velocity_5min} / {velocity_60min}
+  Device novelty: {device_novelty}
+  IP novelty: {ip_novelty}
+  Geo novelty: {geo_novelty}
+  Sparse account history: {sparse_history}
+
+  ## Retrieved Policy Evidence
+
+  The evidence is grouped into blocks by authority tier. Tier 1 is the highest
+  authority, and a passage from a lower tier never overrides a passage from a
+  higher tier. Each passage is labeled with its corpus, tier, document,
+  version, and section.
+
+  {policy_snippets}
+
+  ## Evidence Protocol
+
+  Before deciding, review the passages that bear on this event:
+
+  1. Governing corpus: set governing_corpus_id to the corpus whose passage
+     governs your decision, which is the highest-tier corpus with a passage on
+     point. Set it to null if no passage is on point.
+  2. Disagreement: set conflict_detected to true if passages on point disagree
+     about what policy requires for this event (one requires a hold where
+     another permits the login, for example), within a tier or across tiers.
+  3. Coverage: set evidence_sufficient to false if the passages do not cover
+     this event well enough to decide it.
+
+  If conflict_detected is true or evidence_sufficient is false, set
+  escalate_to_human to true and say why in escalation_reason: the login will
+  be held for human review.
+
+  ## Decision Instructions
+
+  Based solely on the retrieved policy evidence above, determine:
+
+  1. Which actions are permitted by policy for this event.
+     Valid values: ALLOW, CHALLENGE, HOLD, BLOCK
+  2. Which controls must be applied alongside the permitted action
+     (e.g., "require_step_up_mfa", "notify_account_owner", "log_anomaly").
+  3. A concise rationale (max 200 words) grounded in specific cited evidence.
+  4. The policy citations that support your rationale: each names the passage's
+     document as policy_id and quotes its text verbatim as snippet.
+  5. Your confidence in the assessment (0.0–1.0).
+  6. Whether human review is recommended regardless of the action taken.

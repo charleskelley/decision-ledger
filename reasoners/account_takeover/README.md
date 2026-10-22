@@ -26,9 +26,15 @@ synthetic-scenario generator, and the eval driver and datasets. The framework (`
 - the enforcement profile: `novel_entity_feature="sparse_history"` (Tier 3,
   on gated logins) and the US vs. EU `jurisdiction_conflict_groups` (Tier 5).
 
-The active gate template is `ato-v3` (v2's user text plus a `system:` key
-carrying ATO's system message); `ato-v1`/`ato-v2` stay in `prompts/`,
-since a prompt version is never modified or removed.
+The active gate template is `ato-v4` (DR-34: the evidence rendered by
+authority tier, with the conflict/gap protocol); `ATO_TEMPLATE_ID=ato-v3`
+reproduces the behavior before it (v2's user text plus a `system:` key
+carrying ATO's system message). `ato-v1`/`ato-v2` stay in `prompts/` too,
+since a prompt version is never modified or removed; `ATO_TEMPLATE_ID`
+accepts `ato-v2` to `ato-v4` (the templates the assembler fills) and refuses
+startup on anything else — `ato-v1`'s unescaped JSON example cannot be
+rendered again. ATO's binding to the policy gate names its corpus,
+`ato-policy`, at tier 1.
 
 See DR-26 in `docs/design/decisions.md` for why the reasoner is packaged
 this way, `docs/design/reasoners/account-takeover/account-takeover.md` for
@@ -121,10 +127,10 @@ keeps ATO's own id either way.
 | `make train-account_takeover` | Train the XGBoost scorer (artifact + model card + CSVs) |
 | `make eval-model-account_takeover` | Evaluate the trained scorer on a fresh-seed test set |
 | `make scenario-account_takeover` | Publish 10 `baseline_normal` synthetic login events |
-| `make build-policy-index-ato-reasoner` | Embed and index `corpus/` into the RAG policy gate's stores under `reasoner_id=ato-reasoner` (the gate's target, `gates/policy_rag/gate.mk`) |
+| `make build-policy-index-ato-reasoner` | Load `corpus/` into the RAG policy gate's reference provider as `ato-policy`, the corpus ATO's binding names (the gate's target, `gates/policy_rag/gate.mk`) |
 | `make prepare-account_takeover` | Build the policy index and train the scorer if the artifact is missing |
 | `make eval-account_takeover` | Run the framework eval harness (consistency, robustness, shadow) with this reasoner's adapter (slow, paid); the policy gate's own eval (`make eval-gate-policy_rag`) reads this reasoner's retrieval, faithfulness, and citation datasets |
-| `make capture-baselines-account_takeover` | Re-capture faithfulness fixtures from live gate runs |
+| `make capture-baselines-account_takeover` | Re-capture faithfulness and authority fixtures from live gate runs |
 | `make serve-account_takeover` | Run ATO's own service (port 8001; `ATO_LEDGER_URL` selects an HTTP ledger) |
 
 The aggregate root targets (`make train`, `make build-policy-index`,
@@ -139,7 +145,7 @@ the process environment):
 | --- | --- | --- |
 | `ATO_REDIS_URL` | `redis://localhost:6379` | Feature windows, dedup store, login-event stream |
 | `ATO_SCORER_MODEL_PATH` | packaged `scorer/models/ato-v1.ubj` | Override the scorer artifact |
-| `ATO_CORPUS_VERSION` | `ato-v1` | Corpus version recorded in every Decision Bundle |
+| `ATO_TEMPLATE_ID` | `ato-v4` | The RAG policy gate template ATO names: `ato-v4`, `ato-v3` (the behavior before DR-34), or `ato-v2`; anything else refuses startup |
 | `ATO_LEDGER_URL` | blank | The ledger ATO's service submits to over HTTP; blank runs the ledger in process |
 | `ATO_LEDGER_KEY` | blank | ATO's API key for that ledger (`X-DecisionLedger-Key`) |
 | `ATO_REDIS_PORT` | `6379` | Host port mapping in `compose.yaml` (Compose only) |

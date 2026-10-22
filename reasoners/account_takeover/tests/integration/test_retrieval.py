@@ -2,18 +2,20 @@
 
 Requires Docker services (PostgreSQL with the RAG policy gate's
 ``policy_rag`` schema, Elasticsearch) with the ATO policy corpus already
-loaded into the gate's stores via:
+loaded into the reference provider's stores, under the corpus id ATO's
+binding names (DR-34), via:
 
-    uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
+    uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy \
+        --reasoner-id ato-reasoner
 
-(``make build-policy-index``). Run with: make test-integration
+(``make build-policy-index-ato-reasoner``). Run with: make test-integration
 
 These are the ATO-specific retrieval assertions (NIST, AAL2, credential
 stuffing, EU_GDPR filtering). The policy gate's own retriever contract is
 exercised against its fixture corpus in
 ``gates/policy_rag/tests/integration/test_retriever.py``; this file checks
-that the real corpus is indexed and discoverable under the ``ato-reasoner``
-tenant.
+that the real corpus is indexed and discoverable as ``ato-policy``, the
+corpus ATO's registration binds.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
 from app.settings import FrameworkSettings
-from ato_reasoner.registry import ATO_REGISTRATION
+from ato_reasoner.registry import ATO_CORPUS_ID
 from policy_rag_gate.retriever import PolicyRetriever
 from policy_rag_gate.settings import PolicyRagGateSettings
 
@@ -37,7 +39,7 @@ pytestmark = pytest.mark.integration
 _PG_DSN = FrameworkSettings().postgres_dsn
 _ES_URL = PolicyRagGateSettings().elasticsearch_url
 _MODEL_NAME = "all-MiniLM-L6-v2"
-_ATO = ATO_REGISTRATION.reasoner_id
+_ATO = ATO_CORPUS_ID
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +84,7 @@ def test_dense_retrieval_returns_relevant_nist_chunks(retriever):
     this query. Internal MFA policies and FIDO2 docs rank highly as well — the
     check ensures at least one NIST document is retrieved within k=5.
     """
-    snippets = retriever.dense_search("MFA requirements AAL2", k=5, reasoner_id=_ATO)
+    snippets = retriever.dense_search("MFA requirements AAL2", k=5, corpus_id=_ATO)
 
     assert len(snippets) > 0, "Dense search returned no results — is corpus loaded?"
 
@@ -97,7 +99,7 @@ def test_dense_search_applies_jurisdiction_filter(retriever):
     snippets = retriever.dense_search(
         "authentication policy",
         k=10,
-        reasoner_id=_ATO,
+        corpus_id=_ATO,
         jurisdictions=["EU_GDPR"],
     )
     assert snippets, "No EU_GDPR chunks found — is the corpus loaded?"
@@ -109,7 +111,7 @@ def test_dense_search_applies_jurisdiction_filter(retriever):
 
 def test_dense_search_rows_carry_document_titles(retriever):
     """Chunk rows store the document title; snippets cite it, not the id."""
-    snippets = retriever.dense_search("MFA requirements AAL2", k=5, reasoner_id=_ATO)
+    snippets = retriever.dense_search("MFA requirements AAL2", k=5, corpus_id=_ATO)
     assert snippets, "Dense search returned no results — is corpus loaded?"
     for s in snippets:
         assert s.title, f"empty title on {s.document_id}"
@@ -127,45 +129,44 @@ def test_dense_search_rows_carry_document_titles(retriever):
 def test_sparse_search_finds_results_for_known_term(retriever):
     """BM25 sparse search returns results for a term present in the corpus."""
     snippets = retriever.sparse_search(
-        "credential stuffing velocity rate limit", k=5, reasoner_id=_ATO
+        "credential stuffing velocity rate limit", k=5, corpus_id=_ATO
     )
     assert len(snippets) > 0, "Sparse search returned no results — is corpus loaded?"
 
 
 def test_sparse_search_finds_exact_regulatory_identifier(retriever):
     """keyword_search analyzer enables exact match on regulatory identifiers."""
-    snippets = retriever.sparse_search("NIST-SP-800-63B", k=5, reasoner_id=_ATO)
+    snippets = retriever.sparse_search("NIST-SP-800-63B", k=5, corpus_id=_ATO)
     assert len(snippets) > 0, (
         "Sparse search found no results for NIST-SP-800-63B — "
         "check dual-analyzer mapping on policy-chunks index"
     )
 
 
-def test_sparse_search_tenant_filter_matches_hyphenated_reasoner_id(retriever):
-    """BM25 ``term`` filter on ``reasoner_id`` must match the loaded tenant.
+def test_sparse_search_corpus_filter_matches_the_hyphenated_corpus_id(retriever):
+    """BM25 ``term`` filter on ``corpus_id`` must match the loaded corpus.
 
-    Regression for DR-24: before ``reasoner_id`` was mapped as ``keyword``
-    the field was dynamically mapped as ``text``, so the hyphenated id
-    ``ato-reasoner`` was tokenized and a ``term`` filter matched nothing —
-    production sparse retrieval silently returned zero hits while the dense
-    leg masked it. With the keyword mapping, the real tenant returns hits
-    and an unknown tenant returns none.
+    The DR-24 regression, on the DR-34 key: a ``term`` filter on a field
+    dynamically mapped as ``text`` tokenizes the hyphenated id
+    ``ato-policy`` and matches nothing — sparse retrieval silently returns
+    zero hits while the dense leg masks it. With the keyword mapping, the
+    real corpus returns hits and a corpus that is not loaded returns none.
     """
     hits = retriever.sparse_search(
-        "credential stuffing velocity rate limit", k=5, reasoner_id=_ATO
+        "credential stuffing velocity rate limit", k=5, corpus_id=_ATO
     )
     assert len(hits) > 0, (
-        f"Sparse search with reasoner_id={_ATO!r} returned nothing — "
-        "is reasoner_id mapped as keyword on policy-chunks? Re-run "
-        "`make build-policy-index` (it recreates a stale index)."
+        f"Sparse search with corpus_id={_ATO!r} returned nothing — "
+        "is corpus_id mapped as keyword on policy-chunks? Re-run "
+        "`make build-policy-index-ato-reasoner` (it recreates a stale index)."
     )
 
     none = retriever.sparse_search(
         "credential stuffing velocity rate limit",
         k=5,
-        reasoner_id="no-such-reasoner",
+        corpus_id="no-such-corpus",
     )
-    assert none == [], f"Tenant filter leaked across reasoners: {none}"
+    assert none == [], f"Corpus filter leaked across corpora: {none}"
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +177,7 @@ def test_sparse_search_tenant_filter_matches_hyphenated_reasoner_id(retriever):
 def test_retrieve_pipeline_returns_k_results(retriever):
     """Full pipeline (dense → sparse → RRF → rerank stub) returns exactly k snippets."""
     snippets, path = retriever.retrieve(
-        "impossible travel geographic block", k=4, reasoner_id=_ATO
+        "impossible travel geographic block", k=4, corpus_id=_ATO
     )
 
     assert len(snippets) == 4

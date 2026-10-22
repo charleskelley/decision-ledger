@@ -21,15 +21,20 @@ Translation mapping:
         model_version         = scorer_output.scorer_version
 
     LoginEvent + ScorerOutput → GateContext (policy gate, gate_id "policy")
-        template_id           = "ato-v3"
+        template_id           = AtoSettings.template_id ("ato-v4" by default,
+                                DEFAULT_TEMPLATE_ID; "ato-v3" selectable)
         jurisdictions         = resolved from event geo (US_FEDERAL + INTERNAL default)
         risk_tier             = resolved from scorer risk score band
         template_vars         = rendered strings for each {placeholder} in
-                                ato_reasoner/prompts/ato-v3.yaml
+                                ato_reasoner/prompts/ato-v3.yaml and ato-v4.yaml
+                                (the same placeholders)
         retrieval_query       = build_ato_query(event, scorer) — the policy
                                 gate runs retrieval itself (DR-28), so the
                                 domain-owned query travels in its gate_config
-        corpus_version        = the corpus version stamp from AtoSettings
+
+        Which corpus the gate reads is ATO's binding (``ATO_REGISTRATION``:
+        ``ato-policy`` at tier 1, DR-34), not the gate context; the gate
+        records the state of the corpus itself.
 
     LoginEvent → subject (DR-32)
         native_subject        = (ato-account, account_id): the account ATO
@@ -57,6 +62,10 @@ from ato_reasoner.registry import ATO_REGISTRATION
 from ato_reasoner.retrieval_query import build_ato_query
 from core.observation import AttributionSummary, GateContext, LabelType, ReasonerContext
 from core.submission import BypassCitation, Submission, matching_bypass_rule
+
+#: The policy gate template ATO's gate context names unless told otherwise
+#: (``AtoSettings.template_id``): the conflict/gap protocol of DR-34.
+DEFAULT_TEMPLATE_ID = "ato-v4"
 
 if TYPE_CHECKING:
     from pydantic import JsonValue
@@ -170,21 +179,22 @@ def _build_gate_context(
     features: AtoFeatureVector,
     scorer: ScorerOutput,
     *,
-    corpus_version: str,
+    template_id: str,
 ) -> GateContext:
     """Translate LoginEvent + AtoFeatureVector + ScorerOutput into a GateContext.
 
     Renders each template variable as a human-readable string suitable for
     LLM prompt injection. Variable names must match the ``{placeholders}``
-    in ``ato_reasoner/prompts/ato-v3.yaml``. Also carries the retrieval query
-    and corpus version the policy gate needs, since the gate runs retrieval
+    in ``ato_reasoner/prompts/ato-v3.yaml`` and ``ato-v4.yaml``. Also carries
+    the retrieval query the policy gate needs, since the gate runs retrieval
     itself.
 
     Args:
         event: The login event.
         features: Computed ATO feature snapshot.
         scorer: XGBoost scorer output.
-        corpus_version: Version stamp of ATO's policy corpus.
+        template_id: The prompt template to render (``ato-v4``, or
+            ``ato-v3`` to reproduce the behavior before DR-34).
 
     Returns:
         Populated ``GateContext`` ready for the framework.
@@ -196,7 +206,7 @@ def _build_gate_context(
     top_signals_rendered = ", ".join(top_signal_strs) if top_signal_strs else "none"
 
     gate_config: dict[str, JsonValue] = {
-        "template_id": "ato-v3",
+        "template_id": template_id,
         "template_vars": {
             "risk_score": f"{scorer.risk_score:.3f}",
             "risk_tier": _resolve_risk_tier(scorer.risk_score),
@@ -216,7 +226,6 @@ def _build_gate_context(
         "jurisdictions": [*_resolve_jurisdictions(event)],
         "risk_tier": _resolve_risk_tier(scorer.risk_score),
         "retrieval_query": build_ato_query(event, scorer),
-        "corpus_version": corpus_version,
     }
     return GateContext(gate_id="policy", gate_config=gate_config)
 
@@ -226,7 +235,7 @@ def build_submission(
     features: AtoFeatureVector,
     scorer: ScorerOutput,
     *,
-    corpus_version: str,
+    template_id: str = DEFAULT_TEMPLATE_ID,
     registration: ReasonerRegistration = ATO_REGISTRATION,
 ) -> Submission:
     """Assemble the ATO ``Submission`` for one scored login.
@@ -244,8 +253,8 @@ def build_submission(
             ``scenario_tag`` stripped already.
         features: Computed ATO feature snapshot from the features layer.
         scorer: XGBoost scorer output from the scorer layer.
-        corpus_version: Version stamp of ATO's policy corpus
-            (``AtoSettings.corpus_version``), recorded by the policy gate.
+        template_id: The policy gate prompt template to name
+            (``AtoSettings.template_id``).
         registration: The registration whose bypass rules pick the mode;
             ATO's own by default.
 
@@ -257,9 +266,7 @@ def build_submission(
         ``raw_event``.
     """
     reasoner_context = _build_reasoner_context(features, scorer)
-    gate_context = _build_gate_context(
-        event, features, scorer, corpus_version=corpus_version
-    )
+    gate_context = _build_gate_context(event, features, scorer, template_id=template_id)
     rule = matching_bypass_rule(registration, reasoner_context)
     return Submission(
         reasoner_id=registration.reasoner_id,

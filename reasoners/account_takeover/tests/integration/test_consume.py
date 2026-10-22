@@ -50,6 +50,7 @@ from ato_reasoner.settings import AtoSettings
 from core.actions import DecisionAction
 from core.exceptions import LedgerError
 from core.gate import GateOutput, GateVerdict
+from policy_rag_gate.corpus import PolicyBindingConfig
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -88,6 +89,8 @@ class _ScriptedPolicyPlugin:
     kind = GateKind.LLM
     deterministic = False
     config_model: type[BaseModel] | None = None
+    # ATO's binding names its corpus (DR-34): validated as the real plugin does.
+    binding_config_model: type[BaseModel] | None = PolicyBindingConfig
 
     def build(self, framework: Any) -> _ScriptedPolicyGate:
         return _ScriptedPolicyGate()

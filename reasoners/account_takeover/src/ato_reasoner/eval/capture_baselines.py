@@ -10,6 +10,13 @@ Re-run trigger: any time the gate model or prompt template version changes,
 re-run this script and commit the regenerated YAML in the same change.
 Stale fixtures across model swaps produce false-positive eval failures.
 
+A gate output from a template that renders evidence by authority tier
+(DR-34) also becomes an authority case
+(``datasets/authority/golden_outputs.yaml``): the corpora and tiers of the
+passages the gate rendered, the corpus the verdict named as governing, and
+the documents it cites as the passages on point. The gate's eval reports
+the authority-violation rate over them.
+
 Prerequisites:
     docker compose up -d
     make build-policy-index-ato-reasoner   # the policy gate's stores seeded
@@ -52,6 +59,9 @@ _CAPTURE_SCENARIOS: list[str] = [
 _OUTPUT_PATH = (
     Path(__file__).parent / "datasets" / "faithfulness" / "golden_outputs.yaml"
 )
+_AUTHORITY_PATH = (
+    Path(__file__).parent / "datasets" / "authority" / "golden_outputs.yaml"
+)
 
 
 def _build_events_for_scenario(scenario_id: str, *, count: int = 5) -> list:
@@ -93,7 +103,7 @@ def _bundle_to_case(scenario_id: str, bundle) -> dict | None:
         gate_output.evidence_snapshot, strict=False
     )
 
-    contexts = [s.text for s in snapshot.retrieval_results]
+    contexts = [c.text for c in snapshot.contexts]
     cited_snippets = [c.snippet for c in extra.citations]
 
     return {
@@ -104,9 +114,39 @@ def _bundle_to_case(scenario_id: str, bundle) -> dict | None:
     }
 
 
-async def _capture() -> list[dict]:
-    """Drive every capture scenario and collect faithfulness cases."""
+def _bundle_to_authority_case(scenario_id: str, bundle) -> dict | None:
+    """Translate a tiered gate output into an authority case.
+
+    Returns None unless the policy gate ran a template that renders evidence
+    by tier and returned a verdict: only that verdict names a governing
+    corpus. The documents its citations name stand for the passages on
+    point.
+    """
+    policy = bundle.gate(POLICY_GATE_ID)
+    gate_output = policy.output if policy is not None else None
+    if gate_output is None or gate_output.verdict is None:
+        return None
+    snapshot = PolicyGateSnapshot.model_validate(
+        gate_output.evidence_snapshot, strict=False
+    )
+    if snapshot.evidence_layout != "tiered_blocks":
+        return None
+    extra = PolicyGateExtra.model_validate(gate_output.extra, strict=False)
+    return {
+        "case_id": f"a-cap-{scenario_id}",
+        "governing_corpus_id": extra.governing_corpus_id,
+        "contexts": [
+            {"corpus_id": c.corpus_id, "tier": c.tier, "document_id": c.document_id}
+            for c in snapshot.contexts
+        ],
+        "on_point_document_ids": sorted({c.policy_id for c in extra.citations}),
+    }
+
+
+async def _capture() -> tuple[list[dict], list[dict]]:
+    """Drive every capture scenario; collect faithfulness and authority cases."""
     cases: list[dict] = []
+    authority_cases: list[dict] = []
     driver = PipelineDriver()
     try:
         for scenario_id in _CAPTURE_SCENARIOS:
@@ -126,11 +166,15 @@ async def _capture() -> list[dict]:
             # a recorded band. The "latest verdict-bearing bundle" captures the
             # most recent semantically valid case.
             captured_case: dict | None = None
+            authority_case: dict | None = None
             for event in events:
                 bundle = await driver.decide(event)
                 case = _bundle_to_case(scenario_id, bundle)
                 if case is not None:
                     captured_case = case
+                    authority_case = _bundle_to_authority_case(scenario_id, bundle)
+            if authority_case is not None:
+                authority_cases.append(authority_case)
             if captured_case is None:
                 print(
                     f"  {scenario_id}: skipped (recorded or no verdict)",
@@ -147,7 +191,7 @@ async def _capture() -> list[dict]:
             )
     finally:
         driver.close()
-    return cases
+    return cases, authority_cases
 
 
 def _merge_cases(existing: list[dict], captured: list[dict]) -> list[dict]:
@@ -204,9 +248,35 @@ def _write_yaml(cases: list[dict], path: Path) -> None:
     path.write_text(header + body, encoding="utf-8")
 
 
+def _write_authority_yaml(cases: list[dict], path: Path) -> None:
+    """Merge new authority captures into the authority dataset YAML."""
+    existing: list[dict] = []
+    if path.exists():
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        existing = raw.get("cases", []) or []
+    header = (
+        "# Authority golden outputs (DR-34).\n"
+        "#\n"
+        "# Live-captured by ato_reasoner/eval/capture_baselines.py\n"
+        "# (make capture-baselines-account_takeover) from gate outputs of a\n"
+        "# template that renders evidence by authority tier. Each case: the\n"
+        "# corpora and tiers of the passages the gate rendered, the corpus the\n"
+        "# verdict named as governing, and the documents it cites (the\n"
+        "# passages on point). The gate's eval reports the rate of verdicts\n"
+        "# naming a lower tier than a passage on point\n"
+        "# (policy_rag_gate/eval/authority.py). ATO binds one corpus at tier\n"
+        "# 1, so its cases cannot violate authority; they keep the metric's\n"
+        "# path exercised.\n\n"
+    )
+    payload = {"cases": _merge_cases(existing, cases)}
+    body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True, width=80)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(header + body, encoding="utf-8")
+
+
 def main() -> int:
     """Run the capture and write the YAML; exit 0 on success."""
-    cases = asyncio.run(_capture())
+    cases, authority_cases = asyncio.run(_capture())
     if not cases:
         print(
             "error: no cases captured (every scenario recorded or no verdict). "
@@ -219,6 +289,12 @@ def main() -> int:
         f"wrote {len(cases)} faithfulness cases to {_OUTPUT_PATH}",
         file=sys.stderr,
     )
+    if authority_cases:
+        _write_authority_yaml(authority_cases, _AUTHORITY_PATH)
+        print(
+            f"wrote {len(authority_cases)} authority cases to {_AUTHORITY_PATH}",
+            file=sys.stderr,
+        )
     return 0
 
 

@@ -1,13 +1,15 @@
 """Unit tests for the eval driver's gate wiring and the baseline capture's extraction.
 
-Since DR-28 the policy gate owns its retriever, prompt registry, LLM
-client, and per-reasoner profiles, so the eval ``PipelineDriver`` reaches
-them through the composed policy gate and injects faults by swapping in a
-policy gate built around the failing piece. ``capture_baselines`` reads the
-gate's rationale, citations, and retrieved contexts from its ``extra`` /
-``evidence_snapshot``. All of it runs here without infrastructure: the driver
-is built without ``__init__`` around stub services, a stub retriever, and
-ATO's real prompt templates.
+Since DR-28 the policy gate owns its retrieval providers (DR-34), prompt
+registry, LLM client, and per-reasoner profiles, so the eval
+``PipelineDriver`` reaches them through the composed policy gate and injects
+faults by swapping in a policy gate built around the failing piece.
+``capture_baselines`` reads the gate's rationale, citations, and retrieved
+contexts from its ``extra`` / ``evidence_snapshot``, and an authority case
+from a tiered gate output. All of it runs here without infrastructure: the
+driver is built without ``__init__`` around stub services, a stub retrieval
+provider, and ATO's real prompt templates and registration (its binding
+names ``ato-policy``).
 
 Per project rules no LLM response is mocked: the policy gate's client either
 fails the test if called or raises (the robustness fault-injection path), and
@@ -32,7 +34,10 @@ from app.client import LocalClient
 from app.gates import ComposedGate
 from app.plugin import FrameworkServices
 from app.reasoner_registry import LiveReasonerRegistry
-from ato_reasoner.eval.capture_baselines import _bundle_to_case
+from ato_reasoner.eval.capture_baselines import (
+    _bundle_to_authority_case,
+    _bundle_to_case,
+)
 from ato_reasoner.eval.driver import PipelineDriver
 from ato_reasoner.events import AuthMethod, AuthOutcome, Geolocation, LoginEvent
 from ato_reasoner.features import AtoFeatureVector, WindowSpec
@@ -43,16 +48,19 @@ from core.actions import DecisionAction
 from core.exceptions import LedgerError
 from core.gate import GateOutput, GateVerdict
 from policy_rag_gate.config import ReasonerProfile
+from policy_rag_gate.corpus import CorpusRef, CorpusState
 from policy_rag_gate.gate import PolicyGate
 from policy_rag_gate.models import (
     Citation,
     PolicyGateExtra,
     PolicyGateSnapshot,
     PromptSnapshot,
+    RetrievedContext,
+    content_hash,
 )
-from policy_rag_gate.models.snippet import RetrievedSnippet
 from policy_rag_gate.plugin import PolicyGatePlugin
 from policy_rag_gate.prompt_registry import YamlPromptRegistry
+from policy_rag_gate.providers import ProviderRegistry, ProviderResult
 
 # ---------------------------------------------------------------------------
 # Fixtures and doubles
@@ -115,26 +123,54 @@ def _gate_routed_score() -> ScorerOutput:
     )
 
 
-def _snippet(score: float = 0.7) -> RetrievedSnippet:
-    return RetrievedSnippet(
+_TEXT = "Verifiers SHALL implement rate limiting."
+
+
+def _snippet(
+    score: float = 0.7, *, corpus_id: str = "ato-policy", tier: int = 1, rank: int = 1
+) -> RetrievedContext:
+    return RetrievedContext(
+        corpus_id=corpus_id,
+        provider="reference",
+        tier=tier,
         document_id="NIST-800-63B",
         title="Digital Identity Guidelines",
         version="3",
         jurisdiction="US_FEDERAL",
         section_path="5.2.2",
-        text="Verifiers SHALL implement rate limiting.",
-        relevance_score=score,
-        retrieval_path="reranked",
+        text=_TEXT,
+        content_hash=content_hash(_TEXT),
+        rank=rank,
+        scores={"rerank": score},
+        provenance_level="pinned_version",
     )
 
 
 class _StubRetriever:
+    """A retrieval provider holding any corpus asked for, one passage each."""
+
+    provider_id = "reference"
+
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def retrieve(self, **kwargs: Any) -> tuple[list[RetrievedSnippet], str]:
-        self.calls.append(kwargs)
-        return [_snippet()], "rrf_only"
+    def describe(self, corpus: CorpusRef) -> CorpusState:
+        return CorpusState(
+            corpus_id=corpus.corpus_id,
+            provider="reference",
+            provider_version="stub",
+            state_marker="stub",
+            provenance_level="pinned_version",
+        )
+
+    def retrieve(self, query: str, corpus: CorpusRef, **kwargs: Any) -> ProviderResult:
+        self.calls.append({"query": query, "corpus_id": corpus.corpus_id, **kwargs})
+        return ProviderResult(
+            state=self.describe(corpus),
+            contexts=(_snippet(corpus_id=corpus.corpus_id, tier=corpus.tier),),
+            ranking_requested="reranked",
+            ranking_applied="rrf_only",
+        )
 
 
 class _ForbiddenClient:
@@ -165,7 +201,7 @@ def _policy_gate(retriever: _StubRetriever) -> PolicyGate:
     return PolicyGate(
         client=_ForbiddenClient(),  # type: ignore[arg-type]
         prompt_registry=YamlPromptRegistry([PLUGIN.prompts_dir]),
-        retriever=retriever,  # type: ignore[arg-type]
+        providers=ProviderRegistry.of(retriever),  # type: ignore[arg-type]
     )
 
 
@@ -198,7 +234,7 @@ def _driver(gates: dict[str, Any]) -> PipelineDriver:
     driver._services = AtoServices(
         feature_svc=feature_svc,
         scorer=scorer,
-        corpus_version="corpus-test",
+        template_id="ato-v4",
         redis=MagicMock(),
     )
     driver._framework = FrameworkServices(
@@ -270,7 +306,7 @@ def test_swapping_in_a_policy_gate_keeps_the_deployment_mandate():
 
 def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
     # The composed gate lets ATO use only ato-v1; the swapped-in faulty gate
-    # must enforce the same profile, so the assembler's ato-v3 context is
+    # must enforce the same profile, so the assembler's ato-v4 context is
     # refused at intake instead of slipping through the fault-injection run.
     profiles = {
         ATO_REGISTRATION.reasoner_id: ReasonerProfile(
@@ -281,12 +317,12 @@ def test_a_fault_injected_gate_keeps_the_composed_gates_profiles():
     gate = PolicyGate(
         client=_ForbiddenClient(),  # type: ignore[arg-type]
         prompt_registry=YamlPromptRegistry([PLUGIN.prompts_dir]),
-        retriever=_StubRetriever(),  # type: ignore[arg-type]
+        providers=ProviderRegistry.of(_StubRetriever()),  # type: ignore[arg-type]
         profiles=profiles,
     )
     driver = _driver({"policy": _composed(gate)})
 
-    with pytest.raises(LedgerError, match="'ato-v3' is not a prompt") as err:
+    with pytest.raises(LedgerError, match="'ato-v4' is not a prompt") as err:
         asyncio.run(driver.run_with_forced_fallback(_event(), fallback_kind="llm_5xx"))
 
     assert err.value.code == "GATE_CONFIG_UNAUTHORIZED"
@@ -307,8 +343,11 @@ def test_forced_llm_5xx_runs_retrieval_then_holds_on_the_failed_call():
     )
 
     assert action == DecisionAction.HOLD
+    # The gate retrieved from the corpus ATO's binding names, then failed
+    # on the LLM call.
     (call,) = retriever.calls
-    assert call["reasoner_id"] == ATO_REGISTRATION.reasoner_id
+    assert call["corpus_id"] == "ato-policy"
+    assert call["k"] == 5
     [bundle] = _written(driver)
     policy = bundle.gate("policy")
     assert policy.status == "ran"
@@ -386,23 +425,24 @@ def test_run_reports_the_rationale_from_the_policy_gates_extra():
 # ---------------------------------------------------------------------------
 
 
-def _gate_path_bundle(*, verdict: bool = True) -> Any:
+def _gate_path_bundle(*, verdict: bool = True, layout: str = "tiered_blocks") -> Any:
     citation = Citation(
         policy_id="NIST-800-63B", snippet="SHALL rate limit", relevance="why"
     )
     snapshot = PolicyGateSnapshot(
         retrieval_query="rate limiting",
+        corpus_queries=[],
         # A raw cross-encoder logit can be negative; capture must cope.
-        retrieval_results=[_snippet(), _snippet(score=-4.32)],
-        retrieval_path="reranked",
+        contexts=[_snippet(), _snippet(score=-4.32, rank=2)],
+        evidence_layout=layout,
+        dedup_merged=0,
         index_version="unknown",
         model_version="gpt-test",
-        prompt_template_id="ato-v3",
-        prompt_template_version="3.0.0",
-        corpus_version="ato-v1",
+        prompt_template_id="ato-v4",
+        prompt_template_version="4.0.0",
         rendered_prompt="rendered",
         prompt_snapshot=PromptSnapshot(
-            template_id="ato-v3", version="3.0.0", template_text="t"
+            template_id="ato-v4", version="4.0.0", template_text="t"
         ),
         template_vars={},
     )
@@ -425,6 +465,9 @@ def _gate_path_bundle(*, verdict: bool = True) -> Any:
         extra=PolicyGateExtra(
             rationale="Rate limits apply." if verdict else None,
             citations=[citation] if verdict else [],
+            governing_corpus_id="ato-policy" if verdict else None,
+            conflict_detected=False if verdict else None,
+            evidence_sufficient=True if verdict else None,
         ).model_dump(mode="json"),
     )
     return _bundle_with_policy_output(output)
@@ -461,3 +504,26 @@ def test_capture_reads_rationale_citations_and_contexts_from_the_gate(round_trip
 def test_capture_skips_recorded_and_verdictless_bundles():
     assert _bundle_to_case("x", _bundle_with_policy_output(None)) is None
     assert _bundle_to_case("x", _gate_path_bundle(verdict=False)) is None
+
+
+def test_a_tiered_gate_output_becomes_an_authority_case():
+    case = _bundle_to_authority_case("device_fingerprint_anomaly", _gate_path_bundle())
+
+    assert case == {
+        "case_id": "a-cap-device_fingerprint_anomaly",
+        "governing_corpus_id": "ato-policy",
+        "contexts": [
+            {"corpus_id": "ato-policy", "tier": 1, "document_id": "NIST-800-63B"},
+            {"corpus_id": "ato-policy", "tier": 1, "document_id": "NIST-800-63B"},
+        ],
+        "on_point_document_ids": ["NIST-800-63B"],
+    }
+
+
+def test_only_a_tiered_verdict_becomes_an_authority_case():
+    assert (
+        _bundle_to_authority_case("x", _gate_path_bundle(layout="numbered_list"))
+        is None
+    )
+    assert _bundle_to_authority_case("x", _gate_path_bundle(verdict=False)) is None
+    assert _bundle_to_authority_case("x", _bundle_with_policy_output(None)) is None
