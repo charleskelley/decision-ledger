@@ -79,6 +79,14 @@ Scans and build-metadata checks codify those rules:
   where a gate reads the assets of a reasoner registered without a plugin
   (the RAG policy gate's asset root, in any spelling) or the policy gate's
   per-reasoner profile.
+- **Retrieval providers** (DR-34): a gate binding names the corpora the RAG
+  policy gate reads, and the gate retrieves through its own providers. No
+  framework file names that vocabulary (corpus references, provider seam,
+  evidence contract, provenance levels, conflict/gap verdict fields, tiered
+  layout) in any spelling, and no framework identifier is built on
+  ``corpus``, ``provider``, ``tier``, or ``policy`` beyond enforcement's
+  numbered tiers and a listed exception per file that must stay needed. No
+  reasoner or integration member's source imports the gate's provider seam.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -202,6 +210,94 @@ POLICY_GATE_TOKENS = re.compile(
 #: gate whether it accepts a binding (``BindingValidator``) and whether it
 #: serves a reasoner (``ReasonerScope``); where the gate looks is its own.
 GATE_ASSET_LOCATION = re.compile(r"assets?[\s_-]*root", re.IGNORECASE)
+
+#: The RAG policy gate's retrieval vocabulary (DR-34): its corpus references
+#: and their state and queries, the binding configuration that names them,
+#: the provider seam and the evidence contract providers return, provenance
+#: levels, the conflict/gap protocol's verdict fields, and the tiered
+#: evidence layout. Matched case-insensitively with any separator (or none),
+#: so prose ("corpus id", "provenance level") counts as well as identifiers.
+#: A corpus is a reference a gate binding names; the framework stores a
+#: gate's evidence as ``EvidenceRef`` and its snapshot opaquely, and never
+#: learns what a corpus, a provider, or an authority tier is.
+RETRIEVAL_PROVIDER_TOKENS = re.compile(
+    r"corpus[-_ ]?(?:ids?|refs?|states?|quer(?:y|ies))\b|k[-_ ]?per[-_ ]?corpus|"
+    r"corpus[-_ ]?(?:referen|identif)\w*|text[-_ ]?only|evidence[-_ ]?contracts?|"
+    r"governing[-_ ]?corpus|min[-_ ]?provenance|provenance[-_ ]?levels?|"
+    r"pinned[-_ ]?version|uri[-_ ]?and[-_ ]?hash|"
+    r"retrieval[-_ ]?providers?|document[-_ ]?fetchers?|provider[-_ ]?results?|"
+    r"provider[-_ ]?chunk[-_ ]?ids?|retrieved[-_ ]?contexts?|document[-_ ]?blobs?|"
+    r"policy[-_ ]?binding[-_ ]?config|conflict[-_ ]?detected|"
+    r"evidence[-_ ]?sufficient|evidence[-_ ]?layout|tiered[-_ ]?blocks?|"
+    r"dedup[-_ ]?merged|ranking[-_ ]?(?:requested|applied)|"
+    r"authority[-_ ]?(?:tiers?|violations?)",
+    re.IGNORECASE,
+)
+
+#: An identifier-shaped word built on ``corpus``, ``provider``, ``tier``, or
+#: ``policy`` (DR-34): ``corpus_id``, ``CorpusRef``, ``provider_id``,
+#: ``authority_tier``, ``policy_snippets``. The plain words are prose the
+#: framework uses for its own concepts (enforcement tiers, an LLM provider,
+#: "replay reads no corpus"); compounds are a gate's vocabulary.
+GATE_VOCABULARY_IDENTIFIER = re.compile(
+    r"[A-Za-z0-9_]*(?:corpus|corpora|provider|tier|polic)[A-Za-z0-9_]*",
+    re.IGNORECASE,
+)
+_GATE_VOCABULARY_PLAIN_WORDS = frozenset(
+    {
+        "corpus",
+        "corpora",
+        "provider",
+        "providers",
+        "tier",
+        "tiers",
+        "policy",
+        "policies",
+        "frontier",
+    }
+)
+#: Enforcement's own numbered tiers (``TIER1_SCHEMA_FAILURE``,
+#: ``tier3_novel_entity``, ``tier6_default``): framework vocabulary.
+_ENFORCEMENT_TIER = re.compile(r"tier\d", re.IGNORECASE)
+
+#: Compound identifiers the framework had before DR-34, by file. Each must
+#: stay needed. ``corpus_dir`` is the ``ReasonerPlugin`` attribute through
+#: which a plugin publishes the assets a retrieving gate reads (DR-26);
+#: ``gate_tier_fired`` and ``entity_tier`` are enforcement's and the SLA
+#: default's own words.
+GATE_VOCABULARY_IDENTIFIER_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "app/plugin.py": frozenset({"corpus_dir"}),
+    "app/plugins.py": frozenset({"corpus_dir"}),
+    "app/enforcement/resolver.py": frozenset({"gate_tier_fired"}),
+    "core/resolution/sla_default.py": frozenset({"entity_tier"}),
+}
+
+#: The policy gate's provider seam (DR-34). A reasoner reaches a gate only
+#: through its submission's ``GateContext``, and corpora only through its
+#: registration's binding; no reasoner or integration member imports it.
+POLICY_GATE_PROVIDERS_MODULE = "policy_rag_gate.providers"
+POLICY_GATE_PROVIDERS_DIR = (
+    REPO_ROOT / "gates" / "policy_rag" / "src" / "policy_rag_gate" / "providers"
+)
+#: The seam's public names. Other modules of the gate import some of them
+#: (``gate.py`` imports ``ProviderResult``), so importing one by name from any
+#: ``policy_rag_gate`` module is importing the seam too.
+POLICY_GATE_PROVIDER_SEAM = frozenset(
+    {
+        "CorpusNotLoadedError",
+        "PROVIDER_GROUP",
+        "ProviderContractError",
+        "ProviderPlugin",
+        "ProviderRegistry",
+        "ProviderResult",
+        "ProviderServices",
+        "ReferenceProvider",
+        "ReferenceProviderPlugin",
+        "RetrievalProvider",
+        "discover_provider_plugins",
+        "open_reference_provider",
+    }
+)
 
 #: Where the reference policy gate lived inside the framework trees until
 #: Phase 1b moved it into ``gates/policy_rag/`` (directories end with ``/``).
@@ -975,6 +1071,137 @@ def test_framework_names_no_gate_asset_location():
     )
 
 
+# ---------------------------------------------------------------------------
+# Retrieval providers — corpus references, provider seam, and evidence
+# contract stay inside the policy gate (DR-34)
+# ---------------------------------------------------------------------------
+
+
+def test_framework_names_no_retrieval_provider_vocabulary():
+    """No framework file names the policy gate's retrieval vocabulary (DR-34).
+
+    A reasoner's gate binding names the corpora the RAG policy gate reads
+    (corpus references with an authority tier and a minimum provenance
+    level), and the gate retrieves through providers that return evidence
+    under a contract of its own. All of it is the gate member's: the
+    framework stores the binding's configuration as opaque JSON, the gate's
+    evidence as ``EvidenceRef``, and its snapshot verbatim.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in RETRIEVAL_PROVIDER_TOKENS.finditer(text)})
+        if hits:
+            offenders.append((_rel(path), hits))
+    assert not offenders, (
+        "framework files name the policy gate's retrieval vocabulary (it "
+        f"belongs to the gate member): {offenders}"
+    )
+
+
+def test_framework_builds_no_identifier_on_gate_vocabulary():
+    """No framework identifier is built on corpus, provider, tier, or policy.
+
+    The plain words stay (enforcement has tiers, an LLM client has a
+    provider, replay "reads no corpus"); a compound such as ``corpus_id``,
+    ``provider_id``, ``authority_tier``, or ``policy_snippets`` is a gate's
+    vocabulary leaking in. Enforcement's numbered tiers are its own, and the
+    identifiers that predate DR-34 are listed exceptions.
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for path in _scan_files():
+        rel = _rel(path)
+        allowed = GATE_VOCABULARY_IDENTIFIER_EXCEPTIONS.get(rel, frozenset())
+        hits = sorted(
+            {
+                word
+                for m in GATE_VOCABULARY_IDENTIFIER.finditer(
+                    path.read_text(encoding="utf-8")
+                )
+                if (word := m.group(0)).lower() not in _GATE_VOCABULARY_PLAIN_WORDS
+                and not _ENFORCEMENT_TIER.search(word)
+                and word not in allowed
+            }
+        )
+        if hits:
+            offenders.append((rel, hits))
+    assert not offenders, (
+        "framework identifiers are built on a gate's vocabulary (corpus, "
+        f"provider, tier, policy): {offenders}"
+    )
+
+
+def test_every_gate_vocabulary_exception_is_still_needed():
+    """An exception that no longer matches anything is stale and must go."""
+    stale = [
+        f"{identifier} in {rel}"
+        for rel, identifiers in GATE_VOCABULARY_IDENTIFIER_EXCEPTIONS.items()
+        for identifier in sorted(identifiers)
+        if not re.search(
+            rf"(?<![A-Za-z0-9_]){identifier}(?![A-Za-z0-9_])",
+            (REPO_ROOT / rel).read_text(encoding="utf-8"),
+        )
+    ]
+    assert not stale, f"stale gate-vocabulary exceptions: {stale}"
+
+
+def _imported_names(path: Path) -> set[str]:
+    """Every absolutely imported module of ``path``, ``from x import y`` as ``x.y``."""
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return modules
+
+
+def test_no_reasoner_or_integration_member_imports_the_policy_gates_providers():
+    """Reasoners never talk to retrieval providers (DR-34).
+
+    A reasoner names the corpora it wants in its registration's binding and
+    sends its query in a submission; the gate fans out to the providers. No
+    reasoner or integration member's source imports the gate's provider seam
+    (a member's tests may build stand-in providers for the gate they drive).
+    """
+    offenders: list[tuple[str, list[str]]] = []
+    for member in sorted(
+        [*REASONERS_DIR.glob("*/src"), *INTEGRATIONS_DIR.glob("*/src")]
+    ):
+        for path in _py_files(member):
+            hits = sorted(
+                module
+                for module in _imported_names(path)
+                if module == POLICY_GATE_PROVIDERS_MODULE
+                or module.startswith(f"{POLICY_GATE_PROVIDERS_MODULE}.")
+                or (
+                    module.startswith("policy_rag_gate.")
+                    and module.rsplit(".", 1)[-1] in POLICY_GATE_PROVIDER_SEAM
+                )
+            )
+            if hits:
+                offenders.append((_rel(path), hits))
+    assert not offenders, (
+        f"members import the policy gate's retrieval providers: {offenders}"
+    )
+
+
+def test_every_provider_seam_name_is_defined_by_the_seam():
+    """The seam's name list cannot go stale: each name is the seam's own."""
+    defined: set[str] = set()
+    for path in _py_files(POLICY_GATE_PROVIDERS_DIR):
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.ClassDef | ast.FunctionDef):
+                defined.add(node.name)
+            elif isinstance(node, ast.Assign):
+                defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                defined.add(node.target.id)
+    missing = sorted(POLICY_GATE_PROVIDER_SEAM - defined)
+    assert not missing, f"not defined by the provider seam: {missing}"
+
+
 def test_framework_ddl_creates_no_extension():
     """The framework's Postgres needs no extension (DR-27).
 
@@ -1209,7 +1436,8 @@ def test_every_reasoner_member_declares_its_own_entry_points():
     Each ``reasoners/<domain>/pyproject.toml`` declares one
     ``decisionledger.reasoners`` and one ``decisionledger.eval_adapters``
     entry, and both targets resolve inside the member's own import package
-    (the single package its wheel ships).
+    (the single package its wheel ships). It declares no other group: a
+    reasoner does not publish a gate's plugins (a retrieval provider, DR-34).
     """
     members = _member_pyprojects(REASONERS_DIR)
     assert members, "no reasoner workspace members found under reasoners/*"
@@ -1222,6 +1450,11 @@ def test_every_reasoner_member_declares_its_own_entry_points():
             problems.append(f"{rel}: wheel must ship exactly one src/ package")
             continue
         eps = data["project"].get("entry-points", {})
+        foreign = sorted(
+            set(eps) - {"decisionledger.reasoners", "decisionledger.eval_adapters"}
+        )
+        if foreign:
+            problems.append(f"{rel}: declares entry-point groups {foreign}")
         for group in ("decisionledger.reasoners", "decisionledger.eval_adapters"):
             entries = eps.get(group, {})
             if len(entries) != 1:
@@ -1238,7 +1471,9 @@ def test_every_gate_member_declares_its_own_gate_entry_point():
 
     The ``decisionledger.gates`` entry targets the member's own import
     package, and a gate member declares no reasoner or eval-adapter entry
-    point.
+    point. A gate may own entry-point groups of its own, named under its
+    package (the RAG policy gate's ``policy_rag_gate.providers``, DR-34),
+    whose targets stay inside that package.
     """
     members = _member_pyprojects(GATES_DIR)
     assert members, "no gate workspace members found under gates/*"
@@ -1251,9 +1486,19 @@ def test_every_gate_member_declares_its_own_gate_entry_point():
             problems.append(f"{rel}: wheel must ship exactly one src/ package")
             continue
         eps = data["project"].get("entry-points", {})
-        if set(eps) != {"decisionledger.gates"}:
-            problems.append(f"{rel}: entry-point groups must be exactly gates: {eps}")
+        own_groups = {group for group in eps if group.startswith(f"{package}.")}
+        if set(eps) - own_groups != {"decisionledger.gates"}:
+            problems.append(
+                f"{rel}: entry-point groups must be exactly gates, plus groups "
+                f"of the gate's own under {package}.: {eps}"
+            )
             continue
+        problems.extend(
+            f"{rel}: {group} -> {target} is outside {package}"
+            for group in sorted(own_groups)
+            for target in eps[group].values()
+            if not target.startswith(f"{package}.")
+        )
         entries = eps["decisionledger.gates"]
         if len(entries) != 1:
             problems.append(
