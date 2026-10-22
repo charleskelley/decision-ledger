@@ -1,0 +1,35 @@
+# Authority golden outputs (DR-34).
+#
+# Live-captured by ato_reasoner/eval/capture_baselines.py
+# (make capture-baselines-account_takeover) from gate outputs of a
+# template that renders evidence by authority tier. Each case: the
+# corpora and tiers of the passages the gate rendered, the corpus the
+# verdict named as governing, and the documents it cites (the
+# passages on point). The gate's eval reports the rate of verdicts
+# naming a lower tier than a passage on point
+# (policy_rag_gate/eval/authority.py). ATO binds one corpus at tier
+# 1, so its cases cannot violate authority; they keep the metric's
+# path exercised.
+
+cases:
+- case_id: a-cap-device_fingerprint_anomaly
+  governing_corpus_id: ato-policy
+  contexts:
+  - corpus_id: ato-policy
+    tier: 1
+    document_id: INT-DEVICE-FP-V1
+  - corpus_id: ato-policy
+    tier: 1
+    document_id: FIDO2-WEBAUTHN-CRED
+  - corpus_id: ato-policy
+    tier: 1
+    document_id: INT-DEVICE-FP-V1
+  - corpus_id: ato-policy
+    tier: 1
+    document_id: INT-DEVICE-FP-V1
+  - corpus_id: ato-policy
+    tier: 1
+    document_id: INT-NOVEL-ENTITY-V1
+  on_point_document_ids:
+  - INT-DEVICE-FP-V1
+  - INT-NOVEL-ENTITY-V1
