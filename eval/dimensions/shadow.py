@@ -172,6 +172,7 @@ class ShadowDimension:
         )
 
         def _request(gate_id: str) -> GateRequest:
+            binding = registration.binding(gate_id)
             return GateRequest(
                 decision_id=bundle.decision_id,
                 submission=gated,
@@ -179,6 +180,7 @@ class ShadowDimension:
                 or GateContext(gate_id=gate_id),
                 budget_ms=self._budget_ms,
                 identity=bundle.identity,
+                binding_config=dict(binding.config) if binding is not None else {},
             )
 
         shadow_records = await run_gate_set(

@@ -283,6 +283,8 @@ async def decide(
         else ()
     )
 
+    binding_configs = {binding.gate_id: binding.config for binding in gate_set}
+
     def _request(gate_id: str) -> GateRequest:
         return GateRequest(
             decision_id=decision_id,
@@ -290,6 +292,7 @@ async def decide(
             gate_context=contexts[gate_id],
             budget_ms=gate_budget_ms,
             identity=subject,
+            binding_config=dict(binding_configs.get(gate_id, {})),
         )
 
     mandatory = [b for b in gate_set if b.mandatory]

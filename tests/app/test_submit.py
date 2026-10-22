@@ -491,6 +491,50 @@ async def test_the_gate_receives_a_request_built_from_the_decision(gated_submiss
     assert request.identity.entity_id == scripted.entity_id
 
 
+async def test_the_gate_receives_its_bindings_config_from_the_registration(
+    gated_submission,
+):
+    # DR-33/DR-34: the gate reads the binding it admitted from every request,
+    # so a decision runs under the binding its registration version names.
+    config = {"label": "from-the-registration", "depth": [1, 2]}
+    registry = _registry(
+        _with_gates(GateBinding(gate_id="fake", config=config)),
+    )
+    gates = _compose(FakeGatePlugin())
+    await _run(_scripted(gated_submission), gates=gates, registry=registry)
+    [request] = _gate(gates).requests
+    assert request.binding_config == config
+
+
+async def test_a_deployment_mandate_keeps_the_bindings_config_for_the_gate(
+    gated_submission,
+):
+    registry = _registry(
+        _with_gates(GateBinding(gate_id="fake", config={"label": "kept"})),
+    )
+    gates = _compose(FakeGatePlugin(), mandatory=("fake",))
+    bundle = await _run(_scripted(gated_submission), gates=gates, registry=registry)
+    [record] = bundle.gates
+    assert record.mandatory is True
+    [request] = _gate(gates).requests
+    assert request.binding_config == {"label": "kept"}
+
+
+async def test_a_mandated_gate_the_reasoner_does_not_bind_gets_no_config(submission):
+    lookup = FakeLookupGatePlugin(listed={})
+    registry = _registry(
+        _with_gates(GateBinding(gate_id="fake", config={"label": "fake's"})),
+    )
+    gates = _compose(FakeGatePlugin(), lookup, mandatory=("fake-lookup",))
+    await _run(
+        _contexts(submission, GateContext(gate_id="fake")),
+        gates=gates,
+        registry=registry,
+    )
+    [request] = _gate(gates, "fake-lookup").requests
+    assert request.binding_config == {}
+
+
 async def test_the_gate_budget_can_be_set_by_the_caller(gated_submission):
     gates = _compose(FakeGatePlugin())
     await _run(gated_submission, gates=gates, gate_budget_ms=1_234)
