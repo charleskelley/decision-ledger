@@ -1,7 +1,7 @@
 -- =============================================================================
 -- RAG policy gate — PostgreSQL initialization (gate-owned DDL)
--- Applied idempotently by the gate on every build and by its corpus loader
--- before every load (policy_rag_gate/schema.py).
+-- Applied idempotently by the reference retrieval provider when it is built
+-- and by the corpus loader before every load (policy_rag_gate/schema.py).
 --
 -- The gate keeps its tables in its own schema, `policy_rag`, inside the
 -- framework's database. The framework's DDL creates nothing for the gate,
