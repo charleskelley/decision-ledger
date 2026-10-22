@@ -15,16 +15,28 @@ capability, DR-33): its plugin declares ``FakeBindingConfig`` as the
 on ``gate.bindings``, and it refuses a binding whose config says
 ``refuse: true``.
 
+Every ``FakeGate`` verifies its evidence too (the optional
+``EvidenceVerifier`` capability, DR-34). Its ``gate_config`` scripts the
+references (``evidence_sources``, each carrying the digest of
+``fake_evidence(source)``), whether it escrows their content through the
+store's evidence escrow (``escrow_evidence``), and what ``verify`` answers
+for them, stored and live (``verify_stored``, ``verify_live``, or
+``verify_raises``): every status, and malformed answers, are reachable
+without Docker. The gate reads its script back from the stored output.
+
 ``LOOKUP_PLUGIN`` (``gate_id="fake-lookup"``, deterministic, kind
 ``lookup``) is the lookup-style gate the gate-set tests bind as mandatory:
 like a do-not-contact or sanctions adapter, it answers from a list keyed by
 the decision subject (``listed``: entity id → action) and needs no
-configuration.
+configuration. When the subject is listed it escrows the row it answered
+from and cites it by digest; it does not verify its evidence.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,12 +50,28 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from app.audit import ArtifactStore
     from app.plugin import FrameworkServices
+    from core.gate import EvidenceStatus
     from core.gate_request import GateRequest
 
 
 class FakeGateError(RuntimeError):
     """Raised by a fake gate whose config asks it to fail."""
+
+
+def fake_evidence(source_id: str) -> bytes:
+    """The content a fake gate relies on from ``source_id``."""
+    return f"fake evidence from {source_id}".encode()
+
+
+def _escrow_of(framework: FrameworkServices | None) -> ArtifactStore | None:
+    """The store's evidence escrow, as a gate plugin's ``build`` takes it.
+
+    ``None`` without a framework, or with a stand-in that has no store (tests
+    that only count builds pass a bare object).
+    """
+    return getattr(getattr(framework, "store", None), "artifacts", None)
 
 
 class FakeGateConfig(BaseModel):
@@ -60,6 +88,15 @@ class FakeGateConfig(BaseModel):
         escalation_reason: Verdict escalation reason.
         schema_failure: Return ``verdict=None`` (Tier 1).
         evidence_jurisdictions: One evidence reference per jurisdiction.
+        evidence_sources: One evidence reference per source, after those,
+            with the digest of ``fake_evidence(source)``.
+        escrow_evidence: Escrow each source's content and cite it by the
+            digest the escrow returns (``None`` with escrow off).
+        verify_stored: What ``verify`` answers without ``live``; ``None``
+            answers ``intact`` for every reference. Any strings, so a
+            malformed answer can be scripted.
+        verify_live: The same, with ``live``.
+        verify_raises: ``verify`` raises ``FakeGateError``.
         raise_error: Raise ``FakeGateError`` instead of returning.
         delay_ms: Sleep this long before answering (concurrency and timeout
             tests).
@@ -74,6 +111,11 @@ class FakeGateConfig(BaseModel):
     escalation_reason: str | None = None
     schema_failure: bool = False
     evidence_jurisdictions: tuple[str, ...] = ()
+    evidence_sources: tuple[str, ...] = ()
+    escrow_evidence: bool = False
+    verify_stored: tuple[str, ...] | None = None
+    verify_live: tuple[str, ...] | None = None
+    verify_raises: bool = False
     raise_error: bool = False
     delay_ms: float = Field(default=0.0, ge=0.0)
 
@@ -102,19 +144,29 @@ class FakeGate:
         requests: Every request received, in order.
         bindings: Every ``(reasoner_id, config)`` binding it was asked to
             admit, in order.
+        escrow: The evidence escrow its plugin handed it (``None`` when
+            built without a framework).
+        verifications: Every ``(output, live)`` it was asked to verify.
         closed: ``True`` once ``close()`` ran.
         output_override: When set, returned verbatim from ``evaluate`` —
             lets a test hand the framework a malformed output.
     """
 
     def __init__(
-        self, *, gate_id: str, deterministic: bool, framework: FrameworkServices
+        self,
+        *,
+        gate_id: str,
+        deterministic: bool,
+        framework: FrameworkServices,
+        escrow: ArtifactStore | None = None,
     ) -> None:
         self.gate_id = gate_id
         self.deterministic = deterministic
         self.framework = framework
+        self.escrow = escrow
         self.requests: list[GateRequest] = []
         self.bindings: list[tuple[str, object]] = []
+        self.verifications: list[tuple[GateOutput, bool]] = []
         self.closed = False
         self.output_override: object | None = None
 
@@ -151,23 +203,60 @@ class FakeGate:
                 escalation_reason=config.escalation_reason,
             )
         )
+        evidence = [
+            EvidenceRef(
+                source_id=f"fake-source-{jurisdiction}",
+                jurisdictions=frozenset({jurisdiction}),
+            )
+            for jurisdiction in config.evidence_jurisdictions
+        ]
+        for source in config.evidence_sources:
+            content = fake_evidence(source)
+            artifact = (
+                await asyncio.to_thread(
+                    self.escrow.put,
+                    content,
+                    media_type="text/plain",
+                    decision_id=request.decision_id,
+                    gate_id=self.gate_id,
+                )
+                if config.escrow_evidence and self.escrow is not None
+                else None
+            )
+            evidence.append(
+                EvidenceRef(
+                    source_id=source,
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    artifact_hash=artifact,
+                )
+            )
         return GateOutput(
             gate_id=self.gate_id,
             deterministic=self.deterministic,
             verdict=verdict,
-            evidence=tuple(
-                EvidenceRef(
-                    source_id=f"fake-source-{jurisdiction}",
-                    jurisdictions=frozenset({jurisdiction}),
-                )
-                for jurisdiction in config.evidence_jurisdictions
-            ),
+            evidence=tuple(evidence),
             evidence_snapshot={
                 "config": config.model_dump(mode="json"),
                 "request_number": len(self.requests),
             },
             extra={"scripted": True},
         )
+
+    async def verify(
+        self, output: GateOutput, *, live: bool
+    ) -> tuple[EvidenceStatus, ...]:
+        """Answer what the output's own config scripted (``intact`` by default)."""
+        self.verifications.append((output, live))
+        snapshot = output.evidence_snapshot
+        stored = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
+        config = FakeGateConfig.model_validate(stored)
+        if config.verify_raises:
+            msg = f"fake gate {self.gate_id!r} was scripted to fail verifying"
+            raise FakeGateError(msg)
+        scripted = config.verify_live if live else config.verify_stored
+        if scripted is None:
+            return ("intact",) * len(output.evidence)
+        return scripted  # type: ignore[return-value]  # scripted, maybe malformed
 
     def close(self) -> None:
         """Mark the gate closed (there is nothing to release)."""
@@ -189,9 +278,13 @@ class AuthorizingFakeGate(FakeGate):
         deterministic: bool,
         framework: FrameworkServices,
         refused_reasoners: frozenset[str],
+        escrow: ArtifactStore | None = None,
     ) -> None:
         super().__init__(
-            gate_id=gate_id, deterministic=deterministic, framework=framework
+            gate_id=gate_id,
+            deterministic=deterministic,
+            framework=framework,
+            escrow=escrow,
         )
         self.refused_reasoners = refused_reasoners
         self.authorizations: list[tuple[object, str]] = []
@@ -242,6 +335,7 @@ class FakeGatePlugin:
                 gate_id=self.gate_id,
                 deterministic=self.deterministic,
                 framework=framework,
+                escrow=_escrow_of(framework),
             )
             if self.refused_reasoners is None
             else AuthorizingFakeGate(
@@ -249,6 +343,7 @@ class FakeGatePlugin:
                 deterministic=self.deterministic,
                 framework=framework,
                 refused_reasoners=self.refused_reasoners,
+                escrow=_escrow_of(framework),
             )
         )
         self.built.append(gate)
@@ -269,15 +364,25 @@ class FakeLookupGate:
         listed: Entity id → the action permitted for it (shared with the
             plugin, so tests can list a subject after composition). An
             unlisted subject is permitted ``ALLOW``.
+        escrow: The evidence escrow its plugin handed it (``None`` when
+            built without a framework). A listed subject's row is escrowed
+            as canonical JSON and cited by digest.
         requests: Every request received, in order.
         closed: ``True`` once ``close()`` ran.
     """
 
     deterministic = True
 
-    def __init__(self, *, gate_id: str, listed: Mapping[UUID, DecisionAction]) -> None:
+    def __init__(
+        self,
+        *,
+        gate_id: str,
+        listed: Mapping[UUID, DecisionAction],
+        escrow: ArtifactStore | None = None,
+    ) -> None:
         self.gate_id = gate_id
         self.listed = listed
+        self.escrow = escrow
         self.requests: list[GateRequest] = []
         self.closed = False
 
@@ -286,6 +391,22 @@ class FakeLookupGate:
         self.requests.append(request)
         entity_id = request.submission.entity_id
         action = self.listed.get(entity_id)
+        content_hash = artifact = None
+        if action is not None:
+            row = json.dumps(
+                {"action": action.value, "entity_id": str(entity_id)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            content_hash = hashlib.sha256(row).hexdigest()
+            if self.escrow is not None:
+                artifact = await asyncio.to_thread(
+                    self.escrow.put,
+                    row,
+                    media_type="application/json",
+                    decision_id=request.decision_id,
+                    gate_id=self.gate_id,
+                )
         return GateOutput(
             gate_id=self.gate_id,
             deterministic=True,
@@ -301,6 +422,8 @@ class FakeLookupGate:
                 EvidenceRef(
                     source_id=f"{self.gate_id}-list",
                     locator=str(entity_id) if action else None,
+                    content_hash=content_hash,
+                    artifact_hash=artifact,
                 ),
             ),
             evidence_snapshot={
@@ -345,8 +468,9 @@ class FakeLookupGatePlugin:
 
     def build(self, framework: FrameworkServices) -> FakeLookupGate:
         """Build a gate that reads this plugin's ``listed`` table."""
-        del framework
-        gate = FakeLookupGate(gate_id=self.gate_id, listed=self.listed)
+        gate = FakeLookupGate(
+            gate_id=self.gate_id, listed=self.listed, escrow=_escrow_of(framework)
+        )
         self.built.append(gate)
         return gate
 

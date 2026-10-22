@@ -4,8 +4,10 @@ Declares the stub reasoner's identity, its gate set, its bypass rules, and
 its enforcement profile:
 
 - **Gate set**: the test-only scripted gate ``"fake"`` (``tests/_fake_gate``),
-  advisory — it runs when the stub asks for a gate. Tests that need another
-  gate set (a mandatory lookup gate, two advisory gates) build a variant with
+  advisory — it runs when the stub asks for a gate. ``STUB_REGISTRATION_WITH_LOOKUP``
+  also binds the lookup gate ``"fake-lookup"`` mandatory, so every decision,
+  recorded ones too, runs it (the integration tests of gate sets, escrow,
+  and verify). Tests that need another gate set build a variant with
   ``model_copy(update={"gates": ...})``.
 - **Bypass rules**: ``low-score`` (``widget_score`` below 0.2 → record
   ALLOW) and ``high-score`` (above 0.9 → record BLOCK). Everything between
@@ -52,4 +54,19 @@ STUB_REGISTRATION = ReasonerRegistration(
     recordable_actions=frozenset({DecisionAction.ALLOW, DecisionAction.BLOCK}),
     novel_entity_feature="thin_history",
     jurisdiction_conflict_groups=(frozenset({"REGION_A"}), frozenset({"REGION_B"})),
+)
+
+#: The stub registration with the lookup gate bound mandatory beside ``fake``:
+#: a record runs ``fake-lookup`` too, and a gated decision runs both.
+STUB_REGISTRATION_WITH_LOOKUP = ReasonerRegistration(
+    reasoner_id=STUB_REGISTRATION.reasoner_id,
+    reasoner_name=STUB_REGISTRATION.reasoner_name,
+    gates=(
+        GateBinding(gate_id="fake-lookup", mandatory=True),
+        GateBinding(gate_id="fake"),
+    ),
+    bypass_rules=STUB_REGISTRATION.bypass_rules,
+    recordable_actions=STUB_REGISTRATION.recordable_actions,
+    novel_entity_feature=STUB_REGISTRATION.novel_entity_feature,
+    jurisdiction_conflict_groups=STUB_REGISTRATION.jurisdiction_conflict_groups,
 )

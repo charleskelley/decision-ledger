@@ -8,7 +8,7 @@ group. The framework never imports a gate package: it discovers the plugins
 dispatches to the gates of a decision's gate set by ``gate_id``
 (``app/submit.py``), each through ``invoke_gate``.
 
-The seam is six types:
+The seam is eight types:
 
 - ``GateKind`` — what a gate is: ``llm``, ``lookup``, or ``rules``.
 - ``Gate`` — the runtime object: ``evaluate(GateRequest) -> GateOutput`` and
@@ -30,6 +30,11 @@ The seam is six types:
   the reasoners whose assets it loaded). The framework asks after the
   binding was admitted: it is the derived read of "has this gate accepted
   a binding for this reasoner?".
+- ``EvidenceVerifier`` — an optional ``Gate`` capability (DR-34): say how
+  each evidence reference of an output the gate returned stands now,
+  against the gate's own record and, live, its source. The framework asks
+  when a decision is verified (``verify_evidence``), never when it is
+  replayed.
 - ``GatePlugin`` — what the entry point publishes: ``gate_id``, ``kind``,
   ``deterministic``, an optional ``config_model`` that validates
   ``GateContext.gate_config`` at intake, an optional
@@ -50,7 +55,9 @@ timeout past the request's budget, an output that is not a plain
 ``GateOutput`` for that gate or that the ledger could not store as returned,
 or no gate composed under the id all become a ``failed`` invocation with
 the reason, which enforcement holds for review (DR-29), and the decision is
-still written. Tests inject fake gates by passing
+still written. Verifying a stored output fails safe the same way
+(``verify_evidence``): a gate that cannot answer leaves its references
+``not_verifiable``. Tests inject fake gates by passing
 plugins explicitly (``create_app(gate_plugins=[...])``,
 ``build_framework_services(..., gate_plugins=[...])``) or explicit
 ``entry_points`` to ``discover_gates``.
@@ -65,14 +72,14 @@ import inspect
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, get_args, runtime_checkable
 
 import structlog
 from pydantic import BaseModel, ValidationError
 
 from app.monitoring import duration_ms
 from core.exceptions import GateConfigError, GatePluginError
-from core.gate import EvidenceRef, GateOutput, GateVerdict
+from core.gate import EvidenceRef, EvidenceStatus, GateOutput, GateVerdict
 from core.submission import storage_problem
 
 if TYPE_CHECKING:
@@ -236,6 +243,48 @@ class ReasonerScope(Protocol):
         Returns:
             ``False`` when every submission of that reasoner addressed to
             this gate would be refused.
+        """
+        ...
+
+
+@runtime_checkable
+class EvidenceVerifier(Protocol):
+    """Optional ``Gate`` capability: verify the gate's own evidence (DR-34).
+
+    A gate whose ``GateOutput.evidence`` references content it can check
+    again, against the record it kept (its ``evidence_snapshot``, the
+    artifacts it escrowed through the framework's evidence escrow) and,
+    live, against the source itself, answers ``verify`` for one output it
+    returned, as the bundle stores it. The framework asks it when a decision
+    is verified (``POST /api/v1/decisions/{decision_id}/verify``); replay
+    never does, and verifying never decides anything again.
+
+    The gate receives the whole output because a reference is identified by
+    its position in ``evidence``, not by its fields, and answers one
+    ``EvidenceStatus`` per reference, in the same order. The framework
+    reports, beside each status and independently of it, whether the
+    artifact a reference names is held by the escrow. A gate that is not
+    composed or lacks this capability leaves its references
+    ``not_verifiable``; so does an answer that is not one status per
+    reference, an exception, or an answer later than the gate's budget.
+    """
+
+    async def verify(
+        self, output: GateOutput, *, live: bool
+    ) -> tuple[EvidenceStatus, ...]:
+        """Say how each of ``output.evidence`` stands now.
+
+        Must not block the event loop: run blocking reads in a thread
+        (``asyncio.to_thread``) and await them.
+
+        Args:
+            output: An output this gate returned, as the bundle stores it.
+            live: ``False`` checks each reference against the gate's own
+                record only (its snapshot and escrowed artifacts); ``True``
+                checks it against its source as the source is now.
+
+        Returns:
+            One status per reference in ``output.evidence``, in order.
         """
         ...
 
@@ -799,6 +848,107 @@ async def invoke_gate(
     return GateInvocation(
         gate_id=gate_id, output=output, invoked=True, duration_ms=elapsed
     )
+
+
+#: Every ``EvidenceStatus`` a gate may answer.
+_EVIDENCE_STATUSES: frozenset[str] = frozenset(get_args(EvidenceStatus))
+
+
+async def verify_evidence(
+    composed: ComposedGate | None,
+    output: GateOutput,
+    *,
+    live: bool,
+    budget_ms: int,
+) -> tuple[EvidenceStatus, ...]:
+    """Ask a gate how each evidence reference of its output stands (DR-34).
+
+    Never raises for the gate's own failure, as ``invoke_gate`` does not:
+    every reference is ``not_verifiable`` when the gate is not composed,
+    lacks ``EvidenceVerifier``, raises, answers after ``budget_ms``, or
+    answers anything but one known status per reference. Only the caller's
+    own cancellation propagates.
+
+    Args:
+        composed: The composed gate that produced ``output``, or ``None``
+            when the deployment composes none under its id.
+        output: The gate's output, as the bundle stores it.
+        live: Whether the gate also checks each reference against its
+            source as it is now.
+        budget_ms: Wall-clock budget of the gate's answer.
+
+    Returns:
+        One status per reference in ``output.evidence``, in order (empty
+        when the output references nothing).
+    """
+    count = len(output.evidence)
+    if count == 0:
+        return ()
+    unverifiable: tuple[EvidenceStatus, ...] = ("not_verifiable",) * count
+    gate = composed.gate if composed is not None else None
+    if not isinstance(gate, EvidenceVerifier):
+        return unverifiable
+    log_ctx = {"component": "gates", "gate_id": output.gate_id, "live": live}
+    deadline = asyncio.timeout(budget_ms / 1_000)
+    t0 = time.perf_counter()
+    try:
+        async with deadline:
+            statuses = await gate.verify(output, live=live)
+    except asyncio.CancelledError as err:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise  # the caller is being cancelled
+        return _unverifiable(err, unverifiable, log_ctx, t0)
+    except Exception as err:
+        return _unverifiable(err, unverifiable, log_ctx, t0)
+    elapsed = duration_ms(t0)
+    if deadline.expired() or elapsed > budget_ms:
+        # It ignored its cancellation, or blocked the loop past its budget.
+        log.warning(
+            "gate.verify_late", **log_ctx, budget_ms=budget_ms, duration_ms=elapsed
+        )
+        return unverifiable
+    if (
+        not isinstance(statuses, tuple | list)
+        or len(statuses) != count
+        or not all(
+            isinstance(status, str) and status in _EVIDENCE_STATUSES
+            for status in statuses
+        )
+    ):
+        log.warning(
+            "gate.verify_malformed",
+            **log_ctx,
+            references=count,
+            answer=_storable_text(_safe_repr(statuses))[:500],
+            duration_ms=elapsed,
+        )
+        return unverifiable
+    return tuple(statuses)
+
+
+def _unverifiable(
+    err: BaseException,
+    unverifiable: tuple[EvidenceStatus, ...],
+    log_ctx: dict[str, object],
+    t0: float,
+) -> tuple[EvidenceStatus, ...]:
+    """Log a gate's failed verify; every reference is ``not_verifiable``."""
+    log.warning(
+        "gate.verify_failed",
+        **log_ctx,
+        error=_storable_text(f"{type(err).__name__}: {_safe_repr(err)}"),
+        duration_ms=duration_ms(t0),
+    )
+    return unverifiable
+
+
+def _safe_repr(value: object) -> str:
+    """``repr(value)``, or a placeholder when the object's repr itself fails."""
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
 
 
 def _failed(
