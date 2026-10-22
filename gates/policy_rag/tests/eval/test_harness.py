@@ -6,12 +6,17 @@ a reasoner ships for the gate, through the framework's ``run_eval``.
 
 - Adapter selection: one named reasoner, or every installed adapter that
   ships at least one of the gate's datasets.
-- Dimension wiring: a dataset present → the real dimension (retrieval scoped
-  to the reasoner); missing → a ``SkippedDimension`` naming the path.
+- Dimension wiring: a dataset present → the real dimension (retrieval over
+  the reasoner's binding: its corpora and quota, DR-34); missing, or a
+  reasoner that does not bind the gate to a corpus → a ``SkippedDimension``
+  saying why; an authority dataset joins the citation dimension.
+- The binding is read from the registry the ledger composes
+  (``policy_binding``).
 - CLI: config errors (nothing to evaluate, unknown reasoner, missing API
-  keys) exit 2 without opening any store; a run writes one report per
-  reasoner under the per-gate staging path, closes what it opened, and exits
-  1 when a dimension fails or is skipped, 0 when all pass.
+  keys, registrations that do not compose) exit 2 without opening any
+  provider; a run writes one report per reasoner under the per-gate staging
+  path, closes the providers it opened, and exits 1 when a dimension fails
+  or is skipped, 0 when all pass.
 
 No Postgres, Elasticsearch, model, or LLM is touched; no dimension that
 would call an LLM is ever evaluated.
@@ -31,14 +36,20 @@ import pytest
 from pydantic import BaseModel
 
 from core.eval.metrics import DimensionResult, EvalDimension
-from core.exceptions import ReasonerPluginError
+from core.exceptions import ReasonerPluginError, RegistrationError
+from core.observation import GateBinding, ReasonerRegistration
 from eval.adapter import EVAL_ADAPTER_GROUP
 from eval.dimensions import DimensionRun
 from eval.dimensions.skipped import SkippedDimension
+from policy_rag_gate.corpus import PolicyBindingConfig
 from policy_rag_gate.eval import harness
 from policy_rag_gate.eval.citation import CitationDimension
 from policy_rag_gate.eval.faithfulness import FaithfulnessDimension
 from policy_rag_gate.eval.retrieval import RetrievalDimension
+
+_BINDING = PolicyBindingConfig.model_validate(
+    {"corpora": [{"corpus_id": "with-datasets-policy", "tier": 1}]}
+)
 
 _QUERIES = (
     "queries:\n"
@@ -63,6 +74,15 @@ _CITATIONS = (
     "    document_version: '1.0'\n"
     "    section_path: '2. Review'\n"
     "    snippet_text: 'Widgets SHALL be held.'\n"
+)
+_AUTHORITY = (
+    "cases:\n"
+    "  - case_id: a01\n"
+    "    governing_corpus_id: notes\n"
+    "    contexts:\n"
+    "      - {corpus_id: law, tier: 1, document_id: LAW-1}\n"
+    "      - {corpus_id: notes, tier: 2, document_id: NOTE-1}\n"
+    "    on_point_document_ids: [LAW-1, NOTE-1]\n"
 )
 
 
@@ -147,11 +167,12 @@ def test_an_unknown_reasoner_is_a_plugin_error(adapters):
 # ---------------------------------------------------------------------------
 
 
-def _build(dataset_root: Path) -> list[Any]:
+def _build(dataset_root: Path, binding: Any = _BINDING) -> list[Any]:
     return harness.build_gate_dimensions(
         reasoner_id="with-datasets",
         dataset_root=dataset_root,
-        retriever=MagicMock(),
+        providers=MagicMock(),
+        binding=binding,
         judge_client=MagicMock(),
         ragas_scorer=MagicMock(),
     )
@@ -179,9 +200,59 @@ def test_present_datasets_build_the_real_dimensions(tmp_path: Path):
     retrieval, faithfulness, citation = _build(tmp_path)
 
     assert isinstance(retrieval, RetrievalDimension)
-    assert retrieval.reasoner_id == "with-datasets"
+    assert retrieval.binding == _BINDING
     assert isinstance(faithfulness, FaithfulnessDimension)
     assert isinstance(citation, CitationDimension)
+    assert citation._authority_cases == ()
+
+
+def test_retrieval_is_skipped_for_a_reasoner_that_binds_no_corpus(tmp_path: Path):
+    _write(tmp_path, harness.RETRIEVAL_DATASET, _QUERIES)
+
+    retrieval, *_ = _build(tmp_path, binding="the reasoner is not registered")
+
+    assert isinstance(retrieval, SkippedDimension)
+    assert retrieval._reason == "the reasoner is not registered"
+
+
+def test_an_authority_dataset_joins_the_citation_dimension(tmp_path: Path):
+    _write(tmp_path, harness.CITATION_DATASET, _CITATIONS)
+    _write(tmp_path, harness.AUTHORITY_DATASET, _AUTHORITY)
+
+    *_, citation = _build(tmp_path)
+
+    assert isinstance(citation, CitationDimension)
+    assert [case.case_id for case in citation._authority_cases] == ["a01"]
+
+
+def _registration(config: dict[str, Any] | None) -> ReasonerRegistration:
+    return ReasonerRegistration(
+        reasoner_id="r",
+        reasoner_name="r",
+        gates=() if config is None else (GateBinding(gate_id="policy", config=config),),
+    )
+
+
+def test_the_binding_is_read_from_the_registration():
+    assert harness.policy_binding(_registration(_BINDING.model_dump(mode="json"))) == (
+        _BINDING
+    )
+
+
+@pytest.mark.parametrize(
+    ("registration", "fragment"),
+    [
+        (None, "not registered"),
+        (_registration(None), "does not bind the 'policy' gate"),
+        (_registration({"corpora": []}), "binding to the 'policy' gate is invalid"),
+    ],
+    ids=["unregistered", "unbound", "invalid"],
+)
+def test_without_a_valid_binding_the_reason_is_given(registration, fragment):
+    reason = harness.policy_binding(registration)
+
+    assert isinstance(reason, str)
+    assert fragment in reason
 
 
 # ---------------------------------------------------------------------------
@@ -189,16 +260,39 @@ def test_present_datasets_build_the_real_dimensions(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+class _Registry:
+    """The ledger's registry as the harness reads it: one bound reasoner."""
+
+    def __init__(self) -> None:
+        self._registrations = {
+            "with-datasets": _registration(_BINDING.model_dump(mode="json"))
+        }
+
+    def is_registered(self, reasoner_id: str) -> bool:
+        return reasoner_id in self._registrations
+
+    def get(self, reasoner_id: str) -> ReasonerRegistration:
+        return self._registrations[reasoner_id]
+
+
 @pytest.fixture
 def stores(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Fake the gate's stores and LLM clients; record what was opened."""
-    opened: dict[str, Any] = {"calls": [], "resources": (MagicMock(), MagicMock())}
+    """Fake the providers, the registry, and the LLM clients; record what opened."""
+    opened: dict[str, Any] = {"calls": [], "registries": []}
 
-    def _open_retriever(**kwargs: Any) -> tuple[Any, Any]:
-        opened["calls"].append(kwargs)
-        return MagicMock(name="retriever"), opened["resources"]
+    class _Providers:
+        def __init__(self, plugins: Any, *, services: Any) -> None:
+            opened["calls"].append(services)
+            self.closed = 0
+            opened["registries"].append(self)
 
-    monkeypatch.setattr(harness, "open_retriever", _open_retriever)
+        def close(self) -> None:
+            self.closed += 1
+
+    monkeypatch.setattr(harness, "ProviderRegistry", _Providers)
+    monkeypatch.setattr(harness, "discover_provider_plugins", dict)
+    monkeypatch.setattr(harness, "discover_plugins", lambda **_: [])
+    monkeypatch.setattr(harness, "read_registry", lambda *_a, **_k: _Registry())
     monkeypatch.setattr(harness, "AnthropicLLMClient", MagicMock())
     monkeypatch.setattr(harness, "RagasFaithfulnessAdapter", MagicMock())
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -269,11 +363,29 @@ def test_main_writes_one_report_per_reasoner_and_closes_the_stores(
             "faithfulness",
             "citation",
         }
-    (call,) = stores["calls"]
-    assert set(call) == {"postgres_dsn", "elasticsearch_url"}
-    for resource in stores["resources"]:
-        resource.close.assert_called_once()
+    (services,) = stores["calls"]
+    assert services.postgres_dsn
+    assert services.settings.elasticsearch_url
+    (registry,) = stores["registries"]
+    assert registry.closed == 1
     assert adapters["bare"].built == []
+
+
+def test_main_exits_2_when_the_ledgers_registrations_do_not_compose(
+    adapters, stores, monkeypatch, tmp_path, capsys
+):
+    _installed(monkeypatch, "with-datasets")
+
+    def _clash(*_a: Any, **_k: Any) -> Any:
+        raise RegistrationError("api", "registered over the API and by a plugin")
+
+    monkeypatch.setattr(harness, "read_registry", _clash)
+
+    rc = harness.main(["--output-dir", str(tmp_path)])
+
+    assert rc == 2
+    assert "do not compose" in capsys.readouterr().err
+    assert stores["calls"] == []
 
 
 class _Passing:

@@ -8,6 +8,10 @@ For each (claim, cited_snippet) pair in the golden output set:
   whether the snippet entails the claim. Mean = fraction of yeses.
 - ``superficial_citation_rate`` — fraction of citations with relevance
   score ≤ 0.4 (≤ 2/5 on the original scale).
+- ``authority_violation_rate`` (report-only, DR-34; when the reasoner ships
+  ``authority/golden_outputs.yaml``) — fraction of captured verdicts that
+  name a lower-tier corpus as governing while a higher-tier passage on point
+  was retrieved (``policy_rag_gate.eval.authority``; deterministic).
 
 Both judges go through the SDK-agnostic ``LLMClient`` protocol from
 ``core.llm`` (DR-23).
@@ -28,6 +32,7 @@ from core.eval.metrics import (
     EvalDimension,
 )
 from eval.dimensions.base import DimensionRun
+from policy_rag_gate.eval.authority import authority_violation_rate
 from policy_rag_gate.eval.judge import (
     JudgePromptRegistry,
     JudgePromptTemplate,
@@ -39,6 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from core.llm import LLMClient
+    from policy_rag_gate.eval.authority import AuthorityCase
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds (this harness owns them; core/eval/metrics.py defines the
@@ -137,6 +143,9 @@ class CitationDimension:
         prompt_registry: Optional prompt registry override (for tests).
         max_concurrency: Maximum number of concurrent judge calls. Bounded
             to avoid hitting LLM rate limits.
+        authority_cases: Captured tiered gate outputs; when any are given,
+            ``authority_violation_rate`` (and ``authority_cases``) join the
+            dimension's metrics, report-only.
     """
 
     kind = EvalDimension.CITATION
@@ -148,12 +157,14 @@ class CitationDimension:
         cases: list[CitationCase],
         prompt_registry: JudgePromptRegistry | None = None,
         max_concurrency: int = 4,
+        authority_cases: Sequence[AuthorityCase] = (),
     ) -> None:
         """Construct the dimension."""
         self._client = client
         self._cases = cases
         self._registry = prompt_registry or JudgePromptRegistry()
         self._sem = asyncio.Semaphore(max_concurrency)
+        self._authority_cases = tuple(authority_cases)
 
     async def evaluate(self) -> DimensionRun:
         """Run both judges on every case and assemble the dimension run."""
@@ -181,6 +192,14 @@ class CitationDimension:
             claim_citation_entailment=round(mean_entailment, 4),
             superficial_citation_rate=round(superficial, 4),
         )
+        authority: dict[str, float] = {}
+        if self._authority_cases:
+            authority = {
+                "authority_violation_rate": round(
+                    authority_violation_rate(self._authority_cases), 4
+                ),
+                "authority_cases": float(len(self._authority_cases)),
+            }
         result = DimensionResult(
             dimension=self.kind,
             passed=not violations,
@@ -188,6 +207,7 @@ class CitationDimension:
                 "citation_relevance_score": metrics.citation_relevance_score,
                 "claim_citation_entailment": metrics.claim_citation_entailment,
                 "superficial_citation_rate": metrics.superficial_citation_rate,
+                **authority,
             },
             threshold_violations=violations,
             evaluated_at=datetime.now(UTC),

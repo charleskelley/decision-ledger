@@ -1,17 +1,21 @@
 """Unit tests for the retrieval dimension.
 
-Tests pure metric functions and the dimension's wire-up against a stub
-retriever. The integration test (live Postgres + Elasticsearch) lives under
-``@pytest.mark.evaluation`` in the eval harness itself, not here.
+Tests pure metric functions and the dimension's wire-up: it drives the
+gate's own retrieval (``retrieve_evidence``) over a reasoner's binding —
+every corpus, through its provider, merged in precedence order — here with
+a canned in-memory provider, and reports per-corpus metrics beside the
+overall ones (DR-34). The live run (Postgres + Elasticsearch) is the
+gate's eval harness itself (``make eval-gate-policy_rag``), not a unit test.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from core.eval.metrics import EvalDimension, RetrievalMetrics
+from policy_rag_gate.corpus import CorpusRef, CorpusState, PolicyBindingConfig
 from policy_rag_gate.eval.retrieval import (
     GoldenQuery,
     RetrievalDimension,
@@ -22,9 +26,11 @@ from policy_rag_gate.eval.retrieval import (
     recall_at_k,
     reciprocal_rank,
 )
-from policy_rag_gate.models.snippet import RetrievedSnippet
+from policy_rag_gate.models import RetrievedContext, content_hash
+from policy_rag_gate.providers import ProviderRegistry, ProviderResult
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -39,43 +45,109 @@ def _snippet(
     version: str = "1.0",
     jurisdiction: str = "INTERNAL",
     section_path: str = "section",
-) -> RetrievedSnippet:
-    return RetrievedSnippet(
+    corpus_id: str = "corpus-a",
+    tier: int = 1,
+    rank: int = 1,
+) -> RetrievedContext:
+    text = f"{corpus_id} {document_id} {version} {section_path} {rank}"
+    return RetrievedContext(
+        corpus_id=corpus_id,
+        provider="reference",
+        tier=tier,
         document_id=document_id,
         title=document_id,
         version=version,
         jurisdiction=jurisdiction,
         section_path=section_path,
-        text="text",
-        relevance_score=0.5,
-        retrieval_path="rrf_only",
+        text=text,
+        content_hash=content_hash(text),
+        rank=rank,
+        provenance_level="pinned_version",
     )
 
 
-class _StubRetriever:
-    """In-memory retriever — returns canned snippets per query."""
+#: (document_id, version, jurisdiction) a canned provider returns for a query.
+_Hit = tuple[str, str, str]
+
+
+class _CannedProvider:
+    """In-memory provider — canned hits per (corpus, query), in rank order."""
+
+    provider_id = "reference"
 
     def __init__(
         self,
-        responses: dict[str, list[RetrievedSnippet]],
+        responses: dict[tuple[str, str], list[_Hit]],
+        *,
+        applied: dict[str, str] | None = None,
     ) -> None:
         self._responses = responses
-        self.calls: list[tuple[str, int, str | None, list[str] | None, str | None]] = []
+        self._applied = applied or {}
+        self.calls: list[tuple[str, str, int, list[str] | None, str | None]] = []
+
+    def describe(self, corpus: CorpusRef) -> CorpusState:
+        return CorpusState(
+            corpus_id=corpus.corpus_id,
+            provider="reference",
+            provider_version="canned",
+            state_marker=None,
+            provenance_level="pinned_version",
+        )
 
     def retrieve(
         self,
         query: str,
-        k: int = 5,
+        corpus: CorpusRef,
         *,
-        reasoner_id: str | None = None,
-        jurisdictions: list[str] | None = None,
-        risk_tier: str | None = None,
-    ) -> tuple[list[RetrievedSnippet], str]:
-        self.calls.append((query, k, reasoner_id, jurisdictions, risk_tier))
-        return self._responses.get(query, []), "rrf_only"
+        k: int,
+        jurisdictions: Sequence[str] | None,
+        risk_tier: str | None,
+    ) -> ProviderResult:
+        self.calls.append(
+            (
+                query,
+                corpus.corpus_id,
+                k,
+                None if jurisdictions is None else list(jurisdictions),
+                risk_tier,
+            )
+        )
+        hits = self._responses.get((corpus.corpus_id, query), [])[:k]
+        return ProviderResult(
+            state=self.describe(corpus),
+            contexts=tuple(
+                _snippet(
+                    document_id=doc,
+                    version=version,
+                    jurisdiction=jurisdiction,
+                    corpus_id=corpus.corpus_id,
+                    tier=corpus.tier,
+                    rank=rank,
+                )
+                for rank, (doc, version, jurisdiction) in enumerate(hits, 1)
+            ),
+            ranking_requested="reranked",
+            ranking_applied=self._applied.get(corpus.corpus_id, "reranked"),
+        )
 
 
-_REASONER_ID = "stub-reasoner"
+def _binding(k: int = 3, *corpora: dict[str, Any]) -> PolicyBindingConfig:
+    return PolicyBindingConfig.model_validate(
+        {
+            "corpora": list(corpora) or [{"corpus_id": "corpus-a", "tier": 1}],
+            "k_per_corpus": k,
+        }
+    )
+
+
+def _dimension(
+    provider: _CannedProvider, queries: list[GoldenQuery], binding: PolicyBindingConfig
+) -> RetrievalDimension:
+    return RetrievalDimension(
+        providers=ProviderRegistry.of(provider),  # type: ignore[arg-type]
+        binding=binding,
+        golden_queries=queries,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,87 +273,77 @@ class TestLoadGoldenQueries:
 
 
 # ---------------------------------------------------------------------------
-# RetrievalDimension — wire-up via stub retriever
+# RetrievalDimension — wire-up via a canned provider
 # ---------------------------------------------------------------------------
+
+
+def _q(query_id: str, query: str, relevant: list[str], top: str, version: str, **kw):
+    return GoldenQuery(
+        query_id=query_id,
+        query=query,
+        relevant_document_ids=relevant,
+        expected_top_document_id=top,
+        expected_top_version=version,
+        **kw,
+    )
 
 
 class TestRetrievalDimension:
     @pytest.mark.asyncio
     async def test_perfect_run(self) -> None:
-        # Two queries with multi-doc relevance; retriever returns all relevants
-        # in the top positions plus one irrelevant filler per query.
+        # Two queries with multi-doc relevance; the provider returns all
+        # relevants in the top positions plus one irrelevant filler per query.
         queries = [
-            GoldenQuery(
-                query_id="q1",
-                query="auth policy",
-                relevant_document_ids=["DOC-A", "DOC-B"],
-                expected_top_document_id="DOC-A",
-                expected_top_version="2.0",
-            ),
-            GoldenQuery(
-                query_id="q2",
-                query="velocity",
+            _q("q1", "auth policy", ["DOC-A", "DOC-B"], "DOC-A", "2.0"),
+            _q(
+                "q2",
+                "velocity",
+                ["DOC-V", "DOC-V2"],
+                "DOC-V",
+                "1.3",
                 jurisdictions=["INTERNAL"],
-                relevant_document_ids=["DOC-V", "DOC-V2"],
-                expected_top_document_id="DOC-V",
-                expected_top_version="1.3",
             ),
         ]
-        retriever = _StubRetriever(
-            responses={
-                "auth policy": [
-                    _snippet(document_id="DOC-A", version="2.0"),
-                    _snippet(document_id="DOC-B", version="1.0"),
-                    _snippet(document_id="FILLER", version="1.0"),
+        provider = _CannedProvider(
+            {
+                ("corpus-a", "auth policy"): [
+                    ("DOC-A", "2.0", "INTERNAL"),
+                    ("DOC-B", "1.0", "INTERNAL"),
+                    ("FILLER", "1.0", "INTERNAL"),
                 ],
-                "velocity": [
-                    _snippet(document_id="DOC-V", version="1.3"),
-                    _snippet(document_id="DOC-V2", version="2.0"),
-                    _snippet(document_id="FILLER", version="1.0"),
+                ("corpus-a", "velocity"): [
+                    ("DOC-V", "1.3", "INTERNAL"),
+                    ("DOC-V2", "2.0", "INTERNAL"),
+                    ("FILLER", "1.0", "INTERNAL"),
                 ],
             }
         )
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id=_REASONER_ID,
-            k=3,
-        )
-        run = await dim.evaluate()
+        run = await _dimension(provider, queries, _binding(3)).evaluate()
 
         assert run.result.dimension == EvalDimension.RETRIEVAL
         assert run.result.passed is True, run.result.threshold_violations
         assert run.result.threshold_violations == []
         assert run.result.num_samples == 2
         assert isinstance(run.metrics, RetrievalMetrics)
+        assert run.metrics.k == 3
         assert run.metrics.version_resolution_accuracy == 1.0
         assert run.metrics.jurisdiction_filter_accuracy == 1.0
         assert run.metrics.mean_reciprocal_rank == 1.0
         # 2 of top-3 are relevant per query → precision@3 = 0.667.
         assert run.metrics.context_precision_at_k == pytest.approx(0.6667, abs=1e-3)
+        # Per corpus, report-only.
+        assert run.result.metrics["per_corpus.corpus-a.hit_rate"] == 1.0
+        assert run.result.metrics["per_corpus.corpus-a.mean_returned"] == 3.0
+        assert run.result.metrics["per_corpus.corpus-a.ranking_bypass_rate"] == 0.0
 
     @pytest.mark.asyncio
     async def test_superseded_version_fails_zero_tolerance(self) -> None:
-        queries = [
-            GoldenQuery(
-                query_id="q1",
-                query="auth risk",
-                relevant_document_ids=["DOC-A"],
-                expected_top_document_id="DOC-A",
-                expected_top_version="2.0",
-            ),
-        ]
-        # Retriever returns the right doc but at version 1.0 (superseded).
-        retriever = _StubRetriever(
-            responses={"auth risk": [_snippet(document_id="DOC-A", version="1.0")]}
+        queries = [_q("q1", "auth risk", ["DOC-A"], "DOC-A", "2.0")]
+        # The provider returns the right doc but at version 1.0 (superseded).
+        provider = _CannedProvider(
+            {("corpus-a", "auth risk"): [("DOC-A", "1.0", "INTERNAL")]}
         )
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id=_REASONER_ID,
-            k=3,
-        )
-        run = await dim.evaluate()
+        run = await _dimension(provider, queries, _binding(3)).evaluate()
 
         assert run.result.passed is False
         assert any("version_resolution" in v for v in run.result.threshold_violations)
@@ -291,114 +353,122 @@ class TestRetrievalDimension:
     @pytest.mark.asyncio
     async def test_jurisdiction_leak_fails(self) -> None:
         queries = [
-            GoldenQuery(
-                query_id="q1",
-                query="gdpr",
+            _q(
+                "q1",
+                "gdpr",
+                ["GDPR-DOC"],
+                "GDPR-DOC",
+                "2018",
                 jurisdictions=["EU_GDPR"],
-                relevant_document_ids=["GDPR-DOC"],
-                expected_top_document_id="GDPR-DOC",
-                expected_top_version="2018",
-            ),
+            )
         ]
-        # Retriever ignored the filter — returned an INTERNAL doc.
-        retriever = _StubRetriever(
-            responses={
-                "gdpr": [
-                    _snippet(
-                        document_id="GDPR-DOC",
-                        version="2018",
-                        jurisdiction="EU_GDPR",
-                    ),
-                    _snippet(
-                        document_id="LEAK",
-                        version="1.0",
-                        jurisdiction="INTERNAL",
-                    ),
+        # The provider ignored the filter — returned an INTERNAL doc.
+        provider = _CannedProvider(
+            {
+                ("corpus-a", "gdpr"): [
+                    ("GDPR-DOC", "2018", "EU_GDPR"),
+                    ("LEAK", "1.0", "INTERNAL"),
                 ]
             }
         )
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id=_REASONER_ID,
-            k=3,
-        )
-        run = await dim.evaluate()
+        run = await _dimension(provider, queries, _binding(3)).evaluate()
 
         assert run.result.passed is False
         assert any("jurisdiction_filter" in v for v in run.result.threshold_violations)
 
     @pytest.mark.asyncio
     async def test_threshold_violation_messages_human_readable(self) -> None:
-        queries = [
-            GoldenQuery(
-                query_id="q1",
-                query="x",
-                relevant_document_ids=["DOC-A"],
-                expected_top_document_id="DOC-A",
-                expected_top_version="1.0",
-            ),
-        ]
-        retriever = _StubRetriever(responses={"x": []})  # zero results
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id=_REASONER_ID,
-            k=5,
-        )
-        run = await dim.evaluate()
+        queries = [_q("q1", "x", ["DOC-A"], "DOC-A", "1.0")]
+        provider = _CannedProvider({})  # zero results
+        run = await _dimension(provider, queries, _binding(5)).evaluate()
 
         assert run.result.passed is False
         # Several thresholds will fail; messages include numeric values.
         assert all(any(c.isdigit() for c in v) for v in run.result.threshold_violations)
 
     @pytest.mark.asyncio
-    async def test_retriever_called_with_filters(self) -> None:
+    async def test_every_bound_corpus_is_queried_with_the_filters(self) -> None:
         queries = [
-            GoldenQuery(
-                query_id="q1",
-                query="hva",
+            _q(
+                "q1",
+                "hva",
+                ["DOC-H"],
+                "DOC-H",
+                "2.0",
                 jurisdictions=["INTERNAL"],
                 risk_tier="HIGH_VALUE",
-                relevant_document_ids=["DOC-H"],
-                expected_top_document_id="DOC-H",
-                expected_top_version="2.0",
-            ),
+            )
         ]
-        retriever = _StubRetriever(
-            responses={"hva": [_snippet(document_id="DOC-H", version="2.0")]}
+        provider = _CannedProvider(
+            {("corpus-a", "hva"): [("DOC-H", "2.0", "INTERNAL")]}
         )
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id=_REASONER_ID,
-            k=3,
+        binding = _binding(
+            3,
+            {"corpus_id": "corpus-a", "tier": 1},
+            {"corpus_id": "corpus-b", "tier": 2},
         )
-        await dim.evaluate()
+        await _dimension(provider, queries, binding).evaluate()
 
-        # Confirm the tenant and metadata filters were forwarded.
-        assert retriever.calls == [("hva", 3, _REASONER_ID, ["INTERNAL"], "HIGH_VALUE")]
+        # The quota and the filters reach each corpus, as in a decision.
+        assert provider.calls == [
+            ("hva", "corpus-a", 3, ["INTERNAL"], "HIGH_VALUE"),
+            ("hva", "corpus-b", 3, ["INTERNAL"], "HIGH_VALUE"),
+        ]
 
     @pytest.mark.asyncio
-    async def test_retriever_receives_reasoner_id_on_every_query(self) -> None:
-        """Every golden query is tenant-scoped, matching the production path."""
+    async def test_two_corpora_report_per_corpus_metrics_and_the_overall_cutoff(
+        self,
+    ) -> None:
         queries = [
-            GoldenQuery(
-                query_id=f"q{i}",
-                query=f"query {i}",
-                relevant_document_ids=["DOC"],
-                expected_top_document_id="DOC",
-                expected_top_version="1.0",
-            )
-            for i in range(3)
+            _q("q1", "fresh device", ["REG-1", "PN-1"], "REG-1", "1.0"),
+            _q("q2", "travel", ["REG-2"], "REG-2", "1.0"),
         ]
-        retriever = _StubRetriever(responses={})
-        dim = RetrievalDimension(
-            retriever=retriever,
-            golden_queries=queries,
-            reasoner_id="another-reasoner",
+        provider = _CannedProvider(
+            {
+                ("regulatory", "fresh device"): [("REG-1", "1.0", "INTERNAL")],
+                ("practice", "fresh device"): [
+                    ("NOISE", "1.0", "INTERNAL"),
+                    ("PN-1", "1.0", "INTERNAL"),
+                ],
+                ("regulatory", "travel"): [("REG-2", "1.0", "INTERNAL")],
+                ("practice", "travel"): [("NOISE", "1.0", "INTERNAL")],
+            },
+            applied={"practice": "rrf_only"},
         )
-        await dim.evaluate()
+        binding = _binding(
+            2,
+            {"corpus_id": "practice", "tier": 2},
+            {"corpus_id": "regulatory", "tier": 1},
+        )
+        dim = _dimension(provider, queries, binding)
 
-        assert dim.reasoner_id == "another-reasoner"
-        assert [c[2] for c in retriever.calls] == ["another-reasoner"] * 3
+        run = await dim.evaluate()
+
+        assert dim.k == 4  # two corpora, two passages each
+        metrics = run.result.metrics
+        assert metrics["per_corpus.regulatory.hit_rate"] == 1.0
+        assert metrics["per_corpus.regulatory.mean_reciprocal_rank"] == 1.0
+        assert metrics["per_corpus.practice.hit_rate"] == 0.5
+        assert metrics["per_corpus.practice.mean_reciprocal_rank"] == 0.25
+        assert metrics["per_corpus.practice.ranking_bypass_rate"] == 1.0
+        assert metrics["per_corpus.regulatory.ranking_bypass_rate"] == 0.0
+        # The overall ranking is the rendered order: tier 1 first.
+        assert run.metrics.mean_reciprocal_rank == 1.0  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_a_corpus_the_filter_excludes_has_no_per_corpus_samples(
+        self,
+    ) -> None:
+        queries = [_q("q1", "gdpr", ["GDPR"], "GDPR", "1", jurisdictions=["EU_GDPR"])]
+        provider = _CannedProvider({("eu", "gdpr"): [("GDPR", "1", "EU_GDPR")]})
+        binding = _binding(
+            2,
+            {"corpus_id": "eu", "tier": 1},
+            {"corpus_id": "us-only", "tier": 2, "jurisdictions": ["US_FEDERAL"]},
+        )
+
+        run = await _dimension(provider, queries, binding).evaluate()
+
+        assert [call[1] for call in provider.calls] == ["eu"]
+        assert "per_corpus.us-only.hit_rate" not in run.result.metrics
+        assert run.result.metrics["per_corpus.eu.hit_rate"] == 1.0

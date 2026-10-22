@@ -1,15 +1,26 @@
 """Dimension 01 — Retrieval Quality.
 
-Drives the live ``PolicyRetriever`` against a golden query set and computes:
+Drives the gate's own retrieval path — every corpus the reasoner's binding
+names, through its provider, with the binding's quota, merged in precedence
+order exactly as the gate renders it (``policy_rag_gate.gate.
+retrieve_evidence``, DR-34) — against a golden query set and computes:
 
 - ``context_precision_at_k``, ``context_recall_at_k``, ``mean_reciprocal_rank``
-  via classical IR formulas over annotated ``relevant_document_ids``.
+  via classical IR formulas over annotated ``relevant_document_ids``, on the
+  passages the gate would render (``k`` is the binding's ``k_per_corpus``
+  times its number of corpora).
 - ``version_resolution_accuracy`` (zero tolerance) — for each query, did the
   top result match the expected ``document_id`` *and* version? This catches
   superseded-version regressions in the retriever's ranking.
 - ``jurisdiction_filter_accuracy`` (zero tolerance) — for each query with a
-  jurisdiction filter, are all returned snippets in-jurisdiction? Catches
+  jurisdiction filter, are all returned passages in-jurisdiction? Catches
   filter-leakage regressions.
+- Per corpus (report-only, ``per_corpus.<corpus_id>.<metric>``): precision
+  at the corpus's quota, mean reciprocal rank, and hit rate over each
+  corpus's own ranking (ranks are comparable within a corpus only), the
+  passages it returned on average, and how often its provider fell back
+  from the ranking it attempted (the reference provider's reranker latency
+  bypass).
 
 We use classical IR formulas here, not RAGAS, because we have ground-truth
 annotated chunk IDs. RAGAS' ``context_precision``/``context_recall`` use an
@@ -22,7 +33,7 @@ dimension where claim decomposition + entailment is genuinely hard.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, ConfigDict
@@ -33,12 +44,15 @@ from core.eval.metrics import (
     RetrievalMetrics,
 )
 from eval.dimensions.base import DimensionRun
+from policy_rag_gate.gate import retrieve_evidence
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from policy_rag_gate.models.snippet import RetrievedSnippet
+    from policy_rag_gate.corpus import PolicyBindingConfig
+    from policy_rag_gate.models import RetrievedContext
+    from policy_rag_gate.providers import ProviderRegistry
 
 # ---------------------------------------------------------------------------
 # CI-gate thresholds.
@@ -176,7 +190,7 @@ def reciprocal_rank(retrieved_ids: Sequence[str], relevant_ids: set[str]) -> flo
 
 
 def has_correct_top_version(
-    snippets: Sequence[RetrievedSnippet],
+    snippets: Sequence[RetrievedContext],
     *,
     expected_document_id: str,
     expected_version: str,
@@ -208,10 +222,10 @@ def has_correct_top_version(
 
 
 def jurisdictions_respected(
-    snippets: Sequence[RetrievedSnippet],
+    snippets: Sequence[RetrievedContext],
     allowed: list[str] | None,
 ) -> bool:
-    """All retrieved snippets must lie within the allowed jurisdiction set.
+    """All retrieved passages must lie within the allowed jurisdiction set.
 
     Args:
         snippets: Retrieved snippets.
@@ -229,51 +243,23 @@ def jurisdictions_respected(
 
 
 # ---------------------------------------------------------------------------
-# Retriever protocol — SDK-agnostic boundary into the gate's retriever
-# ---------------------------------------------------------------------------
-
-
-class RetrieverClient(Protocol):
-    """SDK-agnostic interface to whatever retriever is under test.
-
-    The implementation is the gate's own ``PolicyRetriever``; a test stub
-    satisfies this same protocol so the dimension's wire-up can be
-    unit-tested without Postgres or Elasticsearch running.
-
-    ``reasoner_id`` is the tenant filter the gate always passes; the
-    dimension forwards it on every call so eval exercises the same
-    tenant-scoped path as a live decision.
-    """
-
-    def retrieve(
-        self,
-        query: str,
-        k: int = 5,
-        *,
-        reasoner_id: str | None = None,
-        jurisdictions: list[str] | None = None,
-        risk_tier: str | None = None,
-    ) -> tuple[list[RetrievedSnippet], str]:
-        """Run retrieval and return (top-k snippets, retrieval_path)."""
-        ...
-
-
-# ---------------------------------------------------------------------------
 # RetrievalDimension
 # ---------------------------------------------------------------------------
 
 
+def _bypassed(requested: str | None, applied: str) -> bool:
+    return requested is not None and applied != requested
+
+
 class RetrievalDimension:
-    """Drives the retriever against a golden query set.
+    """Drives the gate's retrieval over one binding against a golden query set.
 
     Args:
-        retriever: ``RetrieverClient`` implementation (typically
-            ``PolicyRetriever``; a stub for unit tests).
+        providers: The providers the binding's corpora name (the reference
+            provider in a live run; a fake in unit tests).
+        binding: The reasoner's binding to the policy gate: the corpora and
+            the quota the gate retrieves with for it.
         golden_queries: Loaded golden query set.
-        reasoner_id: Tenant whose corpus the golden queries target. Passed
-            to the retriever on every call so the dimension measures the
-            production (tenant-filtered) retrieval path.
-        k: Retrieval depth at which all metrics are computed.
     """
 
     kind = EvalDimension.RETRIEVAL
@@ -281,16 +267,15 @@ class RetrievalDimension:
     def __init__(
         self,
         *,
-        retriever: RetrieverClient,
+        providers: ProviderRegistry,
+        binding: PolicyBindingConfig,
         golden_queries: list[GoldenQuery],
-        reasoner_id: str,
-        k: int = DEFAULT_K,
     ) -> None:
         """Construct the dimension with its dependencies."""
-        self._retriever = retriever
+        self._providers = providers
+        self._binding = binding
         self._queries = golden_queries
-        self._reasoner_id = reasoner_id
-        self._k = k
+        self._k = binding.k_per_corpus * len(binding.corpora)
 
     async def evaluate(self) -> DimensionRun:
         """Run all golden queries and assemble the dimension run."""
@@ -299,16 +284,26 @@ class RetrievalDimension:
         mrrs: list[float] = []
         version_hits: list[bool] = []
         jurisdiction_hits: list[bool] = []
+        per_corpus: dict[str, dict[str, list[float]]] = {
+            corpus.corpus_id: {
+                "precision_at_k": [],
+                "mean_reciprocal_rank": [],
+                "hit_rate": [],
+                "mean_returned": [],
+                "ranking_bypass_rate": [],
+            }
+            for corpus in self._binding.corpora
+        }
 
         for q in self._queries:
-            snippets, _path = self._retriever.retrieve(
+            evidence = retrieve_evidence(
+                self._providers,
+                self._binding,
                 q.query,
-                self._k,
-                reasoner_id=self._reasoner_id,
-                jurisdictions=q.jurisdictions,
+                jurisdictions=q.jurisdictions or (),
                 risk_tier=q.risk_tier,
             )
-            retrieved_ids = [s.document_id for s in snippets]
+            retrieved_ids = [c.document_id for c in evidence.contexts]
             relevant = set(q.relevant_document_ids)
 
             precisions.append(precision_at_k(retrieved_ids, relevant, self._k))
@@ -316,12 +311,27 @@ class RetrievalDimension:
             mrrs.append(reciprocal_rank(retrieved_ids, relevant))
             version_hits.append(
                 has_correct_top_version(
-                    snippets,
+                    evidence.contexts,
                     expected_document_id=q.expected_top_document_id,
                     expected_version=q.expected_top_version,
                 )
             )
-            jurisdiction_hits.append(jurisdictions_respected(snippets, q.jurisdictions))
+            jurisdiction_hits.append(
+                jurisdictions_respected(evidence.contexts, q.jurisdictions)
+            )
+            for query in evidence.queries:
+                result = evidence.results.get(query.corpus_ref.corpus_id)
+                if result is None:
+                    continue
+                ids = [c.document_id for c in result.contexts]
+                stats = per_corpus[query.corpus_ref.corpus_id]
+                stats["precision_at_k"].append(precision_at_k(ids, relevant, query.k))
+                stats["mean_reciprocal_rank"].append(reciprocal_rank(ids, relevant))
+                stats["hit_rate"].append(float(bool(set(ids) & relevant)))
+                stats["mean_returned"].append(float(len(ids)))
+                stats["ranking_bypass_rate"].append(
+                    float(_bypassed(query.ranking_requested, query.ranking_applied))
+                )
 
         n = len(self._queries)
         mean_precision = sum(precisions) / n if n else 0.0
@@ -346,6 +356,12 @@ class RetrievalDimension:
             version_resolution_accuracy=round(version_acc, 4),
             jurisdiction_filter_accuracy=round(jurisdiction_acc, 4),
         )
+        corpus_metrics = {
+            f"per_corpus.{corpus_id}.{name}": round(sum(values) / len(values), 4)
+            for corpus_id, stats in per_corpus.items()
+            for name, values in stats.items()
+            if values
+        }
         result = DimensionResult(
             dimension=self.kind,
             passed=not violations,
@@ -355,6 +371,7 @@ class RetrievalDimension:
                 "mean_reciprocal_rank": metrics.mean_reciprocal_rank,
                 "version_resolution_accuracy": metrics.version_resolution_accuracy,
                 "jurisdiction_filter_accuracy": metrics.jurisdiction_filter_accuracy,
+                **corpus_metrics,
             },
             threshold_violations=violations,
             evaluated_at=datetime.now(UTC),
@@ -402,13 +419,13 @@ class RetrievalDimension:
 
     @property
     def k(self) -> int:
-        """Retrieval depth at which metrics are computed."""
+        """Cutoff of the overall metrics: the binding's quota times its corpora."""
         return self._k
 
     @property
-    def reasoner_id(self) -> str:
-        """Tenant filter forwarded to the retriever on every golden query."""
-        return self._reasoner_id
+    def binding(self) -> PolicyBindingConfig:
+        """The binding the dimension retrieves with."""
+        return self._binding
 
 
 __all__ = [
@@ -420,7 +437,6 @@ __all__ = [
     "THRESHOLD_VERSION_RESOLUTION",
     "GoldenQuery",
     "RetrievalDimension",
-    "RetrieverClient",
     "has_correct_top_version",
     "jurisdictions_respected",
     "load_golden_queries",
