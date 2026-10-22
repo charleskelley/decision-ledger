@@ -453,8 +453,21 @@
     },
     "EvidenceRef": {
       "additionalProperties": false,
-      "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a policy document id, a\n        rule-set id, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.",
+      "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a policy document id, a\n        rule-set id, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.\n    content_hash: The SHA-256 digest (lowercase hex) of the exact text\n        the gate relied on from this source, as the gate saw it (a\n        passage, a rule set). Anyone holding that text can recompute\n        and compare it; the framework stores it and never reads the\n        text. ``None`` when the gate records no digest (DR-34).",
       "properties": {
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
         "jurisdictions": {
           "default": [],
           "items": {

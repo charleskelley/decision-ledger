@@ -2,7 +2,8 @@
 
 GateRequest is the gate's whole view of a decision: the decision id, the
 reasoner's ``Submission``, the GateContext addressed to the gate, a positive
-budget, and the decision's subject as the ledger resolved it (DR-32).
+budget, the decision's subject as the ledger resolved it (DR-32), and the
+config of the reasoner's binding to the gate (DR-33).
 """
 
 from __future__ import annotations
@@ -26,6 +27,45 @@ def test_gate_request_carries_the_submission_and_its_gate_context(
     assert request.submission == gated_submission
     assert request.submission.reasoner_context.reasoner_id == "stub-reasoner"
     assert request.gate_context.gate_id == "fake"
+
+
+def test_gate_request_carries_no_binding_config_by_default(
+    gated_submission, gate_context
+):
+    request = GateRequest(
+        decision_id="dec-001",
+        submission=gated_submission,
+        gate_context=gate_context,
+        budget_ms=30_000,
+    )
+    assert request.binding_config == {}
+
+
+def test_gate_request_carries_the_bindings_config_as_json(
+    gated_submission, gate_context
+):
+    config = {"label": "kept", "depth": [1, 2.5, None, True], "nested": {"a": "b"}}
+    request = GateRequest(
+        decision_id="dec-001",
+        submission=gated_submission,
+        gate_context=gate_context,
+        budget_ms=30_000,
+        binding_config=config,
+    )
+    assert request.binding_config == config
+
+
+def test_gate_request_refuses_a_binding_config_that_is_not_json(
+    gated_submission, gate_context
+):
+    with pytest.raises(ValidationError):
+        GateRequest(
+            decision_id="dec-001",
+            submission=gated_submission,
+            gate_context=gate_context,
+            budget_ms=30_000,
+            binding_config={"bad": object()},  # type: ignore[dict-item]
+        )
 
 
 def test_gate_request_rejects_an_object_that_is_not_a_submission(gate_context):

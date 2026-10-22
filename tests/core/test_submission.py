@@ -303,6 +303,23 @@ def test_a_deployment_mandate_upgrades_an_advisory_binding():
     )
 
 
+def test_a_deployment_mandate_keeps_the_upgraded_bindings_config():
+    # The gate reads its binding's config from every request: an upgrade to
+    # mandatory must not drop it.
+    bound = GateBinding(gate_id="fake", config={"label": "kept", "depth": [1, 2]})
+    reg = _registration(gates=(bound,))
+    [upgraded] = effective_gate_set(reg, {"fake"})
+    assert upgraded.mandatory is True
+    assert upgraded.config == {"label": "kept", "depth": [1, 2]}
+
+
+def test_a_mandated_gate_the_reasoner_does_not_bind_runs_without_config():
+    reg = _registration(gates=(GateBinding(gate_id="fake", config={"label": "x"}),))
+    [_, unbound] = effective_gate_set(reg, {"zeta"})
+    assert unbound == GateBinding(gate_id="zeta", mandatory=True)
+    assert unbound.config == {}
+
+
 def test_deployment_gates_the_reasoner_does_not_bind_join_as_mandatory_sorted():
     reg = _registration(gates=(GateBinding(gate_id="fake"),))
     assert effective_gate_set(reg, ["zeta", "alpha"]) == (
