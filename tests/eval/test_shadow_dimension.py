@@ -306,6 +306,33 @@ async def test_the_gate_sees_the_stored_context_and_a_gate_mode_submission(
     assert request.identity is not None
 
 
+async def test_the_gate_gets_the_bindings_config_from_the_current_registration(
+    reasoner_context,
+):
+    # Shadow asks what the advisory gates would say now, under the
+    # registration the deployment serves now: the gate reads its binding's
+    # config from the request (DR-33/DR-34), not from the recorded decision.
+    current = STUB_REGISTRATION.model_copy(
+        update={
+            "gates": tuple(
+                GateBinding(gate_id=b.gate_id, mandatory=b.mandatory, config={"v": 2})
+                if b.gate_id == "fake"
+                else b
+                for b in STUB_REGISTRATION.gates
+            )
+        }
+    )
+    gates = _compose(FakeGatePlugin())
+    bundle = await _record(reasoner_context, gates=gates)
+
+    await _dimension([bundle], gates=gates, registration=current).evaluate()
+
+    # The recorded decision never ran its advisory gate: the one request is
+    # the shadow's.
+    [request] = gates["fake"].gate.requests  # type: ignore[attr-defined]
+    assert request.binding_config == {"v": 2}
+
+
 def test_the_dimension_runs_after_the_others_under_its_own_kind():
     assert ShadowDimension.runs_after_others is True
     assert ShadowDimension.kind == EvalDimension.SHADOW

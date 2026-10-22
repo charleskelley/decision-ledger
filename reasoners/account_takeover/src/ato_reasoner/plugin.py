@@ -38,15 +38,15 @@ class AtoServices:
     Args:
         feature_svc: Redis-backed sliding-window feature computer.
         scorer: Trained XGBoost scorer.
-        corpus_version: Policy corpus version stamped into the policy gate's
-            context.
+        template_id: The policy gate prompt template ATO's gate context
+            names (``AtoSettings.template_id``).
         redis: The Redis client the feature service runs on; closed on
             shutdown.
     """
 
     feature_svc: FeatureService
     scorer: AtoScorer
-    corpus_version: str
+    template_id: str
     redis: redis.Redis
 
     def close(self) -> None:
@@ -98,7 +98,7 @@ def build_ato_services(settings: AtoSettings | None = None) -> AtoServices:
     return AtoServices(
         feature_svc=FeatureService(redis=redis_client),
         scorer=AtoScorer(model_path),
-        corpus_version=settings.corpus_version,
+        template_id=settings.template_id,
         redis=redis_client,
     )
 

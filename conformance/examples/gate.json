@@ -6,13 +6,12 @@
   "gate_contexts": [
     {
       "gate_config": {
-        "corpus_version": "example-v1",
         "jurisdictions": [
           "REGION_A",
           "GLOBAL"
         ],
         "retrieval_query": "widget inspection in REGION_A: wobble 0.50, gizmo misalignment 2.0 mm, 25 prior inspections; release criteria, calibration review, sprocket inspection, escalation",
-        "template_id": "example-v1",
+        "template_id": "example-v2",
         "template_vars": {
           "misalignment_mm": "2.0",
           "prior_inspections": "25",

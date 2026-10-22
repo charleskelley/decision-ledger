@@ -25,7 +25,8 @@ def test_the_plugin_publishes_its_registration_and_assets_only():
     assert isinstance(PLUGIN, ReasonerPlugin)
     assert PLUGIN.registration is EXAMPLE_REGISTRATION
     assert sorted(p.name for p in PLUGIN.prompts_dir.glob("*.yaml")) == [
-        "example-v1.yaml"
+        "example-v1.yaml",
+        "example-v2.yaml",
     ]
     assert len(sorted(PLUGIN.corpus_dir.glob("*.md"))) == 3
 

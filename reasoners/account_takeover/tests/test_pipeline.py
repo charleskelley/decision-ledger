@@ -168,7 +168,7 @@ class _Stack:
         self.services = AtoServices(
             feature_svc=self.feature_svc,
             scorer=self.scorer,
-            corpus_version="corpus-test",
+            template_id="ato-v4",
             redis=MagicMock(),
         )
         self.framework = FrameworkServices(
@@ -313,15 +313,17 @@ async def test_calls_scorer_with_features(stack):
 
 
 async def test_the_gate_context_carries_the_policy_gates_retrieval_inputs(stack):
-    """The assembler renders the retrieval query and corpus version into the
-    policy gate's gate_config — the gate runs retrieval itself (DR-28)."""
+    """The assembler renders the template and the retrieval query into the
+    policy gate's gate_config — the gate runs retrieval itself (DR-28), from
+    the corpus ATO's binding names, so no corpus label travels (DR-34)."""
     submission = await _recorded(stack)
 
     gate_context = submission.gate_context("policy")
     assert gate_context is not None
     gate_config = gate_context.gate_config
     assert gate_config is not None
-    assert gate_config["corpus_version"] == "corpus-test"
+    assert gate_config["template_id"] == "ato-v4"
+    assert "corpus_version" not in gate_config
     assert isinstance(gate_config["retrieval_query"], str)
 
 

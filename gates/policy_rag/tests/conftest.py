@@ -6,15 +6,22 @@ none of the framework's test doubles. A minimal local reasoner plugin
 template (``stub-v1``) and two policy documents (``STUB-POLICY-A`` in
 ``REGION_A``, ``STUB-POLICY-B`` in ``REGION_B``), copies of the framework
 stub reasoner's assets — and a minimal widget ``Submission`` carries its
-decisions.
+decisions. Its registration binds the gate to one corpus, ``stub-policy``,
+at tier 1 (DR-34).
+
+``FakeProvider`` is an in-memory retrieval provider (DR-34): corpora of
+``FakePassage`` items, answered in stored order under the evidence
+contract, with switches that break the contract or fail, so the gate's
+provider seam is tested without Postgres, Elasticsearch, or a model.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -32,8 +39,17 @@ from core.observation import (
     ReasonerRegistration,
 )
 from core.submission import Submission
-from policy_rag_gate.models import TokenCost
-from policy_rag_gate.models.snippet import RetrievedSnippet
+from policy_rag_gate.corpus import (
+    CorpusRef,
+    CorpusState,
+    PolicyBindingConfig,
+    ProvenanceLevel,
+)
+from policy_rag_gate.models import RetrievedContext, TokenCost, content_hash
+from policy_rag_gate.providers import ProviderResult
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 PROMPTS_DIR = FIXTURES_DIR / "prompts"
@@ -41,6 +57,12 @@ CORPUS_DIR = FIXTURES_DIR / "corpus"
 
 #: The fixture reasoner's tenant id.
 REASONER_ID = "stub-reasoner"
+
+#: The corpus the fixture reasoner's binding names (its ``fixtures/corpus``).
+CORPUS_ID = "stub-policy"
+
+#: The fixture reasoner's binding configuration: one corpus at tier 1.
+BINDING_CONFIG: dict[str, Any] = {"corpora": [{"corpus_id": CORPUS_ID, "tier": 1}]}
 
 _NAMESPACE = UUID("8d0c5a3e-6f1b-5a7c-9e2d-4b3a2c1d0e9f")
 
@@ -71,7 +93,7 @@ class FixtureReasoner:
         self.registration = ReasonerRegistration(
             reasoner_id=reasoner_id,
             reasoner_name=f"{reasoner_id} (fixture)",
-            gates=(GateBinding(gate_id="policy"),),
+            gates=(GateBinding(gate_id="policy", config=BINDING_CONFIG),),
             bypass_rules=(LOW_SCORE_RULE,),
         )
         self.router = APIRouter(prefix=f"/api/v1/{reasoner_id}")
@@ -135,21 +157,218 @@ def submission() -> Submission:
 
 
 @pytest.fixture
-def retrieved_snippet() -> RetrievedSnippet:
-    """One retrieved chunk from the fixture corpus (``REGION_A``)."""
-    return RetrievedSnippet(
+def retrieved_context() -> RetrievedContext:
+    """One retrieved passage from the fixture corpus (``REGION_A``)."""
+    text = (
+        "Widgets with a thin history SHALL be held for calibration review "
+        "before any release."
+    )
+    return RetrievedContext(
+        corpus_id=CORPUS_ID,
+        provider="reference",
+        tier=1,
         document_id="STUB-POLICY-A",
         title="Stub Widget Policy A",
         version="1.0",
         jurisdiction="REGION_A",
         section_path="2. Calibration Review",
-        text=(
-            "Widgets with a thin history SHALL be held for calibration review "
-            "before any release."
-        ),
-        relevance_score=0.91,
-        retrieval_path="reranked",
+        span=(120, 120 + len(text)),
+        text=text,
+        content_hash=content_hash(text),
+        rank=1,
+        scores={"rerank": 0.91},
+        provider_chunk_id="chunk-1",
+        provenance_level="pinned_version",
+        document_metadata={"effective_date": "2024-01-01"},
     )
+
+
+@pytest.fixture
+def binding_config() -> dict[str, Any]:
+    """The fixture reasoner's binding configuration (JSON, as registered)."""
+    return {"corpora": [dict(c) for c in BINDING_CONFIG["corpora"]]}
+
+
+@pytest.fixture
+def stub_binding() -> PolicyBindingConfig:
+    """The fixture reasoner's binding, validated."""
+    return PolicyBindingConfig.model_validate(BINDING_CONFIG)
+
+
+# ---------------------------------------------------------------------------
+# FakeProvider — an in-memory retrieval provider
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FakePassage:
+    """One passage a fake corpus holds."""
+
+    document_id: str
+    text: str
+    title: str = ""
+    version: str | None = "1.0"
+    jurisdiction: str | None = "REGION_A"
+    section_path: str | None = "1. Scope"
+
+
+class FakeProvider:
+    """``RetrievalProvider`` over in-memory corpora.
+
+    Args:
+        corpora: ``corpus_id`` → its passages, in rank order.
+        provider_id: The id bindings name it by.
+        provenance_level: What ``describe`` reports.
+        passage_provenance: What every passage carries (defaults to
+            ``provenance_level``).
+        ranking_requested: Reported ranking requested.
+        ranking_applied: Reported ranking applied (defaults to requested).
+        describe_error: Raised by ``describe``.
+        retrieve_error: Raised by ``retrieve``.
+        tamper: Rewrites a result before it is returned (contract tests).
+    """
+
+    def __init__(
+        self,
+        corpora: Mapping[str, Sequence[FakePassage]],
+        *,
+        provider_id: str = "reference",
+        provenance_level: ProvenanceLevel = "pinned_version",
+        passage_provenance: ProvenanceLevel | None = None,
+        ranking_requested: str = "reranked",
+        ranking_applied: str | None = None,
+        describe_error: Exception | None = None,
+        retrieve_error: Exception | None = None,
+        tamper: Callable[[ProviderResult], object] | None = None,
+    ) -> None:
+        self._corpora = {k: tuple(v) for k, v in corpora.items()}
+        self._id = provider_id
+        self._provenance: ProvenanceLevel = provenance_level
+        self._passage_provenance: ProvenanceLevel = (
+            passage_provenance or provenance_level
+        )
+        self._requested = ranking_requested
+        self._applied = ranking_applied or ranking_requested
+        self._describe_error = describe_error
+        self._retrieve_error = retrieve_error
+        self._tamper = tamper
+        self.calls: list[dict[str, Any]] = []
+        self.described: list[str] = []
+        self.closed = False
+
+    @property
+    def provider_id(self) -> str:
+        return self._id
+
+    def describe(self, corpus: CorpusRef) -> CorpusState:
+        self.described.append(corpus.corpus_id)
+        if self._describe_error is not None:
+            raise self._describe_error
+        if corpus.corpus_id not in self._corpora:
+            msg = f"corpus {corpus.corpus_id!r} is not held by {self._id!r}"
+            raise LookupError(msg)
+        return CorpusState(
+            corpus_id=corpus.corpus_id,
+            provider=self._id,
+            provider_version="fake-1",
+            state_marker=f"fake:{corpus.corpus_id}:{len(self._corpora[corpus.corpus_id])}",
+            provenance_level=self._provenance,
+            document_count=len(
+                {p.document_id for p in self._corpora[corpus.corpus_id]}
+            ),
+        )
+
+    def retrieve(
+        self,
+        query: str,
+        corpus: CorpusRef,
+        *,
+        k: int,
+        jurisdictions: Sequence[str] | None,
+        risk_tier: str | None,
+    ) -> Any:
+        self.calls.append(
+            {
+                "query": query,
+                "corpus_id": corpus.corpus_id,
+                "tier": corpus.tier,
+                "k": k,
+                "jurisdictions": None if jurisdictions is None else list(jurisdictions),
+                "risk_tier": risk_tier,
+            }
+        )
+        if self._retrieve_error is not None:
+            raise self._retrieve_error
+        passages = [
+            p
+            for p in self._corpora[corpus.corpus_id]
+            if not jurisdictions or p.jurisdiction in jurisdictions
+        ][:k]
+        result = ProviderResult(
+            state=self.describe(corpus),
+            contexts=tuple(
+                RetrievedContext(
+                    corpus_id=corpus.corpus_id,
+                    provider=self._id,
+                    tier=corpus.tier,
+                    document_id=p.document_id,
+                    title=p.title or f"Policy {p.document_id}",
+                    version=p.version,
+                    jurisdiction=p.jurisdiction,
+                    section_path=p.section_path,
+                    text=p.text,
+                    content_hash=content_hash(p.text),
+                    rank=rank,
+                    scores={"fake": 1.0 / rank},
+                    provider_chunk_id=f"{corpus.corpus_id}/{p.document_id}/{rank}",
+                    provenance_level=self._passage_provenance,
+                )
+                for rank, p in enumerate(passages, 1)
+            ),
+            ranking_requested=self._requested,
+            ranking_applied=self._applied,
+        )
+        return self._tamper(result) if self._tamper is not None else result
+
+    def close(self) -> None:
+        self.closed = True
+
+
+#: The fixture corpus as fake passages (two documents, two jurisdictions).
+STUB_PASSAGES: tuple[FakePassage, ...] = (
+    FakePassage(
+        "STUB-POLICY-A",
+        "Widgets with a thin history SHALL be held for calibration review.",
+        title="Stub Widget Policy A",
+        jurisdiction="REGION_A",
+        section_path="2. Calibration Review",
+    ),
+    FakePassage(
+        "STUB-POLICY-B",
+        "Region B widgets require a second inspection before release.",
+        title="Stub Widget Policy B",
+        jurisdiction="REGION_B",
+        section_path="3. Release",
+    ),
+)
+
+
+@pytest.fixture
+def fake_provider() -> type[FakeProvider]:
+    """``FakeProvider`` as a fixture (test modules cannot import conftest)."""
+    return FakeProvider
+
+
+@pytest.fixture
+def fake_passage() -> type[FakePassage]:
+    """``FakePassage`` as a fixture."""
+    return FakePassage
+
+
+@pytest.fixture
+def stub_provider() -> FakeProvider:
+    """A fake reference provider holding the fixture corpus as ``stub-policy``."""
+    return FakeProvider({CORPUS_ID: STUB_PASSAGES})
 
 
 @pytest.fixture

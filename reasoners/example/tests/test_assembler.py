@@ -8,12 +8,14 @@ authorizes it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.actions import DecisionAction
 from core.submission import Submission
 from example_reasoner.__main__ import sample_event
-from example_reasoner.assembler import CORPUS_VERSION, TEMPLATE_ID, build_submission
+from example_reasoner.assembler import TEMPLATE_ID, build_submission
 from example_reasoner.plugin import PLUGIN
 from example_reasoner.scorer import score_widget
 
@@ -52,8 +54,9 @@ def test_the_mode_follows_the_bypass_rules_and_the_gate_accepts_every_context(
     ReasonerProfile.from_assets(
         prompts_dir=PLUGIN.prompts_dir, corpus_dir=PLUGIN.corpus_dir
     ).authorize(config)
-    assert config.template_id == TEMPLATE_ID
-    assert config.corpus_version == CORPUS_VERSION
+    assert config.template_id == TEMPLATE_ID == "example-v2"
+    # The corpus is the binding's (example-policy), not the submission's.
+    assert "corpus_version" not in context.gate_config
     assert config.jurisdictions == [region, "GLOBAL"]
 
 
@@ -73,3 +76,38 @@ def test_every_widget_is_one_subject():
     second = sample_event("high", widget_id="widget-7")
     assert first.entity_id == second.entity_id
     assert first.event_id != second.event_id
+
+
+_CONFORMANCE_EXAMPLES = Path(__file__).resolve().parents[3] / "conformance" / "examples"
+
+
+def _conformance_submissions() -> list[tuple[str, str]]:
+    """Every submission payload the conformance suite sends, as JSON, by source."""
+    payloads: list[tuple[str, str]] = []
+    for path in sorted(_CONFORMANCE_EXAMPLES.glob("*.json")):
+        if path.name in {"registration.json", "resolution.json"}:
+            continue
+        payloads.append((path.name, path.read_text(encoding="utf-8")))
+    batch = _CONFORMANCE_EXAMPLES / "batch.ndjson"
+    for number, line in enumerate(batch.read_text(encoding="utf-8").splitlines(), 1):
+        payloads.append((f"{batch.name}:{number}", line))
+    return payloads
+
+
+@pytest.mark.skipif(
+    not _CONFORMANCE_EXAMPLES.is_dir(), reason="no conformance/ checkout"
+)
+def test_every_conformance_payload_carries_a_context_the_gate_accepts():
+    from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
+
+    profile = ReasonerProfile.from_assets(
+        prompts_dir=PLUGIN.prompts_dir, corpus_dir=PLUGIN.corpus_dir
+    )
+    payloads = _conformance_submissions()
+    assert len(payloads) >= 8
+    for source, payload in payloads:
+        submission = Submission.model_validate_json(payload)
+        [context] = submission.gate_contexts
+        config = PolicyGateConfig.model_validate(context.gate_config)
+        profile.authorize(config)
+        assert config.template_id == TEMPLATE_ID, source

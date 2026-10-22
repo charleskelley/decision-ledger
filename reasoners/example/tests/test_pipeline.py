@@ -33,7 +33,8 @@ async def test_a_mid_widget_is_decided_by_the_gate(ledger, policy_gate):
     assert receipt.mode == "gate"
     assert receipt.decision_action == DecisionAction.CHALLENGE
     [request] = policy_gate.requests
-    assert request.gate_context.gate_config["template_id"] == "example-v1"
+    assert request.gate_context.gate_config["template_id"] == "example-v2"
+    assert request.binding_config["corpora"][0]["corpus_id"] == "example-policy"
     bundle = await client.get_bundle(receipt.decision_id)
     assert bundle.gate("policy").output.extra["rationale"].startswith("Step-up")
 

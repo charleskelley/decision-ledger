@@ -57,10 +57,10 @@ deployment would replace each with operational artifacts.
 | Assembler | `ato_reasoner/assembler.py` | `build_submission`: event, features, and score into one `Submission` with its `ReasonerContext`, the policy gate's `GateContext`, the native subject, and the mode. |
 | Pipeline | `ato_reasoner/pipeline.py` | `run_ato_decision`: features, score, assemble, then submit through a `LedgerClient` and return the receipt with ATO's own step timings. |
 | Service | `ato_reasoner/app.py`, `ato_reasoner/api.py` | ATO's own FastAPI app (`create_app`): `POST /api/v1/ato/decisions` and `GET /health`, on port 8001. |
-| Settings | `ato_reasoner/settings.py` | `AtoSettings` (prefix `ATO_`): Redis URL, scorer artifact, corpus version, ledger URL and key. |
+| Settings | `ato_reasoner/settings.py` | `AtoSettings` (prefix `ATO_`): Redis URL, scorer artifact, the policy gate template (`ATO_TEMPLATE_ID`: `ato-v4` by default; `ato-v2` and `ato-v3` selectable), ledger URL and key. |
 | Plugin | `ato_reasoner/plugin.py` | `PLUGIN`: the registration and the `prompts/` and `corpus/` directories the RAG policy gate reads; `build_ato_services` opens Redis and loads the scorer for ATO's own processes. |
-| Registration | `ato_reasoner/registry.py` | `ATO_REGISTRATION`: the gate binding, the bypass rules, the recordable actions, the native namespace, and the enforcement profile. |
-| Prompts and corpus | `ato_reasoner/prompts/`, `ato_reasoner/corpus/` | Gate templates `ato-v1` to `ato-v3` (active: `ato-v3`, which carries its own `system:` text) and the 32 policy documents the gate indexes under `ato-reasoner`. |
+| Registration | `ato_reasoner/registry.py` | `ATO_REGISTRATION`: the gate binding (its configuration names the corpus `ato-policy` at tier 1, DR-34), the bypass rules, the recordable actions, the native namespace, and the enforcement profile. |
+| Prompts and corpus | `ato_reasoner/prompts/`, `ato_reasoner/corpus/` | Gate templates `ato-v1` to `ato-v4` (default: `ato-v4`, which renders the evidence by authority tier with the conflict/gap protocol; `ato-v3` reproduces the behavior before DR-34; `ato-v1` cannot be rendered again) and the 32 policy documents loaded as the corpus `ato-policy`. |
 | Generator | `ato_reasoner/generator/` | The synthetic login-event generator and its eight scenarios ([Scenarios](scenarios.md)). |
 | Eval | `ato_reasoner/eval/` | The `EvalAdapter`, the in-process driver, the baseline capture, and the datasets for the framework harness and the policy gate's harness. |
 | Infrastructure | `reasoners/account_takeover/compose.yaml` | Redis, included into the root stack; configured with `ATO_REDIS_URL`. |
@@ -117,11 +117,13 @@ What the ledger does with each mode (DR-29, DR-30):
   HOLD.
 
 Every submission, recorded ones included, carries the policy gate's
-`GateContext`: the template id `ato-v3`, its template variables, the
-jurisdiction filter (`INTERNAL`, plus `US_FEDERAL` for a US login), the risk
-tier (`HIGH_VALUE` at a score of 0.60 or more, else `STANDARD`), the
-retrieval query ATO renders (`ato_reasoner/retrieval_query.py`), and the
-corpus version. The gate runs retrieval itself from that context.
+`GateContext`: the template id (`ATO_TEMPLATE_ID`, `ato-v4` by default), its
+template variables, the jurisdiction filter (`INTERNAL`, plus `US_FEDERAL`
+for a US login), the risk tier (`HIGH_VALUE` at a score of 0.60 or more,
+else `STANDARD`), and the retrieval query ATO renders
+(`ato_reasoner/retrieval_query.py`). It names no corpus: ATO's registration
+binds the gate to `ato-policy` at tier 1, and the gate retrieves from that
+corpus itself, recording its state on every gated decision.
 
 ### Why record and gate
 

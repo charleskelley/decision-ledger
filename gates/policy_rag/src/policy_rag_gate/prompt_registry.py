@@ -17,6 +17,10 @@ YAML file format::
     system: |
         Optional. The system message sent alongside the rendered template.
         When absent, DEFAULT_SYSTEM_TEXT (generic framework wording) is used.
+    evidence_layout: tiered_blocks
+        Optional (DR-34). How the gate renders {policy_snippets}:
+        numbered_list (the default) or tiered_blocks (grouped by authority
+        tier, with the conflict/gap verdict).
     template: |
         Full template content.
         Use {var_name} for domain-provided variables.
@@ -39,11 +43,12 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import yaml
 
 from policy_rag_gate.models import PromptTemplate
+from policy_rag_gate.models.prompt import EvidenceLayout
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -93,8 +98,8 @@ def _load_template(path: Path) -> PromptTemplate:
     Raises:
         KeyError: If the YAML is missing a required field.
         ValueError: If the file is not a mapping, the template content is
-            empty or not text, or a ``system`` key is present but blank or not
-            text.
+            empty or not text, a ``system`` key is present but blank or not
+            text, or an ``evidence_layout`` key names no layout.
     """
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -121,6 +126,13 @@ def _load_template(path: Path) -> PromptTemplate:
             f"Template file '{path.name}' has a 'system' key that is not text."
         )
 
+    layout = raw.get("evidence_layout", "numbered_list")
+    if layout not in get_args(EvidenceLayout):
+        raise ValueError(
+            f"Template file '{path.name}' has evidence_layout {layout!r}; expected "
+            f"one of {list(get_args(EvidenceLayout))}."
+        )
+
     return PromptTemplate(
         template_id=raw.get("template_id", path.stem),
         version=raw["version"],
@@ -128,6 +140,7 @@ def _load_template(path: Path) -> PromptTemplate:
         template_text=template_str,
         system_text=system_text,
         required_vars=_extract_required_vars(template_str),
+        evidence_layout=layout,
     )
 
 

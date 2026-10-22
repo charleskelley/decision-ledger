@@ -55,6 +55,11 @@ class EvidenceRef(BaseModel):
             Empty for sources that have no jurisdiction. Enforcement's
             jurisdiction-conflict tier reads the union across a gate's
             evidence and checks it against the reasoner's conflict groups.
+        content_hash: The SHA-256 digest (lowercase hex) of the exact text
+            the gate relied on from this source, as the gate saw it (a
+            passage, a rule set). Anyone holding that text can recompute
+            and compare it; the framework stores it and never reads the
+            text. ``None`` when the gate records no digest (DR-34).
     """
 
     model_config = ConfigDict(
@@ -64,6 +69,7 @@ class EvidenceRef(BaseModel):
     source_id: str
     locator: str | None = None
     jurisdictions: frozenset[str] = frozenset()
+    content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class GateOutput(BaseModel):

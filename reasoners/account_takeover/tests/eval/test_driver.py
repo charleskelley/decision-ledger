@@ -149,4 +149,5 @@ def test_unknown_fallback_kind_message_lists_valid_kinds():
     assert "retrieval_timeout" in msg
     assert "llm_5xx" in msg
     assert "retrieval_error" in msg
-    assert "corpus_mismatch" in msg
+    # The relabeling kind left with corpus_version (DR-34).
+    assert "corpus_mismatch" not in msg

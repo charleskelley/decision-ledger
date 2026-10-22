@@ -4,21 +4,31 @@ The ATO plugin owns ``ato_reasoner/prompts/``. These tests load
 that real directory through the RAG policy gate's ``YamlPromptRegistry`` and
 pin:
 
-- ``ato-v1``, ``ato-v2``, and ``ato-v3`` are shipped (the gate authorizes
-  exactly the templates ATO ships; see ``test_registry.py``);
+- ``ato-v1`` through ``ato-v4`` are shipped (the gate authorizes exactly the
+  templates ATO ships; see ``test_registry.py``), and ``ato-v4`` is the one
+  ATO names unless told otherwise;
 - ``ato-v3`` carries, verbatim, the system prompt that used to be a constant
   inside the policy gate's code (the move is what v3 exists for);
 - ``ato-v3`` renders byte-identical user text to ``ato-v2`` for the same
   variables (the plan's "rendered text is byte-identical" contract);
 - ``ato-v1``/``ato-v2`` fall back to the framework default system text, so
-  they are retained for historical bundles, not as a rollback target.
+  they are retained for historical bundles, not as a rollback target;
+- ``ato-v4`` (DR-34) renders the evidence by authority tier and asks for the
+  tiered verdict with the conflict/gap protocol, needs exactly ``ato-v3``'s
+  variables, and keeps ``ato-v3``'s event section; ``ato-v3`` still renders
+  the numbered list exactly as before.
 """
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
+from ato_reasoner.assembler import DEFAULT_TEMPLATE_ID
 from ato_reasoner.plugin import PLUGIN
-from policy_rag_gate.gate import _render_prompt
-from policy_rag_gate.models.snippet import RetrievedSnippet
+from ato_reasoner.settings import SELECTABLE_TEMPLATE_IDS, AtoSettings
+from policy_rag_gate.gate import _render_prompt, render_evidence
+from policy_rag_gate.models import RetrievedContext, content_hash
 from policy_rag_gate.prompt_registry import DEFAULT_SYSTEM_TEXT, YamlPromptRegistry
 
 # The gate-level constant that lived in the policy gate's code before the
@@ -46,26 +56,60 @@ _TEMPLATE_VARS = {
     "sparse_history": "False",
 }
 
+_TEXT = "Verifiers SHALL implement rate limiting on {authenticator} attempts."
 _SNIPPETS = [
-    RetrievedSnippet(
+    RetrievedContext(
+        corpus_id="ato-policy",
+        provider="reference",
+        tier=1,
         document_id="NIST-800-63B",
         title="Digital Identity Guidelines",
         version="3",
         jurisdiction="US_FEDERAL",
         section_path="5.2.2",
-        text="Verifiers SHALL implement rate limiting on {authenticator} attempts.",
-        relevance_score=0.9,
-        retrieval_path="rrf_only",
+        text=_TEXT,
+        content_hash=content_hash(_TEXT),
+        rank=1,
+        provenance_level="pinned_version",
     )
 ]
+
+
+def _rendered(template_id: str) -> str:
+    template = _registry().get(template_id)
+    return _render_prompt(
+        template.template_text,
+        _TEMPLATE_VARS,
+        render_evidence(_SNIPPETS, template.evidence_layout),
+    )
 
 
 def _registry() -> YamlPromptRegistry:
     return YamlPromptRegistry([PLUGIN.prompts_dir])
 
 
-def test_ato_prompts_dir_ships_v1_v2_and_v3():
-    assert {"ato-v1", "ato-v2", "ato-v3"} <= set(_registry().registered_ids())
+def test_ato_prompts_dir_ships_v1_through_v4():
+    assert {"ato-v1", "ato-v2", "ato-v3", "ato-v4"} <= set(_registry().registered_ids())
+
+
+def test_ato_names_ato_v4_unless_told_otherwise():
+    assert DEFAULT_TEMPLATE_ID == "ato-v4"
+    assert AtoSettings(_env_file=None).template_id == "ato-v4"  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("template_id", SELECTABLE_TEMPLATE_IDS)
+def test_every_template_ato_can_be_told_to_name_renders(template_id):
+    rendered = _rendered(template_id)
+
+    assert "rate limiting on {authenticator} attempts" in rendered
+    assert "{policy_snippets}" not in rendered
+
+
+def test_ato_v1_cannot_be_named_since_it_no_longer_renders():
+    with pytest.raises(KeyError):
+        _rendered("ato-v1")
+    with pytest.raises(ValidationError, match="ato-v1"):
+        AtoSettings(_env_file=None, template_id="ato-v1")  # type: ignore[call-arg]
 
 
 def test_ato_v3_system_text_equals_former_gate_constant():
@@ -84,14 +128,7 @@ def test_ato_v3_requires_same_variables_as_v2():
 
 
 def test_ato_v3_renders_byte_identical_user_text_to_v2():
-    registry = _registry()
-    rendered_v2 = _render_prompt(
-        registry.get("ato-v2").template_text, _TEMPLATE_VARS, _SNIPPETS
-    )
-    rendered_v3 = _render_prompt(
-        registry.get("ato-v3").template_text, _TEMPLATE_VARS, _SNIPPETS
-    )
-    assert rendered_v3 == rendered_v2
+    assert _rendered("ato-v3") == _rendered("ato-v2")
 
 
 def test_ato_v3_template_text_is_byte_identical_to_v2():
@@ -99,3 +136,41 @@ def test_ato_v3_template_text_is_byte_identical_to_v2():
     # v2 block, so no variable set can make the two user messages differ.
     registry = _registry()
     assert registry.get("ato-v3").template_text == registry.get("ato-v2").template_text
+
+
+# ---------------------------------------------------------------------------
+# ato-v4 — the conflict/gap protocol (DR-34)
+# ---------------------------------------------------------------------------
+
+
+def test_ato_v3_keeps_the_numbered_list_and_v4_renders_tiers():
+    registry = _registry()
+
+    assert registry.get("ato-v3").evidence_layout == "numbered_list"
+    assert registry.get("ato-v4").evidence_layout == "tiered_blocks"
+    assert "[1] Digital Identity Guidelines (v3) — US_FEDERAL" in _rendered("ato-v3")
+    rendered = _rendered("ato-v4")
+    assert "--- Tier 1 (corpora: ato-policy) ---" in rendered
+    assert "Corpus: ato-policy | Tier: 1 | Document: NIST-800-63B" in rendered
+
+
+def test_ato_v4_needs_exactly_the_variables_ato_v3_does():
+    registry = _registry()
+    assert registry.get("ato-v4").required_vars == registry.get("ato-v3").required_vars
+
+
+def test_ato_v4_keeps_the_event_section_of_ato_v3():
+    registry = _registry()
+    v3 = registry.get("ato-v3").template_text
+    v4 = registry.get("ato-v4").template_text
+    event = v3[v3.index("## Authentication Event") : v3.index("## Retrieved")]
+
+    assert event in v4
+
+
+def test_ato_v4_asks_for_the_tiered_verdict_and_its_protocol_fields():
+    template = _registry().get("ato-v4")
+
+    assert "TieredPolicyGateVerdict" in template.system_text
+    for field in ("governing_corpus_id", "conflict_detected", "evidence_sufficient"):
+        assert field in template.template_text

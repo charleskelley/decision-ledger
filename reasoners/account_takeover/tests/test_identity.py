@@ -48,9 +48,7 @@ def _scorer(risk_score: float = 0.05) -> ScorerOutput:
 
 
 def _submission(login_event, ato_feature_vector, risk_score: float = 0.05):
-    return build_submission(
-        login_event, ato_feature_vector, _scorer(risk_score), corpus_version="c-1"
-    )
+    return build_submission(login_event, ato_feature_vector, _scorer(risk_score))
 
 
 def test_atos_registration_declares_the_account_namespace():
@@ -143,7 +141,7 @@ async def test_a_decision_through_the_ledger_records_the_account_with_provenance
     services = AtoServices(
         feature_svc=feature_svc,
         scorer=scorer,
-        corpus_version="c-1",
+        template_id="ato-v4",
         redis=MagicMock(),
     )
 

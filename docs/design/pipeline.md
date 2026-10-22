@@ -109,7 +109,8 @@ the event, features, and score into the framework's `Submission`: the
 `ReasonerContext` (the score as `label_value`, the complete feature snapshot
 as `feature_set`, the SHAP attribution), one `GateContext` for the RAG policy
 gate (template id, template variables, retrieval query, jurisdiction and
-risk-tier filters, corpus version), the native subject
+risk-tier filters; the corpus is the registration's binding, not the
+submission's), the native subject
 `(ato-account, account_id)`, the event as opaque `raw_event`, and the mode.
 `run_ato_decision` then submits through its `LedgerClient` and returns the
 receipt with ATO's own step timings (`features_ms`, `scorer_ms`, `ledger_ms`).
@@ -197,15 +198,17 @@ proposal never skips them: a proposed BLOCK on a gated decision still runs the
 advisory gates.
 
 For the RAG policy gate (`gate_id` `policy`, bound advisory by ATO and by the
-example reasoner), evaluation is the gate's own business: hybrid retrieval
-over the submitting reasoner's corpus (pgvector dense search and
-Elasticsearch BM25, filtered by `reasoner_id` and jurisdictions in both
-stores and by risk tier in pgvector, fused by Reciprocal Rank Fusion, then
+example reasoner), evaluation is the gate's own business: one query per
+corpus the reasoner's binding names (ATO: `ato-policy`; the example:
+`example-policy`), each through the retrieval provider that holds it — the
+reference provider's hybrid retrieval is pgvector dense search and
+Elasticsearch BM25, filtered by `corpus_id` and jurisdictions in both stores
+and by risk tier in pgvector, fused by Reciprocal Rank Fusion, then
 reranked by a cross-encoder, falling back to the fused order when reranking
-exceeds its timeout), rendering the reasoner's prompt template, one
-structured-output LLM call, and returning a `GateOutput` whose evidence is the
-retrieved snippets with their jurisdictions. See
-[Policy Gate](gates/policy/index.md).
+exceeds its timeout — then rendering the reasoner's prompt template with
+the passages in precedence order, one structured-output LLM call, and
+returning a `GateOutput` whose evidence is the rendered passages with their
+jurisdictions and content hashes. See [Policy Gate](gates/policy/index.md).
 
 ### 6. Gate-level enforcement
 

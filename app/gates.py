@@ -182,6 +182,12 @@ class BindingValidator(Protocol):
     the config first. A refusal fails startup (``GatePluginError``) or
     refuses the write (422), and nothing is stored.
 
+    Admitting a binding is not remembering it: the framework hands the gate
+    the binding's ``config`` with every request (``GateRequest.binding_config``,
+    from the registration the decision is made under), so a gate reads its
+    per-reasoner configuration there and a replaced registration takes
+    effect with the next decision.
+
     A gate that serves reasoners from per-reasoner assets uses it to learn a
     reasoner registered without a plugin. It must be idempotent and
     add-only: admitting a binding it already admitted changes nothing. The
@@ -511,7 +517,10 @@ def check_gate_set(
     - a gate the deployment mandates must accept, from a reasoner that does
       not bind it, the empty configuration it will run with: its
       ``config_model`` validates ``{}`` and, when the built gate is a
-      ``ConfigAuthorizer``, it authorizes that for the reasoner;
+      ``ConfigAuthorizer``, it authorizes that for the reasoner, and its
+      plugin's ``binding_config_model``, when it declares one, validates an
+      empty binding configuration (the gate reads the binding from every
+      request, ``GateRequest.binding_config``);
     - then every composed gate the registration binds must admit the
       binding (``admit_binding``: the plugin's ``binding_config_model``
       validates the binding's ``config``, then the gate's
@@ -614,10 +623,18 @@ def admit_binding(
 
 
 def _check_unbound_mandate(composed: ComposedGate, reasoner_id: str) -> None:
-    """A mandated gate the reasoner does not bind must take an empty config."""
+    """A mandated gate the reasoner does not bind must take an empty config.
+
+    Both of them: the decision's (``config_model``, and the gate's
+    authorization) and the binding's (``binding_config_model``), since the
+    gate runs with an empty ``gate_config`` and an empty ``binding_config``.
+    """
     config: BaseModel | Mapping[str, Any] = {}
     config_model = composed.plugin.config_model
+    binding_model = binding_config_model(composed.plugin)
     try:
+        if binding_model is not None:
+            binding_model.model_validate({})
         if config_model is not None:
             config = config_model.model_validate({})
         if isinstance(composed.gate, ConfigAuthorizer):

@@ -7,6 +7,7 @@ gate-owned extension (evidence_snapshot, extra) that must survive the JSON
 round trip the bundle store performs, unchanged.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -174,10 +175,49 @@ def test_gate_output_is_immutable():
 # ---------------------------------------------------------------------------
 
 
-def test_evidence_ref_defaults_to_no_locator_and_no_jurisdictions():
+def test_evidence_ref_defaults_to_no_locator_no_jurisdictions_and_no_digest():
     ref = EvidenceRef(source_id="ruleset@1.0")
     assert ref.locator is None
     assert ref.jurisdictions == frozenset()
+    assert ref.content_hash is None
+
+
+def test_evidence_ref_carries_the_digest_of_the_text_the_gate_relied_on():
+    digest = hashlib.sha256(b"Section 3.2 applies.").hexdigest()
+    ref = EvidenceRef(source_id="DOC-A", locator="3.2", content_hash=digest)
+    assert ref.content_hash == digest
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "",
+        "ABCDEF" + "0" * 58,  # upper case
+        "0" * 63,  # one character short
+        "0" * 65,
+        "sha256:" + "0" * 64,  # a prefixed notation
+        "g" * 64,
+    ],
+)
+def test_evidence_ref_refuses_a_digest_that_is_not_sha256_hex(digest: str):
+    with pytest.raises(ValidationError):
+        EvidenceRef(source_id="DOC-A", content_hash=digest)
+
+
+def test_evidence_ref_digest_is_strictly_a_string():
+    with pytest.raises(ValidationError):
+        EvidenceRef(source_id="DOC-A", content_hash=b"0" * 64)  # type: ignore[arg-type]
+
+
+def test_a_stored_evidence_ref_without_a_digest_still_loads():
+    # Bundles written before DR-34 carry no content_hash key; replay reloads
+    # them with the current model.
+    stored = {"source_id": "DOC-A", "locator": "2.1", "jurisdictions": ["A"]}
+    ref = EvidenceRef.model_validate(stored, strict=False)
+    assert ref.content_hash is None
+    assert ref == EvidenceRef(
+        source_id="DOC-A", locator="2.1", jurisdictions=frozenset({"A"})
+    )
 
 
 def test_evidence_ref_is_immutable():

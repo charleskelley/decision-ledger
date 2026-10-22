@@ -56,6 +56,13 @@ eval = [
 [project.entry-points."decisionledger.gates"]
 policy = "policy_rag_gate.plugin:PLUGIN"
 
+# Retrieval providers (DR-34): the gate's own entry-point group, not the
+# framework's. Each name is the provider id a corpus reference names on a
+# reasoner's binding; `reference` (pgvector + Elasticsearch + cross-encoder)
+# ships here and is the default.
+[project.entry-points."policy_rag_gate.providers"]
+reference = "policy_rag_gate.providers.reference:PLUGIN"
+
 [tool.uv.sources]
 decision-ledger = { workspace = true }
 

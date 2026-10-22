@@ -3,7 +3,10 @@
 ``EXAMPLE_REGISTRATION`` is what the ledger knows about the example reasoner:
 
 - **Gate set**: the RAG policy gate (``"policy"``), advisory — it runs when
-  the example asks the ledger to gate a widget (DR-29).
+  the example asks the ledger to gate a widget (DR-29). The binding names
+  the corpus the gate reads (DR-34): ``example-policy`` (the example's
+  ``corpus/`` directory, loaded under that id) at tier 1, held by the
+  reference provider, every passage pinned to its document version.
 - **Bypass rules** (DR-30): ``low-score`` (``widget_score`` below
   ``LOW_SCORE_THRESHOLD`` → record ALLOW) and ``high-score`` (above
   ``HIGH_SCORE_THRESHOLD`` → record BLOCK). Everything between asks for the
@@ -28,6 +31,26 @@ from core.actions import DecisionAction
 from core.gate import Compare
 from core.identity import NativeNamespace
 from core.observation import BypassRule, GateBinding, ReasonerRegistration
+
+#: The corpus the example's binding to the policy gate names: its
+#: ``corpus/`` directory, loaded under this id.
+EXAMPLE_CORPUS_ID = "example-policy"
+
+#: The example's binding to the RAG policy gate (DR-34): one corpus at tier 1.
+POLICY_GATE_BINDING = GateBinding(
+    gate_id="policy",
+    config={
+        "corpora": [
+            {
+                "corpus_id": EXAMPLE_CORPUS_ID,
+                "provider": "reference",
+                "tier": 1,
+                "min_provenance": "pinned_version",
+            }
+        ],
+        "k_per_corpus": 5,
+    },
+)
 
 #: Below this ``widget_score`` the example records ALLOW.
 LOW_SCORE_THRESHOLD = 0.2
@@ -69,7 +92,7 @@ HIGH_SCORE_RULE = BypassRule(
 EXAMPLE_REGISTRATION = ReasonerRegistration(
     reasoner_id="example-reasoner",
     reasoner_name="Example Reasoner",
-    gates=(GateBinding(gate_id="policy"),),
+    gates=(POLICY_GATE_BINDING,),
     bypass_rules=(LOW_SCORE_RULE, HIGH_SCORE_RULE),
     recordable_actions=frozenset({DecisionAction.ALLOW, DecisionAction.BLOCK}),
     native_namespaces=(EXAMPLE_WIDGET_NAMESPACE,),

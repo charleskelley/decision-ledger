@@ -67,7 +67,8 @@ Outside the boundary:
 The offline tools (each reasoner's scorer trainer, scenario generator, and
 eval adapter; the RAG gate's corpus loader; the two eval harnesses) run on
 demand and are not drawn. The RAG gate's retrieval depends on one of them:
-it reads the policy chunks its corpus loader writes
+its reference provider reads the corpora its corpus loader writes, under
+the corpus ids reasoners' bindings name
 (`make build-policy-index-<reasoner_id>`).
 
 ## Component Diagram - Level 3 (Ledger API)
@@ -145,7 +146,7 @@ decision-ledger/
 │
 ├── gates/                    Gate plugins, one workspace member each (DR-28)
 │   ├── rules/                    decisionledger-gate-rules (rules_gate, gate_id rules): declarative rule sets, no infrastructure
-│   └── policy_rag/               decisionledger-gate-policy-rag (policy_rag_gate, gate_id policy): retrieval, prompts, LLM adapters, its own sql/, es/, compose.yaml, eval/
+│   └── policy_rag/               decisionledger-gate-policy-rag (policy_rag_gate, gate_id policy): corpus references (corpus.py), retrieval providers (providers/), prompts, LLM adapters, its own sql/, es/, compose.yaml, eval/
 │
 ├── reasoners/                Reasoner plugins, one workspace member per domain (DR-26)
 │   ├── account_takeover/         ato-reasoner (ato_reasoner): the reference reasoner, its own service, Redis, XGBoost scorer
@@ -264,7 +265,7 @@ Members (plugins and clients the framework never imports):
 | Component | Location | Role |
 |-----------|----------|------|
 | Rules gate | `gates/rules/` | Declarative rule sets over a reasoner's evidence |
-| RAG policy gate | `gates/policy_rag/` | Hybrid retrieval, prompt rendering, LLM verdict; its own eval |
+| RAG policy gate | `gates/policy_rag/` | Retrieval through providers from the corpora a binding names, prompt rendering, LLM verdict; its own eval |
 | Account Takeover | `reasoners/account_takeover/` | Reference reasoner: ingestion, features, scorer, assembler, its own service |
 | Example reasoner | `reasoners/example/` | Minimal documented reasoner for the conformance suite and new teams |
 | MCP server | `integrations/mcp/` | Six tools for agent reasoners over `HttpClient` |

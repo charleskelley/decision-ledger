@@ -85,9 +85,7 @@ def test_every_gate_context_the_assembler_builds_is_one_the_policy_gate_accepts(
         scorer_version="xgb-test",
         inference_latency_ms=1.0,
     )
-    submission = build_submission(
-        event, ato_feature_vector, scorer, corpus_version="ato-v1"
-    )
+    submission = build_submission(event, ato_feature_vector, scorer)
     profile = ReasonerProfile.from_assets(
         prompts_dir=PLUGIN.prompts_dir, corpus_dir=PLUGIN.corpus_dir
     )
@@ -97,7 +95,7 @@ def test_every_gate_context_the_assembler_builds_is_one_the_policy_gate_accepts(
     profile.authorize(config)
 
     assert context.gate_id == "policy"
-    assert config.template_id == "ato-v3"
+    assert config.template_id == "ato-v4"
     assert submission.mode == mode
     if rule_id is None:
         assert submission.bypass is None

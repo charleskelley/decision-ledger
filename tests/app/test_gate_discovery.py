@@ -40,6 +40,7 @@ from app.gates import (
     binding_config_model,
     build_gates,
     check_gate_plugin,
+    check_gate_set,
     close_gates,
     discover_gates,
 )
@@ -53,6 +54,7 @@ from tests._fake_gate.plugin import (
     FakeGatePlugin,
     FakeLookupGatePlugin,
 )
+from tests._stub_reasoner.registry import STUB_REGISTRATION
 
 _MODULE = __name__
 
@@ -248,6 +250,38 @@ def test_a_validating_gate_without_a_model_gets_the_raw_configuration():
     admit_binding(composed, GateBinding(gate_id="raw", config={"k": [1]}), "r")
 
     assert composed.gate.bindings == [("r", {"k": [1]})]
+
+
+class _NeedsAName(BaseModel):
+    """A binding configuration that is never empty."""
+
+    name: str
+
+
+def test_a_mandated_gate_needing_binding_configuration_refuses_an_unbound_reasoner():
+    # The gate reads its binding from every request, and a reasoner that does
+    # not bind a mandated gate runs it with an empty binding configuration:
+    # a gate whose binding model refuses {} cannot be mandated for it.
+    plugin = FakeGatePlugin("named")
+    plugin.binding_config_model = _NeedsAName
+    composed = ComposedGate(plugin=plugin, gate=plugin.build(None), mandatory=True)
+    registration = STUB_REGISTRATION.model_copy(update={"gates": ()})
+
+    with pytest.raises(GatePluginError) as err:
+        check_gate_set(registration, {"named": composed})
+
+    assert err.value.gate_id == "named"
+    assert "refuses the empty configuration it would run with" in err.value.reason
+    assert composed.gate.bindings == []
+
+
+def test_a_mandated_gate_that_accepts_an_empty_binding_serves_an_unbound_reasoner():
+    plugin = FakeGatePlugin("optional")
+    composed = ComposedGate(plugin=plugin, gate=plugin.build(None), mandatory=True)
+
+    check_gate_set(
+        STUB_REGISTRATION.model_copy(update={"gates": ()}), {"optional": composed}
+    )
 
 
 # ---------------------------------------------------------------------------

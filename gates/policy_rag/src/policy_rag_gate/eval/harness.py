@@ -7,12 +7,21 @@ reasoner's own pipeline. This harness runs the dimensions this gate owns
 the reasoner's ``EvalAdapter.datasets_dir``:
 
     retrieval/golden_queries.yaml     RetrievalDimension (the gate's own
-                                      hybrid retriever, tenant-filtered)
+                                      retrieval over the reasoner's binding:
+                                      every corpus it names, through its
+                                      provider, plus per-corpus metrics)
     faithfulness/golden_outputs.yaml  FaithfulnessDimension (RAGAS + judge)
     citations/golden_outputs.yaml     CitationDimension (LLM judges)
+    authority/golden_outputs.yaml     authority_violation_rate, reported with
+                                      the citation dimension (optional; DR-34)
 
-A missing dataset becomes a ``SkippedDimension``, so the report still lists
-all three and the gap counts as a failure. Reports are the framework's
+The reasoner's binding to the gate (its corpora and quota) is read from the
+registry the ledger composes (``app.bootstrap.read_registry``: plugins, the
+registration file, and the registrations written over the API), so run the
+eval with the ledger's ``DECISIONLEDGER_REASONERS`` and
+``DECISIONLEDGER_REGISTRATIONS``. A missing dataset, or a reasoner that does
+not bind the gate to a corpus, becomes a ``SkippedDimension``, so the report
+still lists all three and the gap counts as a failure. Reports are the framework's
 ``EvalReport`` written by its ``run_eval``, one per reasoner, at
 ``<output-dir>/<reasoner_id>/eval-report.json`` (default output dir
 ``outputs/stage/eval/gate/policy``). Promote a baseline by copying it to
@@ -26,7 +35,7 @@ Usage::
     uv run python -m policy_rag_gate.eval --reasoner-id <reasoner-id>
 
 The judges (Anthropic) and RAGAS (OpenAI) make paid LLM calls; the retrieval
-dimension needs the gate's stores with the reasoner's corpus indexed.
+dimension needs the providers the binding names with its corpora loaded.
 """
 
 from __future__ import annotations
@@ -40,13 +49,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import ValidationError
 
+from app.bootstrap import read_registry
+from app.plugins import allowlist_from_settings, discover_plugins
 from app.settings import FrameworkSettings
 from core.eval.metrics import EvalDimension
-from core.exceptions import ReasonerPluginError
+from core.exceptions import ReasonerPluginError, RegistrationError
 from eval.adapter import EVAL_ADAPTER_GROUP, load_eval_adapter
 from eval.dimensions.skipped import SkippedDimension
 from eval.runners.harness import run_eval
+from policy_rag_gate.corpus import PolicyBindingConfig
+from policy_rag_gate.eval.authority import load_authority_cases
 from policy_rag_gate.eval.citation import CitationDimension, load_citation_cases
 from policy_rag_gate.eval.faithfulness import (
     FaithfulnessDimension,
@@ -56,19 +70,23 @@ from policy_rag_gate.eval.ragas import RagasFaithfulnessAdapter
 from policy_rag_gate.eval.retrieval import RetrievalDimension, load_golden_queries
 from policy_rag_gate.gate import POLICY_GATE_ID
 from policy_rag_gate.llm.anthropic import AnthropicLLMClient
-from policy_rag_gate.plugin import open_retriever
+from policy_rag_gate.providers import (
+    ProviderRegistry,
+    ProviderServices,
+    discover_provider_plugins,
+)
 from policy_rag_gate.settings import PolicyRagGateSettings
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from importlib.metadata import EntryPoint
 
     from core.eval.metrics import EvalReport
     from core.llm import LLMClient
+    from core.observation import ReasonerRegistration
     from eval.adapter import EvalAdapter
     from eval.dimensions import Dimension
     from policy_rag_gate.eval.faithfulness import RagasFaithfulnessScorer
-    from policy_rag_gate.eval.retrieval import RetrieverClient
 
 log = structlog.get_logger(__name__)
 
@@ -76,10 +94,12 @@ log = structlog.get_logger(__name__)
 RETRIEVAL_DATASET = Path("retrieval", "golden_queries.yaml")
 FAITHFULNESS_DATASET = Path("faithfulness", "golden_outputs.yaml")
 CITATION_DATASET = Path("citations", "golden_outputs.yaml")
+AUTHORITY_DATASET = Path("authority", "golden_outputs.yaml")
 GATE_DATASETS: tuple[Path, ...] = (
     RETRIEVAL_DATASET,
     FAITHFULNESS_DATASET,
     CITATION_DATASET,
+    AUTHORITY_DATASET,
 )
 
 #: Where reports are staged: ``<this>/<reasoner_id>/eval-report.json``.
@@ -131,43 +151,78 @@ def select_adapters(
     return [a for a in adapters if ships_gate_datasets(a.datasets_dir)]
 
 
+def policy_binding(
+    registration: ReasonerRegistration | None,
+) -> PolicyBindingConfig | str:
+    """A reasoner's binding to this gate, or why there is none to evaluate.
+
+    Args:
+        registration: The reasoner's registration, or ``None`` when the
+            ledger's registry does not register it.
+
+    Returns:
+        The ``PolicyBindingConfig`` the gate retrieves with for the reasoner,
+        or a reason the retrieval dimension is skipped.
+    """
+    if registration is None:
+        return "the reasoner is not registered in this deployment's registry"
+    binding = registration.binding(POLICY_GATE_ID)
+    if binding is None:
+        return f"the reasoner's registration does not bind the {POLICY_GATE_ID!r} gate"
+    try:
+        return PolicyBindingConfig.model_validate(binding.config)
+    except ValidationError as err:
+        return (
+            f"the reasoner's binding to the {POLICY_GATE_ID!r} gate is invalid: {err}"
+        )
+
+
 def build_gate_dimensions(
     *,
     reasoner_id: str,
     dataset_root: Path,
-    retriever: RetrieverClient,
+    providers: ProviderRegistry,
+    binding: PolicyBindingConfig | str,
     judge_client: LLMClient,
     ragas_scorer: RagasFaithfulnessScorer,
 ) -> list[Dimension]:
     """Build the gate's three dimensions over one reasoner's datasets.
 
     Args:
-        reasoner_id: Tenant the retrieval dimension filters on.
+        reasoner_id: The reasoner evaluated.
         dataset_root: The reasoner's ``datasets_dir``.
-        retriever: The gate's retriever (a stub in unit tests).
+        providers: The providers the binding's corpora name (fakes in unit
+            tests).
+        binding: The reasoner's binding to the gate, or why it has none
+            (``policy_binding``); without one, retrieval is skipped.
         judge_client: ``LLMClient`` for the faithfulness and citation judges.
         ragas_scorer: RAGAS faithfulness scorer.
 
     Returns:
         Retrieval, faithfulness, and citation — each a real dimension when
-        its dataset exists, else a ``SkippedDimension`` naming the path.
+        its dataset exists (and, for retrieval, the binding does), else a
+        ``SkippedDimension`` naming why.
     """
     dimensions: list[Dimension] = []
 
     queries_path = dataset_root / RETRIEVAL_DATASET
-    if queries_path.exists():
-        dimensions.append(
-            RetrievalDimension(
-                retriever=retriever,
-                golden_queries=load_golden_queries(queries_path),
-                reasoner_id=reasoner_id,
-            )
-        )
-    else:
+    if not queries_path.exists():
         dimensions.append(
             SkippedDimension(
                 kind=EvalDimension.RETRIEVAL,
                 reason=f"dataset missing: {queries_path}",
+            )
+        )
+    elif isinstance(binding, str):
+        dimensions.append(
+            SkippedDimension(kind=EvalDimension.RETRIEVAL, reason=binding)
+        )
+    else:
+        dimensions.append(
+            RetrievalDimension(
+                providers=providers,
+                binding=binding,
+                golden_queries=load_golden_queries(queries_path),
             )
         )
 
@@ -189,11 +244,15 @@ def build_gate_dimensions(
         )
 
     citation_path = dataset_root / CITATION_DATASET
+    authority_path = dataset_root / AUTHORITY_DATASET
     if citation_path.exists():
         dimensions.append(
             CitationDimension(
                 client=judge_client,
                 cases=load_citation_cases(citation_path),
+                authority_cases=load_authority_cases(authority_path)
+                if authority_path.exists()
+                else (),
             )
         )
     else:
@@ -208,6 +267,9 @@ def build_gate_dimensions(
         "policy_gate.eval.dimensions_built",
         component="policy_gate_eval",
         reasoner_id=reasoner_id,
+        corpora=[c.corpus_id for c in binding.corpora]
+        if not isinstance(binding, str)
+        else [],
         skipped=[d.kind.value for d in dimensions if isinstance(d, SkippedDimension)],
     )
     return dimensions
@@ -216,7 +278,8 @@ def build_gate_dimensions(
 async def evaluate_reasoners(
     *,
     adapters: Sequence[EvalAdapter],
-    retriever: RetrieverClient,
+    providers: ProviderRegistry,
+    bindings: Mapping[str, PolicyBindingConfig | str],
     judge_client: LLMClient,
     ragas_scorer: RagasFaithfulnessScorer,
     output_dir: Path,
@@ -234,7 +297,11 @@ async def evaluate_reasoners(
         dimensions = build_gate_dimensions(
             reasoner_id=adapter.reasoner_id,
             dataset_root=adapter.datasets_dir,
-            retriever=retriever,
+            providers=providers,
+            binding=bindings.get(
+                adapter.reasoner_id,
+                "the reasoner is not registered in this deployment's registry",
+            ),
             judge_client=judge_client,
             ragas_scorer=ragas_scorer,
         )
@@ -318,23 +385,44 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    retriever, resources = open_retriever(
-        postgres_dsn=FrameworkSettings().postgres_dsn,
-        elasticsearch_url=settings.elasticsearch_url,
+    framework_settings = FrameworkSettings()
+    try:
+        registry = read_registry(
+            framework_settings,
+            discover_plugins(allow=allowlist_from_settings(framework_settings)),
+        )
+    except RegistrationError as exc:
+        print(
+            f"error: the ledger's registrations do not compose: {exc}", file=sys.stderr
+        )
+        return 2
+    bindings = {
+        adapter.reasoner_id: policy_binding(
+            registry.get(adapter.reasoner_id)
+            if registry.is_registered(adapter.reasoner_id)
+            else None
+        )
+        for adapter in adapters
+    }
+    providers = ProviderRegistry(
+        discover_provider_plugins(),
+        services=ProviderServices(
+            postgres_dsn=framework_settings.postgres_dsn, settings=settings
+        ),
     )
     try:
         reports = asyncio.run(
             evaluate_reasoners(
                 adapters=adapters,
-                retriever=retriever,
+                providers=providers,
+                bindings=bindings,
                 judge_client=AnthropicLLMClient(),
                 ragas_scorer=RagasFaithfulnessAdapter(),
                 output_dir=output_dir,
             )
         )
     finally:
-        for resource in resources:
-            resource.close()
+        providers.close()
     return 0 if all(report.overall_passed for report in reports) else 1
 
 

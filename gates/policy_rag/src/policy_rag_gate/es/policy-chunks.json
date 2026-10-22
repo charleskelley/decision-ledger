@@ -12,14 +12,14 @@
   },
   "mappings": {
     "_meta": {
-      "description": "BM25 sparse index over every reasoner's policy corpus. Shared by all reasoners; documents are tenant-filtered at query time by the reasoner_id keyword field.",
+      "description": "BM25 sparse index over every corpus the RAG policy gate's reference retrieval provider holds. Shared by all corpora; documents are filtered at query time by the corpus_id keyword field (DR-34): which corpora a reasoner reads is its registration's binding, not a field here. Chunk ids are deterministic, so a reload overwrites by id.",
       "analyzer_strategy": "DR-13: text uses dual-analyzer multi-fields. text (english analyzer) handles natural language queries with stemming. text.keyword_search (standard analyzer) handles exact identifiers such as section numbers, control ids, or policy ids (e.g., 3.2.1, CTRL-7, POLICY-A-v2.1). Retriever must query both fields. See docs/design/decisions.md DR-13."
     },
     "properties": {
       "chunk_id": {
         "type": "keyword"
       },
-      "reasoner_id": {
+      "corpus_id": {
         "type": "keyword"
       },
       "policy_id": {
@@ -56,6 +56,14 @@
             "analyzer": "standard"
           }
         }
+      },
+      "span_start": {
+        "type": "integer",
+        "index": false
+      },
+      "span_end": {
+        "type": "integer",
+        "index": false
       }
     }
   }

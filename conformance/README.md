@@ -68,14 +68,14 @@ The example binds the RAG policy gate. An instance that composes that gate
 serves a reasoner registered without a plugin from the gate's asset root
 (`POLICY_RAG_GATE_ASSETS_ROOT`): put the example's `prompts/` and `corpus/`
 (from `reasoners/example/src/example_reasoner/`) under
-`<root>/example-reasoner/` before the registration is admitted, and load
-the corpus after it, with the instance's allowlist (the loader composes
-plugins as the ledger does, and in a checkout the example's plugin is
-installed):
+`<root>/example-reasoner/`, and load the corpus as `example-policy` (the
+corpus the registration's binding names, DR-34) before the registration is
+admitted:
 
 ```bash
-DECISIONLEDGER_REASONERS=ato-reasoner POLICY_RAG_GATE_ASSETS_ROOT=/path/to/assets \
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id example-reasoner
+POLICY_RAG_GATE_ASSETS_ROOT=/path/to/assets \
+uv run python -m policy_rag_gate.corpus_loader --corpus-id example-policy \
+    --corpus-dir /path/to/assets/example-reasoner/corpus
 ```
 
 Otherwise the instance refuses the registration (at startup for the file,
@@ -91,10 +91,13 @@ development database to the plugin setup, delete the row
 'example-reasoner'`; see [Registration](../docs/design/registration.md)),
 or use a throwaway database volume for the over-HTTP setup.
 
-The example binds the RAG policy gate (advisory). Its gated example needs
-the example corpus indexed (`make prepare-example`) for a meaningful
-verdict; the suite checks the contract — 201, the gate's record — not the
-verdict. An instance may mandate further gates for every reasoner
+The example binds the RAG policy gate (advisory) to the `example-policy`
+corpus, and an instance refuses to start until every corpus a registration
+it serves binds is loaded. So load the corpora first: `make prepare-example`
+for the example's, or `make prepare-reasoners` for every installed reasoner's
+(with `DECISIONLEDGER_REASONERS` blank the instance also serves ATO, whose
+binding names `ato-policy`). The suite checks the gated example's contract —
+201, the gate's record — not its verdict. An instance may mandate further gates for every reasoner
 (`DECISIONLEDGER_MANDATORY_GATES`); the suite tolerates them, but a
 mandated gate must accept the example's decisions for the write tests to
 pass.
@@ -102,6 +105,9 @@ pass.
 ## Run
 
 ```bash
+# Every corpus the instance's registrations bind, loaded before it starts:
+make prepare-reasoners
+
 # The instance (keys are any secrets you choose):
 DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key" \
 DECISIONLEDGER_OPERATOR_KEY=op-key \

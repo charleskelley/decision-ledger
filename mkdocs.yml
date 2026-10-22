@@ -68,6 +68,8 @@ nav:
       - Policy:
         - design/gates/policy/index.md
         - Corpus: design/gates/policy/policy-corpus.md
+        - Retrieval providers: design/gates/policy/providers.md
+        - Evidence: design/gates/policy/evidence.md
     - Reasoners:
       - design/reasoners/index.md
       - Submission Contract: design/reasoners/reasoner-handoff.md

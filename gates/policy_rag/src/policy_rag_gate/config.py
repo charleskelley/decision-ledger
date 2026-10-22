@@ -4,7 +4,11 @@
 every ``GateContext.gate_config`` that names ``gate_id="policy"`` against it
 at intake — recorded decisions included, so a recorded decision always
 carries a context the gate could evaluate for shadow evaluation. Its typed fields
-replace the convention keys the framework used to check by name.
+replace the convention keys the framework used to check by name. It says what
+one decision asks of the gate; which corpora the gate reads for the reasoner
+is the reasoner's binding (``policy_rag_gate.corpus.PolicyBindingConfig``,
+DR-34), so a submission no longer labels a corpus version: the gate records
+the state of every corpus it queries itself.
 
 ``ReasonerProfile`` is what one reasoner may submit to the gate: the prompt
 templates it ships and the jurisdictions its policy corpus covers (the
@@ -47,11 +51,11 @@ class PolicyGateConfig(BaseModel):
         retrieval_query: The reasoner-rendered retrieval query. ``None`` or
             blank makes the gate fail closed before it retrieves (no
             verdict; enforcement holds the decision).
-        jurisdictions: Retrieval filter applied in both stores. Empty means
-            no filter.
-        risk_tier: Retrieval filter applied in the dense store only.
-        corpus_version: Version label of the reasoner's corpus, recorded in
-            the gate's snapshot.
+        jurisdictions: Retrieval filter applied in both stores of every bound
+            corpus (narrowed per corpus by the jurisdictions the binding
+            reads from it). Empty means no filter.
+        risk_tier: Retrieval filter applied in the reference provider's
+            dense store only.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -61,16 +65,15 @@ class PolicyGateConfig(BaseModel):
     retrieval_query: str | None = None
     jurisdictions: list[str] = Field(default_factory=list)
     risk_tier: str | None = None
-    corpus_version: str = "unknown"
 
 
 def corpus_jurisdictions(corpus_dir: Path) -> frozenset[str]:
     """The jurisdictions the policy documents under ``corpus_dir`` cover.
 
     Searches recursively. A document whose front matter fails to parse (or
-    that cannot be read) is skipped, as the corpus loader skips it: it never
-    reaches the index, so a reasoner cannot claim its jurisdiction. A
-    missing directory covers none.
+    that cannot be read) is skipped: the corpus loader refuses to load a
+    corpus holding one, so it never reaches the index, and a reasoner cannot
+    claim its jurisdiction. A missing directory covers none.
 
     Args:
         corpus_dir: A reasoner's directory of Markdown policy documents.
@@ -108,9 +111,9 @@ class ReasonerProfile:
     def from_assets(cls, *, prompts_dir: Path, corpus_dir: Path) -> ReasonerProfile:
         """Derive a profile from the prompts and corpus a reasoner ships.
 
-        Corpus documents whose front matter fails to parse are skipped, as
-        the corpus loader skips them: they never reach the index, so a
-        reasoner cannot claim their jurisdiction.
+        Corpus documents whose front matter fails to parse are skipped (the
+        corpus loader refuses a corpus holding one, so they never reach the
+        index), so a reasoner cannot claim their jurisdiction.
 
         Args:
             prompts_dir: The reasoner's directory of ``*.yaml`` templates.

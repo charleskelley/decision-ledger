@@ -42,7 +42,7 @@ docker compose logs -f      # Tail all logs
 | Service | Owner (compose file) | Image | Port | Purpose |
 |---------|----------------------|-------|------|---------|
 | `postgres` | Framework (`docker-compose.yml`) | `pgvector/pgvector:pg16` | 5432 (`POSTGRES_PORT`) | The ledger's `decisionledger` schema, shared by every reasoner; also hosts the RAG policy gate's own `policy_rag` schema |
-| `elasticsearch` | RAG policy gate (`gates/policy_rag/compose.yaml`) | `docker.elastic.co/elasticsearch/elasticsearch:8.13.4` | 9200 (`POLICY_RAG_GATE_ELASTICSEARCH_PORT`) | The gate's BM25 index over every reasoner's policy corpus |
+| `elasticsearch` | RAG policy gate (`gates/policy_rag/compose.yaml`) | `docker.elastic.co/elasticsearch/elasticsearch:8.13.4` | 9200 (`POLICY_RAG_GATE_ELASTICSEARCH_PORT`) | The gate's BM25 index over every corpus its reference provider holds |
 | `redis` | ATO reasoner (`reasoners/account_takeover/compose.yaml`) | `redis:7-alpine` | 6379 (`ATO_REDIS_PORT`) | ATO's login-event stream, dedup store, and feature windows |
 
 **Why the Postgres image is `pgvector/pgvector:pg16`.** It is plain Postgres 16
@@ -223,17 +223,42 @@ The rules gate (`gates/rules`) stores nothing.
 #### PostgreSQL schema: `policy_rag`
 
 The gate's DDL ships in its package (`policy_rag_gate/sql/01_init.sql` and
-`02_tables.sql`). `01_init.sql` creates the `vector` extension (the connecting
-role must be allowed to create it) and the `policy_rag` schema; `02_tables.sql`
-creates `policy_rag.policy_chunks`. `policy_rag_gate.schema.apply_schema`
-applies both, idempotently, every time the gate is built and before every
-corpus load; `make prepare-gate-policy_rag` (or `make prepare-gates`, every
-gate) applies them on their own.
+`02_tables.sql`): the stores of its reference retrieval provider (DR-34).
+`01_init.sql` creates the `vector` extension (the connecting role must be
+allowed to create it) and the `policy_rag` schema; `02_tables.sql` creates
+`policy_rag.corpora`, `policy_rag.documents`, and `policy_rag.policy_chunks`.
+`policy_rag_gate.schema.apply_schema` applies both, idempotently, every time
+the reference provider is built and before every corpus load;
+`make prepare-gate-policy_rag` (or `make prepare-gates`, every gate) applies
+them on their own. A database that holds the chunk table from before DR-34
+(keyed by `reasoner_id`) is refused before any statement runs: drop the
+schema (`docker compose down -v` in development, or
+`drop schema policy_rag cascade`) and reload each corpus.
 
 ```sql
+create table if not exists policy_rag.corpora (
+    corpus_id text primary key,            -- the id bindings name
+    manifest_hash text not null,           -- sha256 over (document_id, version, content_hash)
+    document_count integer not null,
+    loaded_at timestamptz not null default now(),
+    source_dir text not null
+);
+
+create table if not exists policy_rag.documents (
+    corpus_id text not null references policy_rag.corpora (corpus_id) on delete cascade,
+    document_id text not null,
+    document_version text not null,
+    title text not null,
+    content_hash text not null,            -- sha256 of body
+    body text not null,                    -- the document whole, front matter stripped
+    metadata jsonb not null default '{}'::jsonb,   -- its front matter
+    source_path text not null,
+    primary key (corpus_id, document_id, document_version)
+);
+
 create table if not exists policy_rag.policy_chunks (
-    chunk_id uuid primary key default gen_random_uuid(),
-    reasoner_id text not null,             -- tenant filter applied at retrieval
+    chunk_id text primary key,             -- sha256(corpus_id, document_id, version, section_path)
+    corpus_id text not null,               -- the filter applied at retrieval
     policy_id text not null,
     policy_version text not null,
     title text not null default '',        -- document title, for citations
@@ -241,8 +266,13 @@ create table if not exists policy_rag.policy_chunks (
     risk_tier text,                        -- null means applies to all tiers
     section_path text not null,
     chunk_text text not null,
+    span_start integer,                    -- chunk_text's offsets in the document body,
+    span_end integer,                      -- when it is a contiguous slice of it
     embedding vector(384) not null,        -- all-MiniLM-L6-v2 dimensions
-    created_at timestamptz not null default now()
+    created_at timestamptz not null default now(),
+    foreign key (corpus_id, policy_id, policy_version)
+    references policy_rag.documents (corpus_id, document_id, document_version)
+    on delete cascade
 );
 
 create index if not exists idx_policy_chunks_hnsw
@@ -251,22 +281,26 @@ using hnsw (embedding vector_cosine_ops);
 ```
 
 The `vector(384)` dimension matches the `all-MiniLM-L6-v2` sentence-transformer
-model. If the embedding model changes, update this column, the plugin, and the
-corpus loader together. `title` lets the retriever build citations from the
-row alone, without reading any reasoner's corpus directory.
+model. If the embedding model changes, update this column, the reference
+provider, and the corpus loader together. `title` lets the retriever build
+citations from the row alone, without reading any corpus directory.
+`corpus_id` is the only key on a chunk: which corpora a reasoner reads is its
+registration's binding.
 
 #### Elasticsearch index: `policy-chunks`
 
-One index, shared by every reasoner that uses the gate. The mapping ships in
-the gate's package at `policy_rag_gate/es/policy-chunks.json`; the corpus
-loader creates the index on first load if it does not exist.
+One index, shared by every corpus the reference provider holds. The mapping
+ships in the gate's package at `policy_rag_gate/es/policy-chunks.json`; the
+corpus loader creates the index on first load if it does not exist.
+Documents are written under their deterministic chunk ids, so a reload
+overwrites them; `span_start` and `span_end` are stored, not indexed.
 
-`reasoner_id` is mapped as `keyword`, and the retriever applies it as a `term`
-filter for tenant isolation. An index created before that mapping held
-`reasoner_id` as analyzed `text`, where a `term` filter on a hyphenated id
-matches nothing. The loader detects that and recreates the index, logging that
-it did. Recreating drops every reasoner's BM25 documents, so index every
-reasoner afterward (`make build-policy-index`).
+`corpus_id` is mapped as `keyword`, and the retriever applies it as a `term`
+filter. An index created before DR-34 (keyed by `reasoner_id`), or one where
+the field is analyzed `text` (a `term` filter on a hyphenated id matches
+nothing), lacks a keyword `corpus_id`. The loader detects that and recreates
+the index, logging that it did. Recreating drops every corpus's BM25
+documents, so load every corpus afterward (`make build-policy-index`).
 
 The `text` field uses a dual-analyzer multi-field strategy (DR-13):
 
@@ -275,8 +309,9 @@ The `text` field uses a dual-analyzer multi-field strategy (DR-13):
   numbers, control ids, policy ids).
 
 The retriever queries both fields with `multi_match`. Retrieval filters:
-`reasoner_id` and `jurisdictions` filter both stores; `risk_tier` filters
-pgvector only.
+`corpus_id` (one query per bound corpus) and `jurisdictions` filter both
+stores; `risk_tier` filters pgvector only. `reasoner_id` is not a chunk key:
+which corpora a reasoner reads is its registration's binding.
 
 ---
 
@@ -304,52 +339,62 @@ never reads these keys.
 
 ## Policy Corpus Build
 
-Each reasoner that binds the RAG policy gate ships its own policy corpus (its
-plugin's `corpus_dir`), and the gate's corpus loader indexes it under that
-reasoner's `reasoner_id`. A corpus must be loaded before the gate can retrieve
-for that reasoner; load it once at setup, and again whenever the corpus
-changes.
+Each reasoner that binds the RAG policy gate names, on its binding, the
+corpora the gate reads for it (DR-34); a reasoner's own corpus ships with it
+(its plugin's `corpus_dir`, or under the gate's asset root), and the gate's
+corpus loader loads it under the corpus id the binding names. The gate
+refuses a binding to a corpus that is not loaded, so load it before the
+deployment starts or the registration is written, and again whenever the
+corpus changes.
 
 ```bash
 # Every installed reasoner's corpus (aggregate over reasoners/*/reasoner.mk)
 make build-policy-index
 
-# One reasoner's corpus (the target the gate's gate.mk defines)
+# One reasoner's corpus, as the corpus id its reasoner.mk declares
+# (POLICY_CORPUS_ID_ato-reasoner := ato-policy)
 make build-policy-index-ato-reasoner
 
-# One reasoner: index its corpus, and (for ATO) train its model if missing
+# One reasoner: load its corpus, and (for ATO) train its model if missing
 make prepare-account_takeover
 
-# The loader directly (safe to re-run: deletes per policy_id before inserting)
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner
+# The loader directly (safe to re-run: a load replaces the corpus)
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner
 
-# Full wipe and reload of this reasoner's chunks
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --wipe
+# Delete the corpus's Elasticsearch documents first, then load
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner --wipe
 
 # Explicit corpus root instead of the plugin's corpus_dir
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id ato-reasoner --corpus-dir path/to/corpus
+uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --corpus-dir path/to/corpus
 ```
 
 The loader:
 
-1. Refuses a `--reasoner-id` the ledger does not register (plugins, the
-   registration file, and the API's registrations, read from Postgres;
-   DR-33), then resolves the corpus directory: `--corpus-dir` if given,
-   otherwise the `corpus_dir` of the composed reasoner plugin whose
-   `reasoner_id` matches (for ATO, `ato_reasoner/corpus/`), otherwise
+1. Resolves the corpus directory: `--corpus-dir` if given, otherwise the
+   `corpus_dir` of the composed reasoner plugin whose `reasoner_id` matches
+   `--reasoner-id` (for ATO, `ato_reasoner/corpus/`), otherwise
    `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`, and reads every
-   `**/*.md` file under it.
-2. Parses YAML frontmatter into `PolicyDocument`.
+   `**/*.md` file under it. It asks no registry.
+2. Parses YAML frontmatter into `PolicyDocument`. A file that does not
+   parse, or whose front matter JSON cannot carry, refuses the whole load
+   (a load replaces the corpus, so it would drop the document).
 3. Chunks each document at `##` boundaries, with a `###` secondary split for
    sections over 300 words (rules in [the policy corpus page](gates/policy/policy-corpus.md)).
 4. Embeds the chunks with `all-MiniLM-L6-v2` (384 dimensions) through
    sentence-transformers.
-5. Applies the gate's DDL, then writes embeddings and metadata (including
-   `reasoner_id` and `title`) to `policy_rag.policy_chunks`, reading the
-   Postgres DSN from `FrameworkSettings`.
+5. Takes a Postgres advisory lock on the corpus id (held until step 6 is
+   done, so two loads of one corpus never interleave), applies the gate's
+   DDL, then, in one transaction, replaces the corpus: its
+   `policy_rag.corpora` row (manifest hash over every document's id,
+   version, text, and front matter; document count, load time, source
+   directory), its documents, and its chunks with their embeddings,
+   `corpus_id`, `title`, and spans, reading the Postgres DSN from
+   `FrameworkSettings`.
 6. Creates the `policy-chunks` index if missing (recreating it if its
-   `reasoner_id` mapping is stale), then writes text and metadata (no
-   embedding) to the Elasticsearch at `POLICY_RAG_GATE_ELASTICSEARCH_URL`.
+   `corpus_id` mapping is stale), writes every chunk's text and metadata (no
+   embedding) under its id to the Elasticsearch at
+   `POLICY_RAG_GATE_ELASTICSEARCH_URL`, and deletes the corpus's documents
+   the load did not write.
 
 Verify the load:
 
@@ -471,7 +516,7 @@ gate connects with the `POSTGRES_*` settings above.
 | `ATO_REDIS_URL` | ATO reasoner | Redis for feature windows, dedup, and the login-event stream | `redis://localhost:6379` |
 | `ATO_REDIS_PORT` | Compose (`reasoners/account_takeover/compose.yaml`) | Redis host port | `6379` |
 | `ATO_SCORER_MODEL_PATH` | ATO reasoner | XGBoost model artifact | absolute path of `ato_reasoner/scorer/models/ato-v1.ubj` inside the installed package |
-| `ATO_CORPUS_VERSION` | ATO reasoner | Corpus version ATO sends in its RAG policy gate context (`corpus_version`), so every ATO bundle records it | `ato-v1` |
+| `ATO_TEMPLATE_ID` | ATO reasoner | The RAG policy gate template ATO names in its gate context: `ato-v4` (tiered evidence with the conflict/gap protocol), `ato-v3` (the behavior before DR-34), or `ato-v2`; any other value refuses startup (`ato-v1` cannot be rendered again) | `ato-v4` |
 | `ATO_LEDGER_URL` | ATO reasoner | The ledger ATO's service submits to over HTTP | blank (the ledger runs in ATO's process, through `LocalClient`) |
 | `ATO_LEDGER_KEY` | ATO reasoner | ATO's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
 

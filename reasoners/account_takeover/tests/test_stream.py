@@ -154,7 +154,7 @@ def services(ato_feature_vector) -> AtoServices:
         inference_latency_ms=1.0,
     )
     return AtoServices(
-        feature_svc=feature_svc, scorer=scorer, corpus_version="c-1", redis=MagicMock()
+        feature_svc=feature_svc, scorer=scorer, template_id="ato-v4", redis=MagicMock()
     )
 
 

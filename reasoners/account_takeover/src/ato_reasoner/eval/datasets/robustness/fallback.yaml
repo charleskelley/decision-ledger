@@ -28,8 +28,9 @@
 # corpus_mismatch was dropped from this dataset: it ran the pipeline
 # with a stale corpus_version label but never altered behavior, so the
 # returned action was just whatever the gate happened to decide. That
-# made the case non-deterministic. It will be re-introduced when the
-# pipeline grows real corpus-version validation.
+# made the case non-deterministic. The label itself is gone since DR-34:
+# the policy gate records the state of every corpus it reads, and a
+# binding to a corpus that is not loaded is refused when it is admitted.
 
 cases:
   - case_id: fallback-001-llm-5xx-on-gate-call

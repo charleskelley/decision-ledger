@@ -27,10 +27,15 @@ reasoner:
   account, on gated logins), and Tier 5 treats US and EU policy snippets in
   the same retrieval set as a jurisdiction conflict.
 
+- **Policy gate binding** (DR-34): ATO binds the RAG policy gate to one
+  corpus, ``ato-policy`` (its ``corpus/`` directory, loaded with
+  ``--corpus-id ato-policy``), at tier 1, held by the reference provider,
+  and asks for pinned document versions in every passage.
+
 Which prompt templates and jurisdictions ATO may name in its gate context is
 the RAG policy gate's call (DR-28): the gate accepts the templates in ATO's
 ``prompts/`` and the jurisdictions its ``corpus/`` front matter covers
-(``ato-v1``..``ato-v3``; ``US_FEDERAL``, ``US_STATE``, ``EU_GDPR``,
+(``ato-v1``..``ato-v4``; ``US_FEDERAL``, ``US_STATE``, ``EU_GDPR``,
 ``INTERNAL``), so tightening either is a change to those directories.
 """
 
@@ -42,6 +47,27 @@ from core.actions import DecisionAction
 from core.gate import Compare
 from core.identity import NativeNamespace
 from core.observation import BypassRule, GateBinding, ReasonerRegistration
+
+#: The corpus ATO's binding to the policy gate names: its ``corpus/``
+#: directory, loaded under this id.
+ATO_CORPUS_ID = "ato-policy"
+
+#: ATO's binding to the RAG policy gate (DR-34): one corpus at tier 1, with
+#: every passage pinned to its document version.
+POLICY_GATE_BINDING = GateBinding(
+    gate_id="policy",
+    config={
+        "corpora": [
+            {
+                "corpus_id": ATO_CORPUS_ID,
+                "provider": "reference",
+                "tier": 1,
+                "min_provenance": "pinned_version",
+            }
+        ],
+        "k_per_corpus": 5,
+    },
+)
 
 #: ``risk_score`` below this is recorded ALLOW (``allow-band``).
 ALLOW_BAND_THRESHOLD = 0.20
@@ -87,7 +113,7 @@ BLOCK_BAND = BypassRule(
 ATO_REGISTRATION = ReasonerRegistration(
     reasoner_id="ato-reasoner",
     reasoner_name="ATO Reasoner",
-    gates=(GateBinding(gate_id="policy"),),
+    gates=(POLICY_GATE_BINDING,),
     bypass_rules=(ALLOW_BAND, BLOCK_BAND),
     recordable_actions=frozenset({DecisionAction.ALLOW, DecisionAction.BLOCK}),
     native_namespaces=(ATO_ACCOUNT_NAMESPACE,),

@@ -14,13 +14,13 @@ protocols) structurally — Python duck-typing, no inheritance. The ATO
 ``EvalAdapter`` (``ato_reasoner.eval.adapter``) builds it.
 
 The robustness ``run_with_forced_*`` paths use private fault-injection
-wrappers (``_RaisingRetriever``, ``_Raising5xxLLMClient``) to exercise
+wrappers (``_RaisingProvider``, ``_Raising5xxLLMClient``) to exercise
 the production failure surfaces without polluting production code. Both
 build a policy gate (``policy_rag_gate.PolicyGate``, the RAG policy gate ATO
 binds) around the wrapper and swap it into the framework's composed gates
-for one decision (a ``LocalClient`` over those services); the retriever,
-prompt registry, and per-reasoner profiles they reuse come from the composed
-policy gate itself (DR-28: the gate owns them).
+for one decision (a ``LocalClient`` over those services); the retrieval
+providers, prompt registry, and per-reasoner profiles they reuse come from
+the composed policy gate itself (DR-28: the gate owns them).
 """
 
 from __future__ import annotations
@@ -58,8 +58,7 @@ if TYPE_CHECKING:
     from core.actions import DecisionAction
     from core.bundle import DecisionBundle
     from core.llm.client import CompletionResult
-    from policy_rag_gate.models.snippet import RetrievedSnippet
-    from policy_rag_gate.retriever import PolicyRetriever
+    from policy_rag_gate.corpus import CorpusRef, CorpusState
 
 log = structlog.get_logger(__name__)
 
@@ -198,7 +197,7 @@ class PipelineDriver:
             event: The login.
             client: The ledger to submit to (a fault-injected one); this
                 driver's own by default.
-            services: ATO's services (a mislabeled corpus version); this
+            services: ATO's services (another template, for example); this
                 driver's own by default.
 
         Returns:
@@ -313,7 +312,7 @@ class PipelineDriver:
         features = self._services.feature_svc.compute(event)
         scorer_output = self._services.scorer.score(features)
         submission = build_submission(
-            event, features, scorer_output, corpus_version=self._services.corpus_version
+            event, features, scorer_output, template_id=self._services.template_id
         )
         gated = submission.model_copy(
             update={"mode": "gate", "proposed_action": None, "bypass": None}
@@ -354,20 +353,18 @@ class PipelineDriver:
           raises from ``complete_structured``. ``PolicyGate`` catches the
           exception and emits ``verdict=None``; enforcement Tier 1 routes
           to ``HOLD``. Exercises the full production failure path.
-        - ``"retrieval_error"`` — swaps in a policy gate whose retriever
-          raises from ``retrieve()``. The framework fails the gate closed
-          (DR-29): the policy gate's record is ``failed`` with the error,
-          and enforcement Tier 1 routes to ``HOLD``.
-        - ``"corpus_mismatch"`` — runs the pipeline with a deliberately
-          stale ``corpus_version`` label. Currently a labeling-only
-          mismatch (does not alter pipeline behavior); the driver returns
-          the resulting ``decision_action``. Documents the contract for
-          future corpus-version validation.
+        - ``"retrieval_error"`` — swaps in a policy gate whose retrieval
+          providers raise from ``retrieve()``. The framework fails the gate
+          closed (DR-29): the policy gate's record is ``failed`` with the
+          error, and enforcement Tier 1 routes to ``HOLD``.
+
+        The former ``"corpus_mismatch"`` kind relabeled the submission's
+        ``corpus_version`` and never changed behavior; it left with that
+        label (DR-34: the gate records the state of each corpus it reads).
 
         Args:
             event: The login event to drive.
-            fallback_kind: One of ``{"llm_5xx", "retrieval_error",
-                "corpus_mismatch"}``.
+            fallback_kind: One of ``{"llm_5xx", "retrieval_error"}``.
 
         Returns:
             The pipeline's resulting ``DecisionAction``.
@@ -380,7 +377,7 @@ class PipelineDriver:
             faulty_gate = PolicyGate(
                 client=_Raising5xxLLMClient(),
                 prompt_registry=policy_gate.prompt_registry,
-                retriever=policy_gate.retriever,
+                providers=policy_gate.providers,
                 profiles=policy_gate.profiles,
             )
             bundle = await self.decide(
@@ -396,7 +393,14 @@ class PipelineDriver:
             faulty_gate = PolicyGate(
                 client=policy_gate.client,
                 prompt_registry=policy_gate.prompt_registry,
-                retriever=_RaisingRetriever(policy_gate.retriever),  # type: ignore[arg-type]
+                # The composed gate's own registry type builds the stand-ins:
+                # ATO never imports the gate's provider seam (DR-34).
+                providers=policy_gate.providers.of(
+                    *(
+                        _RaisingProvider(provider_id)
+                        for provider_id in policy_gate.providers.provider_ids()
+                    )
+                ),
                 profiles=policy_gate.profiles,
             )
             bundle = await self.decide(
@@ -407,18 +411,9 @@ class PipelineDriver:
             )
             return bundle.decision_action
 
-        if fallback_kind == "corpus_mismatch":
-            bundle = await self.decide(
-                event,
-                services=dataclasses.replace(
-                    self._services, corpus_version="stale-v0-mismatch"
-                ),
-            )
-            return bundle.decision_action
-
         msg = (
             f"Unknown fallback_kind {fallback_kind!r}. Expected one of: "
-            "'llm_5xx', 'retrieval_error', 'corpus_mismatch'."
+            "'llm_5xx', 'retrieval_error'."
         )
         raise ValueError(msg)
 
@@ -429,21 +424,34 @@ class PipelineDriver:
 
 
 class _RetrievalForcedError(RuntimeError):
-    """Raised by ``_RaisingRetriever``; the framework fails the gate closed on it."""
+    """Raised by ``_RaisingProvider``; the framework fails the gate closed on it."""
 
 
-class _RaisingRetriever:
-    """Retriever wrapper that raises from ``retrieve()`` for fallback tests.
+class _RaisingProvider:
+    """Retrieval provider that raises from ``retrieve()`` for fallback tests.
 
-    Raises a sentinel error from ``retrieve``. Duck-types as
-    ``PolicyRetriever`` for the policy gate.
+    Satisfies the policy gate's ``RetrievalProvider`` protocol structurally
+    and stands in for the provider of the same id; describing a corpus
+    raises too, but the gate describes corpora only when it admits a
+    binding, which the composed gate already did.
     """
 
-    def __init__(self, original: PolicyRetriever) -> None:
-        """Store the wrapped retriever (kept for parity with sibling wrappers)."""
-        self._original = original
+    def __init__(self, provider_id: str) -> None:
+        """Stand in for the provider ``provider_id``."""
+        self._provider_id = provider_id
 
-    def retrieve(self, *args: Any, **kwargs: Any) -> tuple[list[RetrievedSnippet], str]:
+    @property
+    def provider_id(self) -> str:
+        """The id of the provider this one stands in for."""
+        return self._provider_id
+
+    def describe(self, corpus: CorpusRef) -> CorpusState:
+        """Always raises — the stores are down."""
+        del corpus
+        msg = "forced retrieval error for robustness fallback test"
+        raise _RetrievalForcedError(msg)
+
+    def retrieve(self, *args: Any, **kwargs: Any) -> Any:
         """Always raises — simulates retrieval-layer failure (ES/PG outage)."""
         del args, kwargs
         msg = "forced retrieval error for robustness fallback test"

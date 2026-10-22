@@ -12,33 +12,38 @@
    timeout, the RRF-ordered results are returned unchanged as ``rrf_only``.
 
 Domain-agnostic by design: callers pass a pre-rendered query string plus a
-``reasoner_id`` tenant filter and optional jurisdiction / risk-tier filters.
+``corpus_id`` filter and optional jurisdiction / risk-tier filters.
 Reasoners own query construction (each ships its own query builder).
 
-The ``reasoner_id`` filter is applied in both stores (tenant isolation).
+It is the engine of the reference retrieval provider
+(``policy_rag_gate.providers.reference``, DR-34), which queries it once per
+corpus a reasoner's binding names. The ``corpus_id`` filter is applied in
+both stores, so a query never reaches another corpus; which corpora a
+reasoner may read is its registration's binding, not a chunk key.
 Jurisdiction metadata filtering is applied in both the Postgres and ES queries.
 Risk-tier filtering is applied in Postgres; ES filters by jurisdiction only.
 
-Every chunk row carries its document ``title`` (written by the corpus loader),
-so the retriever needs no access to any reasoner's corpus directory.
+Every chunk row carries its document ``title`` and its deterministic
+``chunk_id`` (written by the corpus loader), so the retriever needs no
+access to any corpus directory.
 
 Usage::
 
     retriever = PolicyRetriever(pg_conn, es_client, model)
-    snippets, path = retriever.retrieve(
-        query, k=5, reasoner_id="<reasoner-id>", jurisdictions=["REGION_A"]
+    chunks, path = retriever.retrieve(
+        query, k=5, corpus_id="<corpus-id>", jurisdictions=["REGION_A"]
     )
 """
 
 from __future__ import annotations
 
+import dataclasses
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from psycopg.rows import dict_row
-
-from policy_rag_gate.models.snippet import RetrievedSnippet
 
 if TYPE_CHECKING:
     import psycopg
@@ -52,8 +57,41 @@ _ES_INDEX = "policy-chunks"
 # RRF constant (k=60 from the original Cormack et al. paper)
 _RRF_K = 60
 
-# Dedup key type for RRF: (policy_id, version, section_path)
-_SnippetKey = tuple[str, str, str]
+
+@dataclass(frozen=True)
+class ScoredChunk:
+    """One chunk a retrieval stage returned, with that stage's score.
+
+    The retriever's own unit; the reference provider turns each into the
+    gate's evidence contract (``RetrievedContext``).
+
+    Attributes:
+        chunk_id: The chunk's deterministic id (the loader's
+            ``sha256(corpus_id, document_id, version, section_path)``).
+        document_id: Identifier of the source document.
+        title: Human-readable document title.
+        version: Version of the source document.
+        jurisdiction: Jurisdiction tag of the source document.
+        section_path: Hierarchical path within the document.
+        text: Chunk text as stored.
+        relevance_score: Score from the stage that produced this ranking:
+            cosine similarity on the dense leg, the RRF score after fusion,
+            the raw cross-encoder logit after reranking. Unbounded.
+        retrieval_path: ``"reranked"`` or ``"rrf_only"``.
+        span: ``(start, end)`` of ``text`` in the stored document text, or
+            ``None`` when the chunk is not a contiguous slice of it.
+    """
+
+    chunk_id: str
+    document_id: str
+    title: str
+    version: str
+    jurisdiction: str
+    section_path: str
+    text: str
+    relevance_score: float
+    retrieval_path: str
+    span: tuple[int, int] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +99,8 @@ _SnippetKey = tuple[str, str, str]
 # ---------------------------------------------------------------------------
 
 
-def _snippet_key(s: RetrievedSnippet) -> _SnippetKey:
-    return (s.document_id, s.version, s.section_path)
+def _span(start: Any, end: Any) -> tuple[int, int] | None:
+    return (int(start), int(end)) if start is not None and end is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +109,7 @@ def _snippet_key(s: RetrievedSnippet) -> _SnippetKey:
 
 
 class PolicyRetriever:
-    """Hybrid RAG retriever over the policy gate's corpus stores.
+    """Hybrid RAG retriever over the reference provider's corpus stores.
 
     Combines pgvector dense retrieval and Elasticsearch BM25 sparse retrieval
     via Reciprocal Rank Fusion. An optional cross-encoder reranks the fused
@@ -105,6 +143,11 @@ class PolicyRetriever:
         self._cross_encoder = cross_encoder
         self._rerank_timeout_ms = rerank_timeout_ms
 
+    @property
+    def reranks(self) -> bool:
+        """Whether a cross-encoder is configured (the ranking requested)."""
+        return self._cross_encoder is not None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -114,36 +157,36 @@ class PolicyRetriever:
         query: str,
         k: int,
         *,
-        reasoner_id: str | None = None,
+        corpus_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
-    ) -> list[RetrievedSnippet]:
+    ) -> list[ScoredChunk]:
         """Pgvector cosine similarity search via HNSW index.
 
-        Applies reasoner, jurisdiction, and risk-tier metadata filters before
+        Applies corpus, jurisdiction, and risk-tier metadata filters before
         the nearest-neighbour search. ``risk_tier`` filter includes chunks
         where ``risk_tier`` is NULL (applies to all tiers).
 
         Args:
             query: Natural language query string.
             k: Maximum number of results to return.
-            reasoner_id: If provided, restrict to chunks belonging to this
-                reasoner's corpus. The gate always passes it; it is optional
-                only to ease test fixtures.
+            corpus_id: If provided, restrict to chunks of this corpus. The
+                reference provider always passes it; it is optional only to
+                ease test fixtures.
             jurisdictions: If provided, restrict to these jurisdiction codes.
             risk_tier: If provided, include chunks for this tier or all tiers.
 
         Returns:
-            Ranked list of RetrievedSnippet objects with cosine similarity scores.
+            Ranked chunks with cosine similarity scores.
         """
         embedding = self._model.encode([query])[0]
 
         filter_parts: list[str] = []
         filter_params: list[Any] = []
 
-        if reasoner_id:
-            filter_parts.append("reasoner_id = %s")
-            filter_params.append(reasoner_id)
+        if corpus_id:
+            filter_parts.append("corpus_id = %s")
+            filter_params.append(corpus_id)
 
         if jurisdictions:
             filter_parts.append("jurisdiction = ANY(%s)")
@@ -156,8 +199,8 @@ class PolicyRetriever:
         where = ("WHERE " + " AND ".join(filter_parts)) if filter_parts else ""
 
         sql = f"""
-            SELECT policy_id, policy_version, title, jurisdiction,
-                   section_path, chunk_text,
+            SELECT chunk_id, policy_id, policy_version, title, jurisdiction,
+                   section_path, chunk_text, span_start, span_end,
                    (1 - (embedding <=> %s)) AS relevance_score
             FROM policy_rag.policy_chunks
             {where}
@@ -170,16 +213,16 @@ class PolicyRetriever:
             cur.execute(sql, params)  # type: ignore[arg-type]
             rows = cur.fetchall()
 
-        return [self._row_to_snippet(row, retrieval_path="rrf_only") for row in rows]
+        return [self._row_to_chunk(row, retrieval_path="rrf_only") for row in rows]
 
     def sparse_search(
         self,
         query: str,
         k: int,
         *,
-        reasoner_id: str | None = None,
+        corpus_id: str | None = None,
         jurisdictions: list[str] | None = None,
-    ) -> list[RetrievedSnippet]:
+    ) -> list[ScoredChunk]:
         """Elasticsearch BM25 search with dual-analyzer query.
 
         Queries both ``text`` (English analyzer — stemming, stopwords) and
@@ -189,13 +232,12 @@ class PolicyRetriever:
         Args:
             query: Natural language query string.
             k: Maximum number of results to return.
-            reasoner_id: If provided, restrict to documents belonging to this
-                reasoner's corpus.
+            corpus_id: If provided, restrict to documents of this corpus.
             jurisdictions: If provided, restrict to these jurisdiction codes.
 
         Returns:
-            Ranked list of RetrievedSnippet objects. Scores are raw BM25 values
-            (not normalised) — used only for ranking, not as final relevance.
+            Ranked chunks. Scores are raw BM25 values (not normalised) — used
+            only for ranking, not as final relevance.
         """
         es_query: dict[str, Any] = {
             "bool": {
@@ -210,8 +252,8 @@ class PolicyRetriever:
         }
 
         es_filters: list[dict[str, Any]] = []
-        if reasoner_id:
-            es_filters.append({"term": {"reasoner_id": reasoner_id}})
+        if corpus_id:
+            es_filters.append({"term": {"corpus_id": corpus_id}})
         if jurisdictions:
             es_filters.append({"terms": {"jurisdiction": jurisdictions}})
         if es_filters:
@@ -220,24 +262,23 @@ class PolicyRetriever:
         response = self._es.search(index=_ES_INDEX, query=es_query, size=k)
         hits = response["hits"]["hits"]
 
-        snippets = []
-        for hit in hits:
-            source = hit["_source"]
-            snippets.append(self._source_to_snippet(source, retrieval_path="rrf_only"))
-        return snippets
+        return [
+            self._source_to_chunk(hit["_source"], retrieval_path="rrf_only")
+            for hit in hits
+        ]
 
     def rrf_fuse(
         self,
-        dense: list[RetrievedSnippet],
-        sparse: list[RetrievedSnippet],
+        dense: list[ScoredChunk],
+        sparse: list[ScoredChunk],
         k: int,
-    ) -> list[RetrievedSnippet]:
+    ) -> list[ScoredChunk]:
         """Reciprocal Rank Fusion of dense and sparse result lists.
 
-        Deduplication key is ``(policy_id, version, section_path)``. When the
-        same chunk appears in both lists, its RRF score accumulates from both
-        rankings. The combined list is sorted by descending RRF score and
-        truncated to ``k``.
+        Deduplication key is the chunk's ``chunk_id`` (deterministic, and the
+        same in both stores). When the same chunk appears in both lists, its
+        RRF score accumulates from both rankings. The combined list is sorted
+        by descending RRF score and truncated to ``k``.
 
         Args:
             dense: Ranked list from dense (pgvector) search.
@@ -247,35 +288,35 @@ class PolicyRetriever:
         Returns:
             Fused and re-ranked list with RRF scores as ``relevance_score``.
         """
-        scores: dict[_SnippetKey, float] = {}
-        chunks: dict[_SnippetKey, RetrievedSnippet] = {}
+        scores: dict[str, float] = {}
+        chunks: dict[str, ScoredChunk] = {}
 
-        for rank, snippet in enumerate(dense, 1):
-            key = _snippet_key(snippet)
+        for rank, chunk in enumerate(dense, 1):
+            key = chunk.chunk_id
             scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
-            chunks[key] = snippet
+            chunks[key] = chunk
 
-        for rank, snippet in enumerate(sparse, 1):
-            key = _snippet_key(snippet)
+        for rank, chunk in enumerate(sparse, 1):
+            key = chunk.chunk_id
             scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
             if key not in chunks:
-                chunks[key] = snippet
+                chunks[key] = chunk
 
         sorted_keys = sorted(scores, key=lambda key: scores[key], reverse=True)
         return [
-            chunks[key].model_copy(update={"relevance_score": scores[key]})
+            dataclasses.replace(chunks[key], relevance_score=scores[key])
             for key in sorted_keys[:k]
         ]
 
     def rerank(
         self,
         query: str,
-        candidates: list[RetrievedSnippet],
+        candidates: list[ScoredChunk],
         k: int,
-    ) -> tuple[list[RetrievedSnippet], str]:
+    ) -> tuple[list[ScoredChunk], str]:
         """Rerank candidates with a cross-encoder, with a latency-budget bypass.
 
-        Scores each (query, snippet.text) pair using the cross-encoder and
+        Scores each (query, chunk.text) pair using the cross-encoder and
         returns the top-k by descending score. If no cross-encoder was
         provided, or if scoring exceeds ``rerank_timeout_ms``, returns the
         RRF-ordered candidates unchanged as ``"rrf_only"``.
@@ -286,14 +327,14 @@ class PolicyRetriever:
             k: Maximum results to return.
 
         Returns:
-            Tuple of ``(ranked_snippets, retrieval_path)`` where
+            Tuple of ``(ranked_chunks, retrieval_path)`` where
             ``retrieval_path`` is ``"reranked"`` on success or ``"rrf_only"``
             on bypass.
         """
         if self._cross_encoder is None or not candidates:
             return candidates[:k], "rrf_only"
 
-        pairs = [(query, s.text) for s in candidates]
+        pairs = [(query, c.text) for c in candidates]
         t0 = time.perf_counter()
         scores = self._cross_encoder.predict(pairs)
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -313,13 +354,10 @@ class PolicyRetriever:
             reverse=True,
         )
         result = [
-            snippet.model_copy(
-                update={
-                    "relevance_score": float(score),
-                    "retrieval_path": "reranked",
-                }
+            dataclasses.replace(
+                chunk, relevance_score=float(score), retrieval_path="reranked"
             )
-            for score, snippet in ranked[:k]
+            for score, chunk in ranked[:k]
         ]
         return result, "reranked"
 
@@ -328,26 +366,25 @@ class PolicyRetriever:
         query: str,
         k: int = 5,
         *,
-        reasoner_id: str | None = None,
+        corpus_id: str | None = None,
         jurisdictions: list[str] | None = None,
         risk_tier: str | None = None,
-    ) -> tuple[list[RetrievedSnippet], str]:
-        """Run the full hybrid retrieval pipeline.
+    ) -> tuple[list[ScoredChunk], str]:
+        """Run the full hybrid retrieval pipeline over one corpus.
 
         Calls dense → sparse → RRF → rerank in sequence. Returns the top-k
-        snippets and the retrieval path taken (``"reranked"`` or ``"rrf_only"``).
+        chunks and the retrieval path taken (``"reranked"`` or ``"rrf_only"``).
 
         Args:
             query: Pre-rendered retrieval query string (built by the caller —
                 reasoners own query construction).
-            k: Number of snippets to return.
-            reasoner_id: Tenant filter — restricts results to chunks belonging
-                to the calling reasoner's corpus.
+            k: Number of chunks to return.
+            corpus_id: Restricts results to the chunks of this corpus.
             jurisdictions: Jurisdiction filter forwarded to both stores.
             risk_tier: Risk-tier filter forwarded to the dense store.
 
         Returns:
-            Tuple of (top-k RetrievedSnippet list, retrieval_path string).
+            Tuple of (top-k chunks, retrieval_path string).
         """
         # Retrieve k*2 candidates from each source to give RRF enough to work with
         candidate_k = k * 2
@@ -355,47 +392,46 @@ class PolicyRetriever:
         dense = self.dense_search(
             query,
             candidate_k,
-            reasoner_id=reasoner_id,
+            corpus_id=corpus_id,
             jurisdictions=jurisdictions,
             risk_tier=risk_tier,
         )
         sparse = self.sparse_search(
             query,
             candidate_k,
-            reasoner_id=reasoner_id,
+            corpus_id=corpus_id,
             jurisdictions=jurisdictions,
         )
         fused = self.rrf_fuse(dense, sparse, candidate_k)
-        snippets, retrieval_path = self.rerank(query, fused, k)
+        chunks, retrieval_path = self.rerank(query, fused, k)
 
         log.debug(
             "retrieval.complete",
             component="retrieval",
+            corpus_id=corpus_id,
             query_preview=query[:80],
             dense_count=len(dense),
             sparse_count=len(sparse),
             fused_count=len(fused),
-            returned=len(snippets),
+            returned=len(chunks),
             retrieval_path=retrieval_path,
         )
-        return snippets, retrieval_path
+        return chunks, retrieval_path
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _row_to_snippet(
-        self, row: dict[str, Any], *, retrieval_path: str
-    ) -> RetrievedSnippet:
-        """Convert a psycopg dict row to a RetrievedSnippet.
+    def _row_to_chunk(self, row: dict[str, Any], *, retrieval_path: str) -> ScoredChunk:
+        """Convert a psycopg dict row to a ``ScoredChunk``.
 
         The DB column ``policy_id`` (in the gate's ``policy_rag.policy_chunks``
-        table) maps to ``RetrievedSnippet.document_id``.
-        ``title`` comes from the row; rows written before the column existed
-        carry ``''`` and fall back to the document id.
+        table) maps to ``ScoredChunk.document_id``. A blank ``title`` falls
+        back to the document id.
         """
         doc_id = str(row["policy_id"])
-        return RetrievedSnippet(
+        return ScoredChunk(
+            chunk_id=str(row["chunk_id"]),
             document_id=doc_id,
             title=row["title"] or doc_id,
             version=row["policy_version"],
@@ -404,14 +440,16 @@ class PolicyRetriever:
             text=row["chunk_text"],
             relevance_score=float(row["relevance_score"]),
             retrieval_path=retrieval_path,
+            span=_span(row.get("span_start"), row.get("span_end")),
         )
 
-    def _source_to_snippet(
+    def _source_to_chunk(
         self, source: dict[str, Any], *, retrieval_path: str
-    ) -> RetrievedSnippet:
-        """Convert an ES ``_source`` dict to a RetrievedSnippet."""
+    ) -> ScoredChunk:
+        """Convert an ES ``_source`` dict to a ``ScoredChunk``."""
         doc_id = str(source["policy_id"])
-        return RetrievedSnippet(
+        return ScoredChunk(
+            chunk_id=str(source["chunk_id"]),
             document_id=doc_id,
             title=source.get("title") or doc_id,
             version=source["version"],
@@ -420,4 +458,5 @@ class PolicyRetriever:
             text=source["text"],
             relevance_score=0.0,  # BM25 score replaced by RRF score after fusion
             retrieval_path=retrieval_path,
+            span=_span(source.get("span_start"), source.get("span_end")),
         )

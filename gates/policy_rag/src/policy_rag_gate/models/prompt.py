@@ -23,9 +23,23 @@ Design rationale:
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
+
+#: How the gate renders retrieved evidence into ``{policy_snippets}``, as a
+#: template declares it (``evidence_layout:`` in its YAML; DR-34):
+#:
+#: * ``numbered_list`` — the default: one numbered list of passages, each with
+#:   its title, version, jurisdiction, and section. Every template written
+#:   before DR-34 renders exactly as it did, and the model answers with a
+#:   ``PolicyGateVerdict``.
+#: * ``tiered_blocks`` — passages grouped into blocks by authority tier,
+#:   highest first, each labeled with its corpus, tier, document, version,
+#:   and section. The model answers with a ``TieredPolicyGateVerdict``,
+#:   which adds the conflict/gap report (governing corpus, conflict
+#:   detected, evidence sufficient) the gate holds on.
+EvidenceLayout = Literal["numbered_list", "tiered_blocks"]
 
 
 class PromptSnapshot(BaseModel):
@@ -38,8 +52,8 @@ class PromptSnapshot(BaseModel):
     entry, but storing it here removes the dependency on registry
     availability for historical audit and compliance review.
 
-    Combined with the snapshot's ``template_vars`` and
-    ``retrieval_results``, an auditor can fully verify that
+    Combined with the snapshot's ``template_vars``, ``contexts``, and
+    ``evidence_layout``, an auditor can fully verify that
     ``rendered_prompt`` was correctly constructed from the template without
     querying the registry.
 
@@ -102,6 +116,10 @@ class PromptTemplate(BaseModel):
             template is rendered. Derived from placeholders in
             ``template_text`` by the registry loader — domain assemblers
             do not set this directly.
+        evidence_layout: How ``{policy_snippets}`` is rendered and which
+            verdict the model returns (``EvidenceLayout``). A template's
+            wording is written for one layout, so the template declares it;
+            ``numbered_list`` when it does not.
     """
 
     model_config = ConfigDict(strict=True, frozen=True)
@@ -112,6 +130,7 @@ class PromptTemplate(BaseModel):
     template_text: str
     system_text: str
     required_vars: frozenset[str]
+    evidence_layout: EvidenceLayout = "numbered_list"
 
 
 @runtime_checkable

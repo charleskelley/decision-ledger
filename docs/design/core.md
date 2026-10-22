@@ -184,9 +184,10 @@ subject, `resolved_by`, `crosswalk_version`, `method` (`deterministic`,
 A gate reads a `GateRequest` and returns a `GateOutput` (DR-28).
 
 **`GateRequest`** (`core/gate_request.py`): `decision_id`, `submission`, the
-`gate_context` addressed to this gate, `budget_ms`, and `identity` (the
+`gate_context` addressed to this gate, `budget_ms`, `identity` (the
 resolved subject; `None` only when shadow evaluation re-runs a bundle written
-before DR-32). It lives at the top of `core/` because `core/gate/` may not
+before DR-32), and `binding_config` (the `config` of the reasoner's binding
+to this gate, from the registration the decision runs under, DR-34). It lives at the top of `core/` because `core/gate/` may not
 import `core/observation/`.
 
 **`GateOutput`** (`core/gate/output.py`) is open: the framework types and
@@ -197,7 +198,7 @@ reads a universal base and stores the rest verbatim.
 | `gate_id` | The gate that produced it (its verdict must name the same gate) |
 | `deterministic` | A pure function of its request; enforcement skips Tiers 2 and 4 |
 | `verdict` | A `GateVerdict`, or `None`: no valid verdict (Tier 1 holds) |
-| `evidence` | `tuple[EvidenceRef, ...]`: `EvidenceRef(source_id, locator, jurisdictions)`; Tier 5 reads the union of jurisdictions |
+| `evidence` | `tuple[EvidenceRef, ...]`: `EvidenceRef(source_id, locator, jurisdictions, content_hash)`; Tier 5 reads the union of jurisdictions; `content_hash` is the SHA-256 of the exact text relied on (DR-34) |
 | `evidence_snapshot` | Opaque JSON, gate-owned, stored for replay and audit |
 | `extra` | Opaque JSON object for gate-specific fields |
 

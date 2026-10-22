@@ -282,8 +282,9 @@ def effective_gate_set(
     """Return the gates a decision for this reasoner goes through.
 
     The registration's bindings, in order, with any the deployment mandates
-    upgraded to mandatory; then every other deployment-mandatory gate, as a
-    mandatory binding, sorted by id.
+    upgraded to mandatory (keeping their ``config``); then every other
+    deployment-mandatory gate, as a mandatory binding without
+    configuration, sorted by id.
 
     Args:
         registration: The submitting reasoner's registration.
@@ -297,7 +298,7 @@ def effective_gate_set(
     bound = tuple(
         binding
         if binding.mandatory or binding.gate_id not in mandated
-        else GateBinding(gate_id=binding.gate_id, mandatory=True)
+        else GateBinding(gate_id=binding.gate_id, mandatory=True, config=binding.config)
         for binding in registration.gates
     )
     extra = tuple(

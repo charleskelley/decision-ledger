@@ -4,23 +4,31 @@ The reference retrieval-augmented policy gate for DecisionLedger, packaged
 as a uv workspace member. Import package: `policy_rag_gate`; distribution:
 `decisionledger-gate-policy-rag`; `gate_id`: `policy`; kind: `llm`.
 
-For each decision addressed to it, the gate runs hybrid retrieval (pgvector
-dense and Elasticsearch BM25, fused with reciprocal rank fusion, reranked by
-a cross-encoder with a latency-budget bypass) over the submitting reasoner's
-policy corpus, renders that reasoner's versioned prompt template with the
-retrieved snippets, and asks an LLM for a strictly structured verdict. It
-returns the framework's universal `GateOutput`: the verdict enforcement
-reads, one evidence reference per retrieved snippet (carrying its
-jurisdiction), and its own record in the opaque extension: the retrieval and
-the exact prompt in `evidence_snapshot` (`PolicyGateSnapshot`), and the
-rationale, citations, token cost, retrieval latency, and any failing stage in
-`extra` (`PolicyGateExtra`). It is non-deterministic (`deterministic=False`),
-so enforcement applies every gate-level tier to it.
+For each decision addressed to it, the gate retrieves from every corpus the
+submitting reasoner's binding names (`PolicyBindingConfig`, DR-34), through
+the retrieval provider that holds each one — the reference provider is
+hybrid retrieval (pgvector dense and Elasticsearch BM25, fused with
+reciprocal rank fusion, reranked by a cross-encoder with a latency-budget
+bypass) — the same quota per corpus, never fusing scores across corpora. It
+renders that reasoner's versioned prompt template with the passages (one
+numbered list, or blocks by authority tier, as the template declares), and
+asks an LLM for a strictly structured verdict, holding the decision for
+review (a model BLOCK stays a BLOCK) when a tiered verdict reports
+disagreeing or insufficient evidence. It returns the
+framework's universal `GateOutput`: the verdict enforcement reads, one
+evidence reference per rendered passage (carrying its jurisdiction and the
+SHA-256 of its text), and its own record in the opaque extension: the
+per-corpus queries, the passages under the evidence contract, and the exact
+prompt in `evidence_snapshot` (`PolicyGateSnapshot`, version 2), and the
+rationale, citations, conflict/gap report, token cost, retrieval latency,
+and any failing stage in `extra` (`PolicyGateExtra`). It is
+non-deterministic (`deterministic=False`), so enforcement applies every
+gate-level tier to it.
 
 A missing retrieval query, a template render error, or a model error returns
-no verdict, which enforcement holds. An unknown template or a retrieval-store
-error raises, and the ledger records the gate as failed, which holds the
-decision too. The framework (`decision-ledger`) never imports or depends on
+no verdict, which enforcement holds. An unknown template, a provider error,
+or a provider answer that breaks the evidence contract raises, and the
+ledger records the gate as failed, which holds the decision too. The framework (`decision-ledger`) never imports or depends on
 this package.
 
 See [Policy gate](../../docs/design/gates/policy/index.md) for the design and
@@ -29,11 +37,13 @@ contract (DR-28 in `docs/design/decisions.md`).
 
 ## How it plugs in
 
-One entry point in `pyproject.toml`, named after the `gate_id`:
+Two entry points in `pyproject.toml`: the gate, named after the `gate_id`,
+and the reference retrieval provider, in the gate's own group:
 
 | Group | Target | Consumed by |
 | --- | --- | --- |
-| `decisionledger.gates` | `policy_rag_gate.plugin:PLUGIN` | `app.gates.discover_gates` (runtime: identity, `config_model`, `build`) |
+| `decisionledger.gates` | `policy_rag_gate.plugin:PLUGIN` | `app.gates.discover_gates` (runtime: identity, `config_model`, `binding_config_model`, `build`) |
+| `policy_rag_gate.providers` | `reference = policy_rag_gate.providers.reference:PLUGIN` | the gate's `ProviderRegistry` (a provider is built the first time a binding names it) |
 
 The root workspace installs it through the `gates` dependency group (a
 default group, with the member's `eval` extra: RAGAS and `langchain-openai`),
@@ -41,12 +51,14 @@ so a bare `uv sync` at the repo root is enough. Entry points refresh only on
 reinstall: re-run `uv sync` after editing this `pyproject.toml`.
 
 `build` derives a profile per composed reasoner plugin, loads every
-plugin reasoner's prompt templates, opens its own autocommit Postgres
-connection to the framework's database and applies its DDL, and builds the
-retriever, the models, and the OpenAI client. A reasoner registered without
-a plugin is admitted later, from the asset root (below). It opens no Elasticsearch connection, so a
-deployment whose decisions never reach the gate runs with Elasticsearch
-down.
+plugin reasoner's prompt templates, discovers the retrieval providers, and
+builds the OpenAI client. The reference provider is built the first time a
+binding names it (at startup, when the gate admits the binding): it opens
+its own autocommit Postgres connection to the framework's database, applies
+the gate's DDL, and loads the models. A reasoner registered without a plugin
+is admitted later, from the asset root (below). No Elasticsearch connection
+is opened until a decision retrieves, so a deployment whose decisions never
+reach the gate runs with Elasticsearch down.
 
 ## What a reasoner sends
 
@@ -59,11 +71,10 @@ example reasoner sends this shape (values illustrative):
 GateContext(
     gate_id="policy",
     gate_config={
-        "template_id": "example-v1",                 # a template the reasoner ships
+        "template_id": "example-v2",                 # a template the reasoner ships
         "template_vars": {"widget_score": "0.612", "region": "REGION_A"},  # its placeholders
         "retrieval_query": "widget inspection in REGION_A: ...",
         "jurisdictions": ["REGION_A", "GLOBAL"],     # retrieval filter (both stores)
-        "corpus_version": "example-v1",              # recorded in the snapshot
     },
 )
 ```
@@ -77,7 +88,10 @@ composed reasoner plugin from what it ships: the template ids in its
 `prompts_dir` and the `jurisdiction` front matter of its `corpus_dir`
 documents. The built gate is a `ConfigAuthorizer`: at intake a reasoner may
 render only templates it ships and filter only to jurisdictions its own
-corpus covers (`422 GATE_CONFIG_UNAUTHORIZED` otherwise).
+corpus directory covers (`422 GATE_CONFIG_UNAUTHORIZED` otherwise) — its
+own directory, not yet the corpora its binding names, so a reasoner that
+binds another's corpus filters only to jurisdictions its own documents
+cover.
 
 It is also a `BindingValidator` and a `ReasonerScope` (DR-33). The framework
 asks it to admit every registration that binds it, at startup and when a
@@ -89,21 +103,29 @@ the gate reads that directory once, adds its templates to the prompt
 registry (template ids are global, so one already registered refuses the
 binding) and its profile, and serves it from then on. A missing directory,
 no template, a malformed template, or a corpus with no document that parses
-refuses the binding, as does a binding `config` (the gate takes none until
-DR-34). See [Registration](../../docs/design/registration.md).
+refuses the binding. Every binding, a plugin's too, also needs its
+configuration: a `PolicyBindingConfig` naming at least one corpus that is
+loaded, whose provider is installed and can supply the binding's
+`min_provenance`; a binding without one is refused. See
+[Registration](../../docs/design/registration.md) and
+[Retrieval providers](../../docs/design/gates/policy/providers.md).
 
 ## Infrastructure
 
 The gate owns all of it (DR-28; the framework's only infrastructure is
 Postgres):
 
-- **Postgres.** The chunk table `policy_rag.policy_chunks` lives in the
-  gate's own `policy_rag` schema inside the framework's database. The DDL in
-  `src/policy_rag_gate/sql/` (vector extension, schema, table, indexes) is
-  idempotent and applied by the plugin on every build and by the corpus
-  loader before every load; `make prepare-gate-policy_rag`
-  (`uv run python -m policy_rag_gate.schema`) applies it on its own. It never
-  touches the framework's `decisionledger` schema.
+- **Postgres.** The reference provider's three tables live in the gate's
+  own `policy_rag` schema inside the framework's database:
+  `policy_rag.corpora` (one row per loaded corpus: manifest hash, document
+  count, load time), `policy_rag.documents` (every document version, whole),
+  and `policy_rag.policy_chunks` (the chunks and their embeddings). The DDL
+  in `src/policy_rag_gate/sql/` (vector extension, schema, tables, indexes)
+  is idempotent and applied by the reference provider when it is built and
+  by the corpus loader before every load; `make prepare-gate-policy_rag`
+  (`uv run python -m policy_rag_gate.schema`) applies it on its own. A
+  schema from before DR-34 (chunks keyed by `reasoner_id`) is refused, not
+  migrated. It never touches the framework's `decisionledger` schema.
 - **Elasticsearch.** `compose.yaml` here, pulled into the root stack by
   `include:`, published on `POLICY_RAG_GATE_ELASTICSEARCH_PORT` (default
   9200). The index mapping ships in `src/policy_rag_gate/es/`.
@@ -125,25 +147,36 @@ The settings class is `PolicyRagGateSettings` (prefix `POLICY_RAG_GATE_`;
 the provider keys keep their providers' names). The Postgres DSN comes from
 the framework's settings.
 
-## Indexing a reasoner's corpus
+## Loading a corpus
+
+A reasoner's registration names, on its binding to the gate, the corpora
+the gate reads for it (`PolicyBindingConfig`: corpus id, provider, tier;
+DR-34). The reference provider's corpora are loaded by the gate's loader,
+under the corpus id the bindings name, before the deployment that binds
+them starts or the registration that binds them is written (the gate
+refuses a binding to a corpus that is not loaded):
 
 ```bash
-make build-policy-index-<reasoner_id>   # e.g. make build-policy-index-ato-reasoner
+make build-policy-index-<reasoner_id>   # e.g. make build-policy-index-ato-reasoner (as ato-policy)
 # same as:
-uv run python -m policy_rag_gate.corpus_loader --reasoner-id <reasoner_id>
+uv run python -m policy_rag_gate.corpus_loader --corpus-id <corpus_id> --reasoner-id <reasoner_id>
 ```
 
-The loader refuses a `reasoner_id` the ledger does not register (a plugin,
-the registration file, or the API's registrations, read from the ledger's
-Postgres). It resolves the corpus directory from the composed reasoner
-plugin with that `reasoner_id`, else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`
+The loader reads the documents from the composed reasoner plugin with that
+`reasoner_id`, else `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus`
 (`--corpus-dir` overrides both), chunks and embeds every Markdown document,
-and writes both stores, tagging every chunk with the `reasoner_id`. `--wipe` first clears that reasoner's chunks from both
-stores. Without it the loader replaces each document's rows in Postgres but
-deletes nothing in Elasticsearch, so re-indexing an already indexed corpus
-without `--wipe` leaves its earlier BM25 documents beside the new ones. See
+and replaces the corpus in both stores: its `policy_rag.corpora` row
+(manifest hash, document count), its documents whole, and its chunks under
+deterministic ids (a reload overwrites by id, and the corpus's chunks the
+load did not write are deleted). `--wipe` first deletes the corpus's
+Elasticsearch documents. It asks no registry. Because a load replaces the
+corpus, a file that does not parse refuses the whole load instead of
+dropping its document; the manifest hash covers each document's text and
+front matter, and two loads of one corpus never interleave. See
 [Policy corpus](../../docs/design/gates/policy/policy-corpus.md) for the
-document format and the chunking rules.
+document format and the chunking rules, and
+[Retrieval providers](../../docs/design/gates/policy/providers.md) for the
+provider seam.
 
 ## Eval
 
@@ -152,7 +185,10 @@ faithfulness, and citation accuracy, with the LLM judge and the RAGAS
 scorer) in `src/policy_rag_gate/eval/`. They run against the golden datasets
 a reasoner ships for the gate under its `EvalAdapter.datasets_dir`
 (`retrieval/golden_queries.yaml`, `faithfulness/golden_outputs.yaml`,
-`citations/golden_outputs.yaml`):
+`citations/golden_outputs.yaml`, and optionally
+`authority/golden_outputs.yaml`, captured tiered verdicts for the
+authority-violation rate). Retrieval is scored over the reasoner's binding,
+overall and per bound corpus:
 
 ```bash
 make eval-gate-policy_rag                     # every installed reasoner that ships datasets for this gate
@@ -162,7 +198,8 @@ uv run python -m policy_rag_gate.eval [--reasoner-id <id>] [--output-dir <dir>]
 
 Reports land in `outputs/stage/eval/gate/policy/<reasoner_id>/eval-report.json`.
 The run is slow and makes paid LLM calls; it needs `OPENAI_API_KEY` and
-`ANTHROPIC_API_KEY` (exit 2 without them) and the reasoner's corpus indexed.
+`ANTHROPIC_API_KEY` (exit 2 without them) and the corpora the reasoner's
+binding names loaded.
 See [Evaluation](../../docs/design/evaluation.md) for the thresholds.
 
 ## Tests
@@ -170,7 +207,9 @@ See [Evaluation](../../docs/design/evaluation.md) for the thresholds.
 `tests/` (no `__init__.py`) runs under the root `pytest`. Unit tests need
 no Docker: they use the fixture prompt and corpus under `tests/fixtures/`
 and fake stores, and import nothing from the framework's `tests/` tree.
-`tests/integration/` needs the stack (`docker compose up -d`) and indexes
-the fixture corpus under its own tenant, cleaning up after itself. Per
+`tests/integration/` needs the stack (`docker compose up -d`) and loads the
+fixture corpus under its own corpus ids, cleaning up after itself. The
+provider seam is unit-tested with an in-memory provider (`FakeProvider` in
+`tests/conftest.py`). Per
 project rules the LLM path is not unit-tested with mocked responses; the
 eval harness is its test suite.
