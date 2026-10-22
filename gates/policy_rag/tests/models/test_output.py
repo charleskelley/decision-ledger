@@ -12,7 +12,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from core.gate import GateOutput
+from core.actions import DecisionAction
+from core.gate import GateOutput, GateVerdict
 from policy_rag_gate.models import Citation, PolicyGateExtra, TokenCost
 
 
@@ -88,3 +89,41 @@ def test_extra_is_frozen():
     extra = PolicyGateExtra()
     with pytest.raises(ValidationError):
         extra.rationale = "tampered"
+
+
+def test_extra_records_the_tiered_report_and_the_verdict_a_hold_replaced():
+    returned = GateVerdict(
+        gate_id="policy",
+        permitted_actions=[DecisionAction.ALLOW],
+        required_controls=[],
+        confidence=0.7,
+        escalate_to_human=False,
+        escalation_reason=None,
+    )
+    extra = PolicyGateExtra(
+        rationale="Passages disagree.",
+        governing_corpus_id="regulatory",
+        conflict_detected=True,
+        evidence_sufficient=True,
+        protocol_hold="conflict_detected",
+        verdict_as_returned=returned,
+    )
+
+    stored = json.loads(json.dumps(extra.model_dump(mode="json")))
+
+    assert PolicyGateExtra.model_validate(stored, strict=False) == extra
+
+
+def test_extra_of_a_numbered_list_template_has_no_tiered_report():
+    extra = PolicyGateExtra(rationale="ok")
+
+    assert extra.governing_corpus_id is None
+    assert extra.conflict_detected is None
+    assert extra.evidence_sufficient is None
+    assert extra.protocol_hold is None
+    assert extra.verdict_as_returned is None
+
+
+def test_extra_rejects_an_unknown_hold():
+    with pytest.raises(ValidationError):
+        PolicyGateExtra(protocol_hold="authority_violation")  # type: ignore[arg-type]

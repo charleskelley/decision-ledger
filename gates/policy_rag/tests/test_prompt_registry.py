@@ -317,3 +317,39 @@ def test_add_is_all_or_nothing_and_never_replaces_a_template(registry, tmp_path:
 
     assert registry.get("fixture-v1") is before
     assert "fresh-v1" not in registry.registered_ids()
+
+
+# ---------------------------------------------------------------------------
+# evidence_layout — how a template's {policy_snippets} is rendered (DR-34)
+# ---------------------------------------------------------------------------
+
+
+def test_a_template_without_a_layout_renders_the_numbered_list(registry):
+    assert registry.get("fixture-v1").evidence_layout == "numbered_list"
+
+
+def test_a_template_declares_the_tiered_layout(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(
+        directory,
+        "tiered-v1.yaml",
+        "template_id: tiered-v1\nversion: 1.0.0\ndescription: d\n"
+        "evidence_layout: tiered_blocks\ntemplate: '{policy_snippets}'\n",
+    )
+
+    template = YamlPromptRegistry([directory]).get("tiered-v1")
+
+    assert template.evidence_layout == "tiered_blocks"
+
+
+def test_a_template_naming_no_layout_is_refused(tmp_path: Path):
+    directory = tmp_path / "prompts"
+    _write(
+        directory,
+        "odd-v1.yaml",
+        "template_id: odd-v1\nversion: 1.0.0\ndescription: d\n"
+        "evidence_layout: merged_list\ntemplate: '{policy_snippets}'\n",
+    )
+
+    with pytest.raises(ValueError, match="evidence_layout 'merged_list'"):
+        YamlPromptRegistry([directory])
