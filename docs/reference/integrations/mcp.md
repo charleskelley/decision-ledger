@@ -2,10 +2,11 @@
 
 The MCP server, shipped as the `decisionledger-mcp` uv workspace member under
 `integrations/mcp/` (import package `decisionledger_mcp`, console script
-`decisionledger-mcp`). It serves the ledger as six Model Context Protocol
+`decisionledger-mcp`). It serves the ledger as seven Model Context Protocol
 tools on stdio (`record_decision`, `gate_decision`, `lookup_decision`,
-`replay_decision`, `list_decisions_for_entity`, `resolve_hold`), so an agent
-can record and gate its decisions and read them back. It is a client of the
+`replay_decision`, `verify_decision`, `list_decisions_for_entity`,
+`resolve_hold`), so an agent can record and gate its decisions, read them
+back, and verify the evidence they relied on. It is a client of the
 ledger, not a plugin: every tool calls a ledger service through
 [`HttpClient`][app.client.HttpClient] with the key in `DECISIONLEDGER_KEY`
 (and `DECISIONLEDGER_OPERATOR_KEY` for resolutions), so an agent passes the

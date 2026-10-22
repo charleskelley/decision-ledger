@@ -14,10 +14,13 @@ renders that reasoner's versioned prompt template with the passages (one
 numbered list, or blocks by authority tier, as the template declares), and
 asks an LLM for a strictly structured verdict, holding the decision for
 review (a model BLOCK stays a BLOCK) when a tiered verdict reports
-disagreeing or insufficient evidence. It returns the
+disagreeing or insufficient evidence. Before it renders, it escrows in the
+ledger (through the framework's store) the whole document each passage
+came from, once per decision (DR-34). It returns the
 framework's universal `GateOutput`: the verdict enforcement reads, one
-evidence reference per rendered passage (carrying its jurisdiction and the
-SHA-256 of its text), and its own record in the opaque extension: the
+evidence reference per rendered passage (carrying its jurisdiction, the
+SHA-256 of its text, and the digest of the escrowed document), and its own
+record in the opaque extension: the
 per-corpus queries, the passages under the evidence contract, and the exact
 prompt in `evidence_snapshot` (`PolicyGateSnapshot`, version 2), and the
 rationale, citations, conflict/gap report, token cost, retrieval latency,
@@ -28,8 +31,9 @@ gate-level tier to it.
 A missing retrieval query, a template render error, or a model error returns
 no verdict, which enforcement holds. An unknown template, a provider error,
 or a provider answer that breaks the evidence contract raises, and the
-ledger records the gate as failed, which holds the decision too. The framework (`decision-ledger`) never imports or depends on
-this package.
+ledger records the gate as failed, which holds the decision too, as does a
+document it cannot fetch or escrow. The framework (`decision-ledger`) never
+imports or depends on this package.
 
 See [Policy gate](../../docs/design/gates/policy/index.md) for the design and
 [How to implement a gate](../../docs/design/gates/implementation.md) for the
@@ -110,6 +114,16 @@ loaded, whose provider is installed and can supply the binding's
 [Registration](../../docs/design/registration.md) and
 [Retrieval providers](../../docs/design/gates/policy/providers.md).
 
+It is also an `EvidenceVerifier` (DR-34): when a decision is verified
+(`POST /api/v1/decisions/{decision_id}/verify`), it says how each of its
+evidence references stands — `intact`, `source_changed`,
+`source_unavailable`, or `not_verifiable` — against the document it escrowed
+or, with `?live=true`, against the document as its provider holds it now
+(the provider's optional `DocumentFetcher`; the reference provider reads
+`policy_rag.documents`, never Elasticsearch). Verifying never calls the LLM
+or retrieves, and replay never asks the gate anything. See
+[Evidence](../../docs/design/gates/policy/evidence.md#replay-and-verify).
+
 ## Infrastructure
 
 The gate owns all of it (DR-28; the framework's only infrastructure is
@@ -125,7 +139,12 @@ Postgres):
   by the corpus loader before every load; `make prepare-gate-policy_rag`
   (`uv run python -m policy_rag_gate.schema`) applies it on its own. A
   schema from before DR-34 (chunks keyed by `reasoner_id`) is refused, not
-  migrated. It never touches the framework's `decisionledger` schema.
+  migrated. Its DDL never touches the framework's `decisionledger` schema.
+- **Escrow.** Not the gate's: the documents it escrows go into the
+  framework's `decisionledger.evidence_artifacts`, through the framework's
+  store (`framework.store.artifacts`, which the plugin hands the gate when
+  it builds it). `DECISIONLEDGER_EVIDENCE_ESCROW=off` turns escrow off; the
+  gate never reads the setting.
 - **Elasticsearch.** `compose.yaml` here, pulled into the root stack by
   `include:`, published on `POLICY_RAG_GATE_ELASTICSEARCH_PORT` (default
   9200). The index mapping ships in `src/policy_rag_gate/es/`.

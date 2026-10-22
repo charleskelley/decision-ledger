@@ -102,7 +102,12 @@ The bundle records one `GateRecord` per gate in the set, with its status:
 | `failed` | The gate produced no usable output; the reason says why, and its enforcement is the fail-closed HOLD. |
 
 Replay re-runs enforcement on the stored gate outputs and statuses under the
-registration snapshot the bundle cites. It never re-invokes a gate.
+registration snapshot the bundle cites. It never re-invokes a gate. Verify
+(`POST /api/v1/decisions/{decision_id}/verify`, DR-34) is a different
+operation: it asks each gate that ran, when the gate verifies its own
+references, how they stand now, beside the ledger's check of its evidence
+escrow, where gates keep a copy of what they relied on (see
+[Escrow and verify](implementation.md#escrow-and-verify)).
 
 ## The reference gates
 
@@ -112,13 +117,17 @@ Both ship as uv workspace members under `gates/`, installed by the root
 - **The rules gate** (`gates/rules`, distribution
   `decisionledger-gate-rules`, package `rules_gate`, `gate_id` `rules`):
   zero infrastructure, deterministic. It evaluates deployment-registered rule
-  sets of predicates over a submission's `label_value` and `feature_set`. See
+  sets of predicates over a submission's `label_value` and `feature_set`,
+  escrows each rule set it applies through the framework's store, and
+  verifies its references against the escrow or the rule-set file. See
   [`gates/rules/README.md`](https://github.com/charleskelley/decision-ledger/blob/main/gates/rules/README.md)
   and the [`rules_gate` reference](../../reference/gates/rules.md).
 - **The RAG policy gate** (`gates/policy_rag`, distribution
   `decisionledger-gate-policy-rag`, package `policy_rag_gate`, `gate_id`
-  `policy`): hybrid retrieval over the submitting reasoner's policy corpus
-  and a structured LLM verdict. See [Policy gate](policy/index.md).
+  `policy`): retrieval through providers from the corpora the submitting
+  reasoner's binding names, and a structured LLM verdict; it escrows the documents its passages came
+  from and verifies each passage against that copy or, live, the document
+  as its provider holds it now. See [Policy gate](policy/index.md).
 
 `tests/_fake_gate` is a test-only gate (scriptable outcomes, a
 deterministic variant, and a lookup-style variant) that framework tests

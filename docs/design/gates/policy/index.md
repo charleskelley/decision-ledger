@@ -165,13 +165,23 @@ that binds it starts, or before the registration that binds it is written.
    filtered by `corpus_id`, and returns only passages its Postgres holds
    with that exact text
    ([Retrieval providers](providers.md#the-reference-provider)).
-4. **Render.** Replace `{policy_snippets}` in the template with the
+4. **Escrow.** Fetch the document each passage came from, once per
+   `(corpus, document, version)`, through its provider's `DocumentFetcher`,
+   and hand its text to the ledger's evidence escrow (through the
+   framework's store, from a worker thread); every passage from it then
+   cites the digest the escrow returned (`artifact_hash`; none from a
+   provider that cannot fetch documents). With escrow off nothing is
+   fetched and no passage cites an artifact. A failed fetch or escrow, or a
+   fetched document that no longer holds a passage cited to it
+   (`EvidenceEscrowError`), fails the gate closed (HOLD). See
+   [Evidence](evidence.md#escrow).
+5. **Render.** Replace `{policy_snippets}` in the template with the
    passages, in the layout the template declares (`evidence_layout`): one
    numbered list (the default, exactly as before DR-34) or blocks by
    authority tier with each passage labeled by corpus, tier, document,
    version, and section. Then substitute `template_vars`. A placeholder with
    no value returns `verdict=None` (failure `render_error`).
-5. **Ask the model.** Call the OpenAI adapter (`policy_rag_gate/llm/`;
+6. **Ask the model.** Call the OpenAI adapter (`policy_rag_gate/llm/`;
    `gpt-4o-2024-08-06` by default, 30 s per request) with the template's
    system text as the system message and strict structured output into
    `PolicyGateVerdict`, or, for a template with tiered evidence,
@@ -179,7 +189,7 @@ that binds it starts, or before the registration that binds it is written.
    governing corpus, whether passages on point disagree, and whether the
    evidence covers the case. Any error, refusal, or schema failure returns
    `verdict=None` (failure `llm_error`).
-6. **Hold on disagreement or a gap.** When the tiered report says passages
+7. **Hold on disagreement or a gap.** When the tiered report says passages
    on point disagree, or the evidence does not cover the case, the gate
    floors its verdict at HOLD — the model's actions at least as restrictive
    as HOLD are kept (a BLOCK stays a BLOCK), HOLD replaces the milder ones —
@@ -191,13 +201,14 @@ that binds it starts, or before the registration that binds it is written.
 
 Retrieval runs synchronously inside `evaluate`, which blocks the event loop
 for its duration; moving it to a thread is a gate-owned follow-up (DR-29).
+The escrow step already runs in a thread.
 
 ## What it returns
 
 | `GateOutput` field | Content |
 |---|---|
 | `verdict` | The universal `GateVerdict` part of the model's verdict (permitted actions, required controls, confidence, escalation) — floored at HOLD, with the gate's escalation, when the tiered report found disagreement or a gap — or `None`. |
-| `evidence` | One `EvidenceRef` per rendered passage: `source_id` the document's id, `locator` its section path, `jurisdictions` the passage's jurisdiction, and `content_hash` the SHA-256 of its text. |
+| `evidence` | One `EvidenceRef` per rendered passage, in rendered order: `source_id` the document's id, `locator` its section path, `jurisdictions` the passage's jurisdiction, `content_hash` the SHA-256 of its text, and `artifact_hash` the digest of the document escrowed for it. |
 | `evidence_snapshot` | A `PolicyGateSnapshot` (version 2): the query, one `CorpusQuery` per bound corpus, the rendered passages (`RetrievedContext`), the layout, the merges, and the exact prompt. See [Evidence](evidence.md). |
 | `extra` | A `PolicyGateExtra`: `rationale`, `citations`, `response_text`, `token_cost`, `retrieval_ms`, `failure` (the stage that failed, when there is no verdict), and, for a tiered template, `governing_corpus_id`, `conflict_detected`, `evidence_sufficient`, `protocol_hold`, and `verdict_as_returned`. |
 
@@ -212,6 +223,13 @@ Everything the gate consulted is in the bundle, so replay re-enforces the
 stored output without the LLM, a provider, or a corpus. The plugin does not
 set an index version, so `index_version` records `"unknown"`; each corpus's
 state (the reference provider's manifest hash) is in its `CorpusQuery`.
+
+The gate is also an `EvidenceVerifier`: when a decision is verified
+(`POST /api/v1/decisions/{decision_id}/verify`), it says how each of its
+references stands — against the document it escrowed, or with
+`?live=true` against the document as its provider holds it now — without
+calling the LLM or retrieving. See
+[Evidence](evidence.md#replay-and-verify).
 
 ## Prompts belong to the reasoner
 
@@ -278,6 +296,10 @@ it.
 - **LLM.** The OpenAI adapter for the gate (`OPENAI_API_KEY`); the Anthropic
   adapter for its eval judges (`ANTHROPIC_API_KEY`). The gate's `llm/`
   package is the only place in the repository an LLM SDK is imported.
+- **Escrow.** Not the gate's: the documents it escrows live in the
+  framework's `decisionledger.evidence_artifacts`, which the gate writes
+  through the framework's store (`framework.store.artifacts`, handed to it
+  when it is built). `DECISIONLEDGER_EVIDENCE_ESCROW=off` turns escrow off.
 
 ## Loading a corpus
 
@@ -320,5 +342,5 @@ it). See [Evaluation](../../evaluation.md#the-rag-policy-gates-harness).
 - **[Retrieval providers](providers.md)**: the provider seam, the reference
   provider, corpus references, and how to add a provider.
 - **[Evidence](evidence.md)**: the evidence contract every provider meets,
-  the snapshot the gate records, the tiered layout, and the conflict/gap
-  hold.
+  the snapshot the gate records, the escrow, the tiered layout, the
+  conflict/gap hold, and replay versus verify.

@@ -132,8 +132,9 @@ stored submission into a gate request with no proposal, runs the advisory
 gates on it with their stored gate contexts through the same fail-closed
 runner live decisions use (`app.submit.run_gate_set`), keeps the stored
 mandatory gate outcomes, and applies the decision-level rules and the
-combinator as in gate mode, novel-entity tier included. Nothing is written to
-the ledger.
+combinator as in gate mode, novel-entity tier included. No bundle is written;
+a gate that escrows what it relied on (DR-34) still escrows it, which is
+content-addressed, so content already held adds nothing.
 
 **Sample.** The ten most recent recorded decisions
 (`DEFAULT_SHADOW_SAMPLE_SIZE`) of this reasoner written since the run

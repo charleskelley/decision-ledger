@@ -254,13 +254,14 @@ DECISIONLEDGER_API_KEYS=ato-reasoner:ato-key DECISIONLEDGER_OPERATOR_KEY=op-key 
 # In a second shell: run ATO as its own service (port 8001), submitting to the ledger
 ATO_LEDGER_URL=http://localhost:8000 ATO_LEDGER_KEY=ato-key make serve-account_takeover
 
-# In a third shell: send ATO one synthetic login event, then read and replay the decision
+# In a third shell: send ATO one synthetic login event, then read, replay, and verify the decision
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 1 --dry-run \
   | tail -1 > /tmp/ato-event.json
 curl -s -X POST localhost:8001/api/v1/ato/decisions \
   -H 'content-type: application/json' --data @/tmp/ato-event.json
 curl -s localhost:8000/api/v1/decisions/<decision_id> -H 'X-DecisionLedger-Key: ato-key'
 curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay -H 'X-DecisionLedger-Key: ato-key'
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/verify -H 'X-DecisionLedger-Key: ato-key'
 
 # Run the smoke tests (includes the 8 ATO scenarios; calls OpenAI)
 make test-smoke

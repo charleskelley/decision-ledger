@@ -30,8 +30,12 @@ default group), so a bare `uv sync` at the repo root is enough. Entry points
 refresh only on reinstall: re-run `uv sync` after editing this
 `pyproject.toml`.
 
-Infrastructure: none. No compose file, no database, no index, no `gate.mk`.
-`build` ignores the framework services.
+Infrastructure: none of its own. No compose file, no schema, no index, no
+`gate.mk`, and no connection: `build` takes only the framework store's
+evidence escrow (`framework.store.artifacts`), through which the gate keeps a
+copy of every rule set it applies in the framework's
+`decisionledger.evidence_artifacts` (DR-34). Built without a framework, it
+escrows nothing.
 
 ## Rule sets
 
@@ -84,17 +88,41 @@ startup refuses a mandated gate that rejects the empty configuration.
   matches, with the matching rules' `required_controls` and confidence 1.0.
 - **Evidence.** One reference per matching rule (`source_id`
   `<ruleset_id>@<version>`, `locator` the rule id), or one with `locator`
-  `default_action` when none matched.
+  `default_action` when none matched. Every reference carries the SHA-256 of
+  the applied rule set's canonical JSON (`content_hash`: sorted keys, no
+  spaces, UTF-8, of the rule set as the gate applied it, recorded in the
+  snapshot as `ruleset_hash`; it is not always reproducible from the stored
+  `ruleset` JSON, whose numbers the store may render differently, but the
+  escrowed artifact holds the exact bytes) and the digest the escrow
+  returned for that JSON (`artifact_hash`; none with escrow off).
 - **Snapshot.** `evidence_snapshot` is a `RulesGateSnapshot`: the rule set as
-  evaluated, the matching rule ids, whether the default applied, and the
+  evaluated, the matching rule ids, whether the default applied, the
   observed value of every field the rules reference, so the bundle is
-  auditable without the rule files.
+  auditable without the rule files, and the digest every reference names
+  (`ruleset_hash`, computed when the gate decided).
 - **No verdict.** An unknown rule set (`unknown_ruleset`), a rule set
   registered for another reasoner (`ruleset_reasoner_mismatch`; its rules are
   not copied into this tenant's bundle), or a predicate that cannot evaluate,
   such as a feature the submission does not carry (`predicate_error`),
   returns `verdict=None` with `extra = {"failure": ..., "detail": ...}`.
   Enforcement holds the decision.
+
+## Escrow and verify
+
+When a decision is verified (`POST /api/v1/decisions/{decision_id}/verify`),
+the gate (an `EvidenceVerifier`) says how each of its references stands. A
+reference must carry the digest the output's snapshot recorded
+(`ruleset_hash`; it is not recomputed from the stored rule set, whose
+numbers the store may render differently), else it is `not_verifiable`.
+Without `?live=true`, the escrowed copy is read back: `intact` when it is
+that rule set, `not_verifiable` when nothing was escrowed or the escrow no
+longer holds it. With `?live=true`, the rule set's file (`load_rulesets`
+returns each rule set with the file it came from) is read again and
+canonicalized: `intact` when it holds the same rules (a reformatted or
+commented file stays `intact`), `source_changed` when it holds other rules,
+`source_unavailable` when it cannot be read, parsed, or canonicalized as a
+rule set, or the gate does not know its file. An output with no verdict
+cites nothing and escrows nothing.
 
 ## Tests
 

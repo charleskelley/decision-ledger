@@ -59,7 +59,7 @@ core/                          # Framework contracts: no infrastructure, no doma
 │                              #   registration_version, canonical_registration
 ├── gate/
 │   ├── input.py               # GateInput
-│   ├── output.py              # GateOutput (open), EvidenceRef
+│   ├── output.py              # GateOutput (open), EvidenceRef, EvidenceStatus
 │   ├── verdict.py             # GateVerdict
 │   ├── predicate.py           # Compare, AllOf, AnyOf, Not; evaluate_predicate, parse_predicate
 │   └── combinator.py          # SEVERITY_ORDER, severity, most_restrictive, GateStatus
@@ -198,7 +198,7 @@ reads a universal base and stores the rest verbatim.
 | `gate_id` | The gate that produced it (its verdict must name the same gate) |
 | `deterministic` | A pure function of its request; enforcement skips Tiers 2 and 4 |
 | `verdict` | A `GateVerdict`, or `None`: no valid verdict (Tier 1 holds) |
-| `evidence` | `tuple[EvidenceRef, ...]`: `EvidenceRef(source_id, locator, jurisdictions, content_hash)`; Tier 5 reads the union of jurisdictions; `content_hash` is the SHA-256 of the exact text relied on (DR-34) |
+| `evidence` | `tuple[EvidenceRef, ...]`: `EvidenceRef(source_id, locator, jurisdictions, content_hash, artifact_hash)`; Tier 5 reads the union of jurisdictions; `content_hash` is the SHA-256 of the exact content relied on, `artifact_hash` the digest of the artifact the gate escrowed for it in the ledger's evidence escrow (DR-34) |
 | `evidence_snapshot` | Opaque JSON, gate-owned, stored for replay and audit |
 | `extra` | Opaque JSON object for gate-specific fields |
 
@@ -209,6 +209,12 @@ reads a universal base and stores the rest verbatim.
 gate consulted (a rendered prompt, retrieved passages, a rule-set version)
 belongs in its own `evidence_snapshot` or `extra`. The framework never defines
 or imports a subclass of any of these.
+
+**`EvidenceStatus`** (`core/gate/output.py`, beside `EvidenceRef`): how one
+evidence reference stands when its gate verifies it (DR-34) — `intact`,
+`source_changed`, `source_unavailable`, or `not_verifiable`. A gate that
+verifies its own references (`app.gates.EvidenceVerifier`) answers one per
+reference; `POST /api/v1/decisions/{decision_id}/verify` reports them.
 
 **The combinator** (`core/gate/combinator.py`): `SEVERITY_ORDER`
 (ALLOW < CHALLENGE < HOLD < BLOCK), `severity`, and
@@ -223,9 +229,12 @@ as its identity. `GateStatus` is `ran`, `skipped`, or `failed`.
 | `GatePlugin` | What the `decisionledger.gates` entry point publishes: `gate_id` (equal to the entry-point name), `kind`, `deterministic`, `config_model` (a Pydantic model for `gate_config`, or `None`), `build(framework) -> Gate` |
 | `Gate` | `async evaluate(request: GateRequest) -> GateOutput` (must not block the event loop) and `close()` |
 | `ConfigAuthorizer` | Optional capability of a built gate: `authorize_config(config, *, reasoner_id)` raises `ValueError` to refuse a configuration for that reasoner (422 `GATE_CONFIG_UNAUTHORIZED`) |
+| `BindingValidator` | Optional capability (DR-33): `validate_binding(reasoner_id, config)` raises `GateConfigError` to refuse a registration's binding (startup fails, or the write is 422 `GATE_BINDING_REFUSED`) |
 | `ReasonerScope` | Optional capability: `serves(reasoner_id)`; startup refuses a registration that binds a gate that cannot serve it |
+| `EvidenceVerifier` | Optional capability (DR-34): `async verify(output, *, live) -> tuple[EvidenceStatus, ...]`, one status per reference of an output the gate returned, against its own record or, live, its source |
 | `ComposedGate` | A built gate with its plugin and whether the deployment mandates it |
 | `invoke_gate(composed, request)` | Runs one gate under its budget and returns a `GateInvocation`; a gate that is not composed, raises, times out, or returns an unusable output fails closed with the reason |
+| `verify_evidence(composed, output, *, live, budget_ms)` | Asks a gate how its references stand; a gate that is not composed, lacks `EvidenceVerifier`, raises, answers late, or answers out of contract leaves every reference `not_verifiable` |
 
 To write a gate, see [How to implement a gate](gates/implementation.md) and
 the [new-gate checklist](reasoners/reasoner-handoff.md#new-gate-checklist).
@@ -325,6 +334,7 @@ at `/openapi.json`.
 | `POST /api/v1/decisions:batch` | reasoner | 200 `BatchResult`; body: NDJSON of recorded submissions (at most 64 MiB, 10,000 lines); each line recorded or rejected on its own |
 | `GET /api/v1/decisions/{decision_id}` | reasoner, operator | The stored bundle, any schema version |
 | `POST /api/v1/decisions/{decision_id}/replay` | reasoner, operator | `ReplayResponse`: original and replayed actions, per-gate results, `matched` |
+| `POST /api/v1/decisions/{decision_id}/verify` | reasoner, operator | `EvidenceVerification`: per evidence reference of each gate that ran, `escrow` (`present`, `missing`, `none`) and the gate's `status` (`EvidenceStatus`), and a summary; query `live` (default `false`) also checks each source as it is now (DR-34) |
 | `POST /api/v1/decisions/{decision_id}/resolutions` | operator | 201 `ResolutionReceipt`; body: `ResolutionRequest` (`resolver_id`, `resolution_action`, `note`, optional `reviewer_role`, `reference_ticket_id`) |
 | `GET /api/v1/entities/{entity_id}/decisions` | reasoner, operator | `EntityDecisions`, newest first; query `reasoner_id`, `limit` (1 to 500, default 50), `before`, `before_id`, `include_related` |
 | `GET /api/v1/identity/resolve` | any key | `ResolvedIdentity`; query `namespace`, `native_id` |
@@ -362,6 +372,7 @@ same way. Clients switch on `code`:
 | `POST /decisions:batch` | 413 `BODY_TOO_LARGE`, `BATCH_TOO_LARGE`; 422 `BATCH_EMPTY`; 403 `REASONER_MISMATCH`, `REASONER_KEY_REQUIRED` (a line for another reasoner refuses the whole batch). A rejected line carries its own code in the `BatchResult`: `SUBMISSION_INVALID`, `REASONER_NOT_REGISTERED`, a `SubmissionContractError` code, or `BATCH_RECORD_ONLY` for a gated line |
 | `GET /decisions/{id}` | 404 `DECISION_NOT_FOUND`; 500 `BUNDLE_UNREADABLE` |
 | `POST /decisions/{id}/replay` | 404 `DECISION_NOT_FOUND`; 409 `BUNDLE_SCHEMA_UNSUPPORTED`, `REASONER_NOT_COMPOSED`, `REGISTRATION_SNAPSHOT_MISSING`; 500 `BUNDLE_UNREADABLE` |
+| `POST /decisions/{id}/verify` | 404 `DECISION_NOT_FOUND`; 409 `BUNDLE_SCHEMA_UNSUPPORTED`; 500 `BUNDLE_UNREADABLE` (a gate that cannot answer leaves its references `not_verifiable`; it is no error) |
 | `POST /decisions/{id}/resolutions` | 403 `OPERATOR_REQUIRED`; 413 `BODY_TOO_LARGE`; 422 `RESOLUTION_INVALID`; 404 `DECISION_NOT_FOUND`; 409 `DECISION_NOT_RESOLVABLE` (an ALLOW or BLOCK decision), `DECISION_ALREADY_RESOLVED`, `RESOLUTION_CONFLICT`; 503 `RESOLUTIONS_UNAVAILABLE` |
 | `GET /entities/{id}/decisions` | 422 `ENTITY_ID_INVALID`, `REQUEST_INVALID`; 403 `REASONER_MISMATCH` (a reasoner key asking for another reasoner's decisions) |
 | `GET /identity/resolve` | 422 `REQUEST_INVALID`; 404 `IDENTITY_UNRESOLVED` (no resolver match and no registration declares the namespace) |

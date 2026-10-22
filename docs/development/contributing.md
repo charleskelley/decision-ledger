@@ -72,6 +72,10 @@ make eval
 # Replay a specific decision (API running; the reasoner's or the operator's key)
 curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay \
   -H 'X-DecisionLedger-Key: <key>'
+# Verify the evidence it relied on (escrow and each gate's check; ?live=true
+# also checks each source as it is now)
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/verify \
+  -H 'X-DecisionLedger-Key: <key>'
 ```
 
 Per-reasoner targets come from each `reasoners/<name>/reasoner.mk` and per-gate targets from each `gates/<name>/gate.mk`; `make help` lists them. The [local runbook](runbook-local.md) walks through the whole API.

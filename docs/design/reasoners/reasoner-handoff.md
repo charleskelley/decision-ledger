@@ -342,6 +342,7 @@ record whose `proposed_action` is outside the registration's
 | Deployment mandates (`DECISIONLEDGER_MANDATORY_GATES`) | — | Owns | — | — |
 | Enforcement tiers, decision-level rules, the combinator | — | Owns | — | — |
 | Bundle, storage, replay, timelines (`decisionledger.*`) | — | Owns | — | — |
+| Evidence escrow and verify | — | Owns the escrow (`evidence_artifacts`) and the verify route; checks that each escrowed artifact is held | Escrows what it relied on (through the store) and verifies its own references (`EvidenceVerifier`) | — |
 | API keys and principals | Holds its key | Owns (`app/auth.py`) | — | — |
 | Reasoner-only infrastructure and settings (ATO: Redis, `ATO_` prefix) | Owns | — | — | — |
 | Eval | Ships an `EvalAdapter`, a driver, and datasets | Runs the framework harness (consistency, robustness, shadow) | Runs its own harness on each reasoner's datasets for it | — |
@@ -631,8 +632,16 @@ in [How to implement a gate](../gates/implementation.md); the steps:
    neither it nor a `binding_config_model` refuses a binding that carries
    a configuration; admitting is not remembering: the framework hands the
    binding's `config` to every request as `GateRequest.binding_config`);
-   and `ReasonerScope` (`serves(reasoner_id)`, asked right after the
-   binding is admitted) when the gate can serve only some reasoners.
+   `ReasonerScope` (`serves(reasoner_id)`, asked right after the
+   binding is admitted) when the gate can serve only some reasoners; and
+   `EvidenceVerifier` (`async verify(output, *, live)`, one
+   `EvidenceStatus` per evidence reference, DR-34) to say, when a decision
+   is verified, how the evidence your gate cited stands. To keep a copy of
+   what it relied on, take the store's escrow in `build`
+   (`framework.store.artifacts`), call its `put` from a thread while
+   evaluating, and cite the digest it returns as `artifact_hash` (none with
+   escrow off); see
+   [Escrow and verify](../gates/implementation.md#escrow-and-verify).
 6. **Own your infrastructure**: a `compose.yaml` the root
    `docker-compose.yml` includes, your own schema and DDL (never the
    `decisionledger` schema), a `gate.mk` with suffixed targets appended to
@@ -696,3 +705,10 @@ output, the LLM's included, is stored, not because a model is
 deterministic. A bundle whose cited version has no snapshot and is not the
 current one is 409 `REGISTRATION_SNAPSHOT_MISSING`; a schema-version-1
 bundle is 409 `BUNDLE_SCHEMA_UNSUPPORTED`.
+
+Verify (`POST /api/v1/decisions/{decision_id}/verify`, DR-34) is not
+replay: it asks each gate that ran how the evidence it cited stands now
+(against the copy it escrowed in the ledger, or with `?live=true` against
+the source itself), beside the ledger's own check that its escrow still
+holds that copy. Like replay it needs no reasoner code, and it changes
+nothing.

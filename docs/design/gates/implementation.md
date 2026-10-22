@@ -46,9 +46,10 @@ Pydantic model, a name that differs from `gate_id`, or two plugins with one
 id.
 
 `build` receives `FrameworkServices`, among them `settings` (the framework
-settings, including the Postgres DSN), `pg_conn`, `store`, `registry`, and
-`reasoners` (the composed reasoner plugins, whose `prompts_dir` and
-`corpus_dir` a gate may read). The `gates` map is empty while gates are being built: a gate never
+settings, including the Postgres DSN), `pg_conn`, `store` (whose
+`artifacts` is the evidence escrow, [below](#escrow-and-verify)),
+`registry`, and `reasoners` (the composed reasoner plugins, whose
+`prompts_dir` and `corpus_dir` a gate may read). The `gates` map is empty while gates are being built: a gate never
 reaches another gate. `build_gates` refuses an object that does not satisfy
 `Gate`, including one whose `evaluate` is not a coroutine function.
 
@@ -91,7 +92,7 @@ verbatim and never reads.
 | `gate_id` | framework | The gate that ran. |
 | `deterministic` | enforcement | Must equal the plugin's declaration; stored so replay applies the same tiers. |
 | `verdict: GateVerdict \| None` | enforcement | The verdict. `None` means the gate ran but reached no valid verdict, which enforcement holds (Tier 1). When set, `verdict.gate_id` equals `gate_id`. |
-| `evidence: tuple[EvidenceRef, ...]` | enforcement (Tier 5) | References to the sources the gate relied on. |
+| `evidence: tuple[EvidenceRef, ...]` | enforcement (Tier 5), verify | References to the sources the gate relied on. |
 | `evidence_snapshot: JsonValue \| None` | nobody | Everything the gate consulted to reach its verdict, so the bundle is self-contained for audit. |
 | `extra: dict[str, JsonValue]` | nobody | Gate-specific output fields: a rationale, a raw response, token cost, a failure reason. |
 
@@ -100,10 +101,13 @@ verbatim and never reads.
 against sentinel values, below), `confidence` in [0.0, 1.0],
 `escalate_to_human`, and `escalation_reason`. `EvidenceRef` is
 `source_id`, an optional `locator`, `jurisdictions` (a set of tags; empty
-for a source with no jurisdiction), and an optional `content_hash` (the
-SHA-256, lowercase hex, of the exact text the gate relied on, so anyone
-holding the text can prove it is what the decision used). All of these models are strict, frozen,
-forbid unknown fields, and reject non-finite numbers.
+for a source with no jurisdiction), an optional `content_hash` (the
+SHA-256, lowercase hex, of the exact content the gate relied on, so anyone
+holding it can prove it is what the decision used), and an optional
+`artifact_hash` (the digest of the artifact the gate escrowed for the
+reference in the ledger's evidence escrow, [below](#escrow-and-verify)).
+All of these models are strict, frozen, forbid unknown fields, and reject
+non-finite numbers.
 
 A gate keeps its own typed models in its own package and serializes them
 into `evidence_snapshot` and `extra` with `model_dump(mode="json")`; a reader
@@ -231,6 +235,50 @@ registration snapshot the bundle cites; it never re-invokes a gate and reads
 no corpus or index, which is why everything a gate consulted belongs in
 `evidence_snapshot`.
 
+## Escrow and verify
+
+The ledger keeps an evidence escrow for gates and verifies decisions
+through them
+([DR-34](../decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)).
+Both are optional for a gate.
+
+- **Escrow.** `build` may take the store's escrow, `framework.store.artifacts`
+  (an `app.audit.ArtifactStore`), and hand it to the gate. While it
+  evaluates, the gate calls `put(content, *, media_type, decision_id,
+  gate_id)` from a worker thread (`asyncio.to_thread`) for the content it
+  relied on (the RAG gate: each cited document, whole; the rules gate: the
+  rule set it applied, as canonical JSON). `put` stores the bytes once,
+  content-addressed by SHA-256, in `decisionledger.evidence_artifacts`,
+  and returns the digest, which the gate records as the reference's
+  `artifact_hash`, only from that return value: with
+  `DECISIONLEDGER_EVIDENCE_ESCROW=off`, `put` stores nothing and returns
+  `None`, so the reference names no artifact. The gate never reads the
+  setting. A `put` that raises is a gate failure (fail closed). A gate built
+  without a framework gets no escrow and escrows nothing.
+- **`EvidenceVerifier`** (optional capability of the built gate). A gate
+  that defines `async verify(output, *, live) -> tuple[EvidenceStatus, ...]`
+  is asked, when a decision is verified, how each reference of an output it
+  returned stands: one `EvidenceStatus` per entry of `output.evidence`, in
+  order (a reference is identified by its position, so the gate receives
+  the whole stored output). `intact`: the content it relied on is proven,
+  from its own record (the escrowed artifact, its snapshot) or, with
+  `live`, from the source as it is now; `source_changed`: the source no
+  longer holds that content; `source_unavailable`: the source cannot be
+  read; `not_verifiable`: the reference cannot be checked. Run blocking
+  reads in a thread, as in `evaluate`. Verifying must decide nothing again
+  and must not change anything.
+
+`POST /api/v1/decisions/{decision_id}/verify` (and `LedgerClient.verify`)
+asks each gate that ran on the decision, through `app.gates.verify_evidence`,
+and reports for every reference two independent answers: `escrow`, the
+framework's own check (`present` or `missing` when the reference names an
+artifact, `none` when it names none), and `status`, the gate's. A gate that
+is not composed, lacks the capability, raises, answers after its budget
+(the per-gate budget decisions run under), or answers anything but one known
+status per reference leaves its references `not_verifiable`. Replay is a
+different operation: it re-enforces the stored outputs and never asks a
+gate anything.
+
 ## Owning infrastructure
 
 A gate owns everything it runs on
@@ -245,7 +293,9 @@ framework's only infrastructure is Postgres.
   idempotently by the gate (the RAG gate applies it on every build). Gate DDL
   never creates or alters anything in the framework's `decisionledger`
   schema (`tests/test_framework_boundary.py` checks), and `make lint-sql`
-  lints every gate's DDL with the framework's.
+  lints every gate's DDL with the framework's. The evidence escrow is the
+  framework's table, which a gate writes only through the store
+  ([above](#escrow-and-verify)).
 - **Make targets.** A `gate.mk` the root Makefile includes
   (`-include $(wildcard gates/*/gate.mk)`). Targets are suffixed with the
   gate directory name (`prepare-gate-<name>`, `eval-gate-<name>`) and append
@@ -288,7 +338,11 @@ responses; its eval harness is its test suite.
 Framework tests never need a real gate: they compose `tests/_fake_gate`, a
 test-only gate whose outcomes (actions, confidence, controls, evidence
 jurisdictions, a schema failure, an error, a delay) are scripted by its
-`gate_config`.
+`gate_config`, as is its evidence: the sources it cites, whether it escrows
+them, and what its `verify` answers, stored and live (every status, and a
+malformed answer or an error, reachable without Docker). Its lookup-style
+variant escrows the row a listed subject's answer came from and does not
+verify.
 
 ## Worked examples
 
@@ -299,8 +353,9 @@ jurisdictions, a schema failure, an error, a delay) are scripted by its
 
 - **Plugin.** `RulesGatePlugin` declares `config_model = RulesGateConfig`
   (`ruleset_id`, strict, unknown keys forbidden). `build` loads every rule-set
-  YAML file under `RULES_GATE_RULESETS_DIR` and ignores the framework
-  services.
+  YAML file under `RULES_GATE_RULESETS_DIR`, each with the file it came from,
+  and takes the store's evidence escrow (none when built without a
+  framework); it opens no connection of its own.
 - **Evaluate.** It looks up the rule set the context names and checks that
   the rule set belongs to the submitting reasoner. It evaluates every rule's
   predicate (the framework's closed predicate language,
@@ -311,7 +366,18 @@ jurisdictions, a schema failure, an error, a delay) are scripted by its
   `<ruleset_id>@<version>`, `locator` the rule id), or one for the default;
   no jurisdictions, so Tier 5 is skipped. `evidence_snapshot` is a
   `RulesGateSnapshot`: the rule set as evaluated, the matching rule ids, and
-  the observed value of every field the rules reference.
+  the observed value of every field the rules reference, and the digest
+  every reference names (`ruleset_hash`). The canonical JSON of the rule set
+  as the gate applied it (the rules the snapshot records; the stored JSON
+  may render numbers differently, so the digest is kept, not recomputed) is
+  escrowed, and every reference carries its digest as `content_hash` and
+  the escrow's as `artifact_hash`.
+- **Verify.** References are checked against the snapshot's
+  `ruleset_hash`. Stored: the escrowed rule set is the one the snapshot
+  recorded (`intact`); nothing escrowed, `not_verifiable`. Live: the rule
+  set's file, read again and canonicalized, holds the same rules (`intact`,
+  even if the file was reformatted), other rules (`source_changed`), or
+  cannot be read as a rule set (`source_unavailable`).
 - **Failing closed without raising.** An unknown rule set, a rule set owned
   by another reasoner, or a predicate that cannot evaluate returns
   `verdict=None` with `extra = {"failure": ..., "detail": ...}`, so the
@@ -324,7 +390,7 @@ See [`gates/rules/README.md`](https://github.com/charleskelley/decision-ledger/b
 `gates/policy_rag` (package `policy_rag_gate`) is the full shape: `kind`
 `llm`, non-deterministic, its own retrieval providers (the reference one
 with its own Postgres schema, Elasticsearch, and models), a binding
-configuration, LLM adapters, and eval.
+configuration, LLM adapters, evidence escrow and verify, and eval.
 
 - **Plugin.** `binding_config_model` is `PolicyBindingConfig`: the corpora
   a reasoner's binding names, each with its provider and authority tier
@@ -333,18 +399,22 @@ configuration, LLM adapters, and eval.
   ships, loads every reasoner's prompt templates, discovers the retrieval
   providers into a `ProviderRegistry` (each provider is built the first
   time a binding names it; the reference provider then opens its own
-  Postgres connection, applies its DDL, and loads its models), and builds
-  the LLM client.
+  Postgres connection, applies its DDL, and loads its models), builds the
+  LLM client, and takes the store's evidence escrow.
 - **Capabilities.** The built `PolicyGate` is a `BindingValidator` (it
   admits a binding whose corpora are loaded and whose providers can meet
   the binding's `min_provenance`), a `ConfigAuthorizer` (a reasoner may
   render only its own templates and filter only to jurisdictions its own
-  corpus directory covers), and a `ReasonerScope` (it serves only the
-  reasoners it built a profile for).
+  corpus directory covers), a `ReasonerScope` (it serves only the
+  reasoners it built a profile for), and an `EvidenceVerifier` (each
+  passage against the document it escrowed, or, live, against the
+  document as its provider holds it now;
+  [Evidence](policy/evidence.md#replay-and-verify)).
 - **Output.** The universal part of the model's verdict (floored at HOLD
   when a tiered verdict reports disagreeing or insufficient evidence), one
-  `EvidenceRef` per rendered passage carrying its jurisdiction and content
-  hash, a `PolicyGateSnapshot` (version 2: one `CorpusQuery` per bound
+  `EvidenceRef` per rendered passage carrying its jurisdiction, content
+  hash, and the digest of the document escrowed for it, a
+  `PolicyGateSnapshot` (version 2: one `CorpusQuery` per bound
   corpus, the passages under the evidence contract, and the exact prompt)
   as `evidence_snapshot`, and a `PolicyGateExtra` (rationale, citations,
   the conflict/gap report, token cost, retrieval latency, the failing
@@ -367,6 +437,8 @@ See [Policy gate](policy/index.md).
 - **Depending on another gate.** Gates in a set are independent and run
   concurrently; there is no order and no data flow between them.
 - **Writing outside your own schema,** or naming a reasoner in the member.
+  (Escrowed evidence is not an exception: it goes through the framework's
+  store, never through SQL of the gate's own.)
 
 ## Things that are fine
 

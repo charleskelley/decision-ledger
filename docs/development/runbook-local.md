@@ -84,6 +84,29 @@ curl -s -X POST localhost:8000/api/v1/decisions:batch -H "$H" \
 curl -s localhost:8000/api/v1/decisions/<decision_id> -H "$H" | python3 -m json.tool | head -40
 curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay -H "$H"
 # Expected: "matched": true, under the bundle's registration_version
+
+# Verify the evidence it relied on (DR-34). Not replay: replay re-enforces the
+# stored gate outputs and asks no gate anything; verify asks each gate that
+# ran how its evidence references stand, beside the ledger's own check of its
+# evidence escrow, and changes nothing. Same keys as lookup: a reasoner's key
+# for its own decisions, the operator key for any.
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/verify -H "$H"
+curl -s -X POST 'localhost:8000/api/v1/decisions/<decision_id>/verify?live=true' -H "$H"
+# Expected: {"decision_id": ..., "checked_at": ..., "live": false,
+#   "refs": [{"gate_id": "policy", "source_id": ..., "locator": ...,
+#             "content_hash": ..., "artifact_hash": ..., "escrow": "present",
+#             "status": "intact"}, ...],
+#   "summary": {"intact": n, "changed": 0, "unavailable": 0,
+#               "not_verifiable": 0, "escrow_missing": 0}}
+# escrow (the ledger's check): present | missing (its copy is gone) | none
+#   (nothing escrowed: the gate keeps none, or DECISIONLEDGER_EVIDENCE_ESCROW
+#   was off when it decided)
+# status (the gate's): intact | source_changed (the source no longer holds the
+#   content) | source_unavailable (the source cannot be read) | not_verifiable
+#   (nothing to check against)
+# Without ?live a gate checks its own record (the escrowed copy), so a decision
+# stays provable after its corpus is reloaded or deleted; ?live=true checks the
+# source as it is now. A record no gate ran on has no refs.
 curl -s localhost:8000/api/v1/entities/<entity_id>/decisions -H "$H"
 # Page with the last item's created_at and decision_id: ?limit=50&before=...&before_id=...
 
@@ -169,7 +192,8 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dt decisionledger.*'
 # Expected: decision_bundles, decision_resolution_attempts, entity_events,
-#   entity_membership, reasoner_registrations, replay_logs
+#   entity_membership, evidence_artifacts, reasoner_registrations,
+#   reasoner_registry, replay_logs
 
 # RAG policy gate: the vector extension and its chunk table
 make prepare-gate-policy_rag   # idempotent; the API and the corpus loader run it too
@@ -598,10 +622,16 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c "TRUNCATE decisionledger.entity_events, decisionledger.entity_membership;"
 
+# The evidence escrow references no bundle (and no bundle references it by
+# foreign key): empty it on its own. A bundle that cites a removed artifact
+# then verifies with "escrow": "missing".
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "TRUNCATE decisionledger.evidence_artifacts;"
+
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c "TRUNCATE policy_rag.policy_chunks;"
 # Note: this empties the RAG policy gate's dense store only; reload each corpus
-# with the loader's --wipe, which clears that reasoner's chunks from both stores
+# with the loader's --wipe, which clears that corpus's chunks from both stores
 # (Postgres and the ES index)
 ```
 
