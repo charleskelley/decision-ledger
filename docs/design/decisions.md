@@ -2491,7 +2491,10 @@ also serves reasoners registered without a plugin, from its asset root
 `POLICY_RAG_GATE_ASSETS_ROOT`; amended by DR-34: the RAG gate retrieves
 through providers from the corpora a reasoner's binding names, the gate
 receives the binding's `config` with every request, and `EvidenceRef`
-carries a `content_hash`)
+carries a `content_hash` and an `artifact_hash`; a gate may escrow what it
+relied on through the framework's store (`decisionledger.evidence_artifacts`),
+and a built gate may be an `EvidenceVerifier` the framework asks when a
+decision is verified)
 **Category:** Pipeline & System Design
 
 > Amends DR-19 and DR-20: the closed discriminated union of DR-20 becomes an
@@ -3230,7 +3233,9 @@ a threshold, and each sample costs one call per advisory gate.
 API, `PUT /api/v1/reasoners/{reasoner_id}` with the operator key, kept in
 `decisionledger.reasoner_registry` and served as `source: api`; a reasoner
 registered by file or over the API can bind the RAG gate through its asset
-root)
+root; amended by DR-34: the ledger also serves
+`POST /api/v1/decisions/{decision_id}/verify`, `LedgerClient` gains
+`verify`, and the MCP server a seventh tool, `verify_decision`)
 **Category:** Pipeline & System Design
 
 > Replaces the in-process handoff that DR-14 describes (see its status).
@@ -4038,15 +4043,18 @@ directory is read at the next start.
 
 **Status:** Accepted (part 1 — providers, corpus references, the evidence
 contract — implemented in Phase 2; part 2 — evidence escrow and verify —
-Phase 3)
+implemented in Phase 3)
 **Category:** Pipeline & System Design
 
 > Amends DR-28 (the RAG policy gate retrieves through providers from the
-> corpora a reasoner's binding names, and its evidence carries a content
-> hash) and builds on DR-33 (the binding's gate-validated configuration is
-> how a reasoner names its corpora); DR-28's status line says so. Phase 2
-> of the ledger-decoupling program implements part 1 (below); part 2 is
-> Phase 3.
+> corpora a reasoner's binding names; evidence references carry a content
+> hash and the digest of an escrowed artifact; a gate may escrow what it
+> relied on and verify its own evidence) and DR-31 (the verify route, the
+> client method, and the seventh MCP tool), and builds on DR-33 (the
+> binding's gate-validated configuration is how a reasoner names its
+> corpora); the status lines of DR-28 and DR-31 say so. Phase 2 of the
+> ledger-decoupling program implemented part 1, Phase 3 part 2 (both
+> below).
 
 **Decision.**
 
@@ -4118,31 +4126,102 @@ Phase 3)
   (the SHA-256, lowercase hex, of the exact text the gate relied on).
   Nothing else in `core/` learns the words corpus, provider, or policy.
 
-*Part 2 (Phase 3) — framework and gates:*
+*Part 2 (Phase 3) — framework:*
 
+- `core/gate/output.py:EvidenceRef` gains `artifact_hash: str | None =
+  None` (the SHA-256, lowercase hex, of the artifact the gate escrowed for
+  the reference) beside `content_hash`, and `EvidenceStatus` (`intact |
+  source_changed | source_unavailable | not_verifiable`) is a `Literal`
+  beside it. Nothing else in `core/` learns the words corpus, provider, or
+  policy, and only `schemas/bundle-v2.json` changes.
 - **Evidence escrow.** `decisionledger.evidence_artifacts(artifact_hash PK,
-  media_type, byte_length, content bytea, first_seen_at, first_decision_id,
-  first_gate_id)`; `store.artifacts.put(blob, *, decision_id, gate_id) ->
-  hash` (idempotent) and `get(hash)`; `EvidenceRef.artifact_hash`. Setting
-  `DECISIONLEDGER_EVIDENCE_ESCROW` = `on | off` (default `on`). A gate
-  writes through `framework.store.artifacts` during evaluation (after the
-  first copy it is a hash lookup). Retention is the deployment's records
-  rule; nothing here deletes.
-- **Verify.** `POST /api/v1/decisions/{decision_id}/verify` (a reasoner key
-  for its own decisions, the operator for any). Framework part: for every
-  `EvidenceRef` with an `artifact_hash`, escrow present or missing.
-  Delegated part: a gate implementing `EvidenceVerifier.verify(ref,
-  snapshot) -> EvidenceStatus` (`intact | source_changed |
-  source_unavailable | not_verifiable`) is called per reference; the RAG
-  gate recomputes the passage hash from its stored snapshot text and, in
-  live mode (`?live=true`), asks the provider to fetch the current document
-  (`DocumentFetcher.fetch_document`, an optional provider capability) and
-  compares. Replay is unchanged and never touches a provider.
-  `LedgerClient.verify(decision_id, live=False)`; MCP gains
-  `verify_decision`; conformance covers escrow present and a
-  `not_verifiable` path.
-- **Rules gate** escrows the rule-set text it applied, proving the mechanism
-  is gate-agnostic.
+  media_type, byte_length, artifact_bytes bytea, first_seen_at,
+  first_decision_id, first_gate_id)`, content-addressed: checks pin the key
+  to 64 hex characters, to the SHA-256 of the bytes, and `byte_length` to
+  their length. `first_decision_id` is not a foreign key: a gate escrows
+  while it decides, before the bundle is written, and a decision can be
+  decided without a write. `app/audit/artifacts.py:ArtifactStore(conn, *,
+  enabled)` mirrors `RegistrationSnapshots` (an autocommit connection, one
+  self-committing statement per call): `put(content, *, media_type,
+  decision_id, gate_id) -> str | None` (one `INSERT ... ON CONFLICT DO
+  NOTHING`; the digest, or `None` when escrow is off), `get(hash) -> bytes
+  | None`, and `held(hashes)` (which digests it holds, their bytes unread).
+  `BundleStore.artifacts` holds it the way `snapshots` holds the
+  registration snapshots, and the test doubles get in-memory ones.
+  `DECISIONLEDGER_EVIDENCE_ESCROW` = `on | off` (default `on`; any other
+  value refuses startup) is read by the bootstrap only; gates never read
+  it. A gate plugin's `build` takes `framework.store.artifacts` and hands it
+  to its gate as `escrow` (none when built without a framework); the gate
+  calls `put` from a worker thread while it evaluates and sets
+  `EvidenceRef.artifact_hash` only from `put`'s return, so escrow off means
+  no `artifact_hash`. A `put` that raises is a gate failure (the gate fails
+  closed). Retention is the deployment's records rule; nothing here
+  deletes.
+- **Verify.** `POST /api/v1/decisions/{decision_id}/verify?live=false|true`
+  (a reasoner key for its own decisions, the operator for any, 404
+  otherwise; a version-1 bundle answers 409 `BUNDLE_SCHEMA_UNSUPPORTED`,
+  as replay does; no new error codes). Per evidence reference of every gate
+  that ran, two independent fields: `escrow` (the framework's part:
+  `present | missing`, or `none` when the reference names no artifact,
+  whether its gate never escrows or escrow was off) and `status` (the
+  gate's part, an `EvidenceStatus`). The capability `EvidenceVerifier`
+  (`app/gates.py`, beside `BindingValidator`) receives the whole output,
+  since a reference is identified by its position, not its fields:
+  `async def verify(self, output: GateOutput, *, live: bool) ->
+  tuple[EvidenceStatus, ...]`, one status per `output.evidence`, in order.
+  A gate that is not composed or lacks the capability leaves its
+  references `not_verifiable`. The result is
+  `EvidenceVerification(decision_id, checked_at, live, refs: [{gate_id,
+  source_id, locator, content_hash, artifact_hash, escrow, status}],
+  summary: {intact, changed, unavailable, not_verifiable,
+  escrow_missing})`, a response model in `app/api/models.py`, not a
+  committed schema. Replay is unchanged and never asks a gate anything.
+  `LedgerClient.verify(decision_id, *, live=False)` is on the protocol and
+  both clients; the MCP server gains `verify_decision` (seven tools);
+  conformance gains a verify suite. Framework prose describes the gate's
+  part generically ("a gate that verifies its own references compares each
+  against its own record and, live, against its source"), and the boundary
+  test keeps the gate's vocabulary out of the framework's escrow and verify
+  code.
+
+*Part 2 (Phase 3) — gates:*
+
+- **RAG gate verify.** `DocumentFetcher`, an optional provider capability,
+  and `DocumentBlob` are top-level names of `providers/protocol.py`:
+  `fetch_document(corpus: CorpusRef, document_id: str, version: str | None)
+  -> DocumentBlob(corpus_id, document_id, version, title,
+  media_type="text/markdown", text, content_hash = sha256(text),
+  metadata)`. The reference provider reads `policy_rag.documents` over its
+  own Postgres connection, version required (a corpus may hold several
+  versions of one document); Elasticsearch is never involved. Escrow: in
+  `evaluate`, right after retrieval and before any snapshot or failure
+  output is built, the gate fetches each `(corpus_id, document_id,
+  version)` its passages came from once, escrows its text, and rebuilds the
+  passages with their `artifact_hash`. Verify: (1) a reference must match
+  its passage (`ref.content_hash == contexts[i].content_hash`) in a
+  version-2 snapshot, else `not_verifiable`; (2) stored: with the escrow
+  present, `intact` when the passage's span of the escrowed text hashes to
+  its `content_hash` (or, with no span — two short sections merged — its
+  text occurs in the document); with nothing escrowed, `not_verifiable`;
+  (3) live: the same test against `fetch_document`'s current text,
+  `intact | source_changed`; the pinned version no longer held while the
+  corpus is, `source_changed`; the corpus not loaded or any provider
+  error, `source_unavailable`; a provider without `DocumentFetcher`,
+  `not_verifiable`. The `CorpusRef` for a live fetch comes from the
+  snapshot's `corpus_queries`.
+- **Rules gate** escrows the rule set it applied, proving the mechanism is
+  gate-agnostic. `source_id` stays `ruleset.ref` (`<ruleset_id>@<version>`).
+  The escrowed blob is the canonical JSON of the loaded `RuleSet`
+  (`model_dump(mode="json")`, what the gate already snapshots;
+  `application/json`), hashed the same way into `content_hash` and
+  `artifact_hash`. `load_rulesets` returns each rule set's origin beside
+  it, so live verify re-reads `<rulesets_dir>/<origin>`, parses and
+  canonicalizes it, and compares: `intact | source_changed`; a file missing
+  or unparseable, `source_unavailable`. `RulesGatePlugin.build` passes the
+  escrow. No rule-set file ships in the repository, so the proof is a
+  `gates/rules` test and a `tests/integration` test composing the rules
+  gate with a temporary rule set for a stub reasoner that binds `rules`;
+  conformance stays on the policy-gate path.
 
 **Rationale.** A research pass on production RAG corpus partitioning
 (`zoo/research/rag-corpus-partitioning-2026-10/`) found that deployments
@@ -4179,15 +4258,18 @@ replay. Retrieval and generation are never promised reproducible.
 
 **Cross-references.**
 
-- Amends DR-28 (see its status line). Builds on DR-33 (binding
-  configuration validated by the gate), DR-13 (the reference provider's
-  dual-analyzer BM25), DR-23 (LLM SDKs confined to the gate's adapters), and
-  DR-24 (the keyword mapping of the filter key, now `corpus_id`).
+- Amends DR-28 and DR-31 (see their status lines). Builds on DR-33
+  (binding configuration validated by the gate), DR-13 (the reference
+  provider's dual-analyzer BM25), DR-23 (LLM SDKs confined to the gate's
+  adapters), and DR-24 (the keyword mapping of the filter key, now
+  `corpus_id`).
 - Design pages: [Policy gate](gates/policy/index.md),
   [Retrieval providers](gates/policy/providers.md),
   [Evidence](gates/policy/evidence.md),
   [Policy corpus](gates/policy/policy-corpus.md),
-  [Registration](registration.md).
+  [Registration](registration.md),
+  [How to implement a gate](gates/implementation.md#escrow-and-verify),
+  [Infrastructure](infrastructure.md).
 
 **Implementation (Phase 2, part 1).**
 
@@ -4384,3 +4466,135 @@ replay. Retrieval and generation are never promised reproducible.
   driver builds its raising stand-in providers through the composed gate's
   registry, so ATO's source never imports the provider seam; a member's
   tests may build stand-in providers.
+
+**Implementation (Phase 3, part 2).**
+
+- **`core/`.** `EvidenceRef.artifact_hash` (pattern `^[0-9a-f]{64}$`) and
+  `EvidenceStatus`; `schemas/bundle-v2.json` regenerated.
+- **`app/`.** `audit/artifacts.py` (`ArtifactStore`), the
+  `evidence_artifacts` DDL in `audit/sql/02_tables.sql`, and
+  `BundleStore.artifacts`; `settings.py` (`DECISIONLEDGER_EVIDENCE_ESCROW`,
+  `evidence_escrow`) and `bootstrap.py`; `gates.py` (`EvidenceVerifier`,
+  `verify_evidence`); `api/models.py` (`EvidenceVerification`,
+  `VerifiedReference`, `VerificationSummary`, `EscrowStatus`);
+  `api/decisions.py` (`verify_decision` and the route); `client.py`
+  (`verify`).
+- **Integrations and conformance.** The MCP server's `verify_decision`;
+  `conformance/test_verify.py`.
+- **Gates.** `policy_rag_gate`: `DocumentFetcher`, `DocumentBlob`, and
+  `DocumentNotHeldError` (`providers/protocol.py`); the reference
+  provider's `fetch_document`; `escrow_documents`, `stored_snapshot`,
+  `passage_holds`, and `PolicyGate.verify` (`gate.py`); the plugin passes
+  the escrow. `rules_gate`: `LoadedRuleSet`, `read_ruleset`, and
+  `canonical_ruleset` (`ruleset.py`); the escrow in `evaluate` and
+  `RulesGate.verify` (`gate.py`); the plugin passes the escrow and each
+  rule set's file.
+- **Tests.** The escrow store on the bundle-store tests' fake connection
+  and on Postgres; verify through the API with the scripted fake gates
+  (every status, escrow off, a gate that does not verify, one no longer
+  composed, malformed answers, access); the gates' escrow and verify over
+  fake providers and rule-set files; an integration test with the rules
+  gate over a temporary rule set (decide, edit the file, remove it) and the
+  lookup gate beside the fake gate.
+
+**Judgment calls and deviations (Phase 3).**
+
+- **The escrowed bytes are `artifact_bytes`.** The plan names the column
+  `content`, a SQL keyword `make lint-sql` refuses as an identifier (RF04),
+  as it refused `text` and `version` in Phase 2.
+- **The table pins the content address.** Besides the plan's checks (a
+  64-hex key, `byte_length`), a check makes the key the SHA-256 of the
+  bytes (`encode(sha256(artifact_bytes), 'hex')`), so no row can name
+  content it does not hold. `first_decision_id` is text: the decision id
+  as the gate received it.
+- **`put` keeps no cache.** `RegistrationSnapshots` remembers what it
+  recorded; the escrow re-sends the content on every `put`, so an artifact
+  a deployment's retention deleted is escrowed again by the next decision
+  that relies on it instead of being cited and missing. `put` refuses a
+  blank media type, decision, or gate. `held` (one `SELECT`, bytes unread)
+  is what verify's framework part reads; the plan names only `put` and
+  `get`.
+- **The setting is case-insensitive and checked first.** `on` or `off` in
+  any case; anything else refuses startup with a `ValueError` before the
+  bootstrap opens a connection.
+- **Eight seam types.** The `app/gates.py` docstring said six while listing
+  seven; with `EvidenceVerifier` it lists eight (the plan says seven).
+- **Verify fails safe beyond the plan's two cases.** Besides a gate that
+  is not composed or lacks the capability, a verifier that raises (a
+  cancellation of its own tasks included), answers after the per-gate
+  budget decisions run under (45 s) because it blocked the loop or ignored
+  its cancellation, or answers anything but one known status (a string) per
+  reference leaves its references `not_verifiable`
+  (`app.gates.verify_evidence`, which mirrors `invoke_gate`; only the
+  caller's own cancellation propagates): a request never fails over a
+  gate.
+- **Every gate that ran contributes references.** The plan says a record
+  yields no references; that holds when no gate ran on it. A mandatory
+  gate's references on a record are verified like any other, and a failed
+  gate contributes none. Conformance asserts that a record's references come
+  only from gates that ran on it (none, in a deployment that mandates no
+  gate).
+- **The boundary rule is scoped.** The plan bans the gate's vocabulary
+  (corpus, provider, provenance, ruleset) from framework prose; a blanket
+  ban of the plain words would hit the identity contract's provenance
+  (DR-32), core's LLM provider, and existing statements such as "replay
+  reads no corpus". So the plain words (corpus, provider, provenance, rule
+  set, passage, chunk, document fetcher) are banned from the framework's
+  escrow store, its DDL block, and the verify symbols, wherever they are
+  defined (classes, functions, and assignments with their `#:` comments:
+  `EvidenceStatus`, `EscrowStatus`, the escrow setting), and the compound
+  forms stay banned everywhere, as before. `DocumentNotHeldError` joins
+  `DocumentFetcher` and `DocumentBlob` in the provider seam's names.
+- **The RAG gate fails closed on a document it cannot escrow.** A failing
+  `fetch_document`, like a failing `put`, raises (the decision is held); a
+  fetched document that is not the one asked for (another id or version,
+  or a digest that is not its text's) is a `ProviderContractError`; and a
+  fetched document that no longer holds a passage cited to it (a reload of
+  the same version racing the decision) is an `EvidenceEscrowError`, since
+  the escrow could never prove what the decision relied on. With escrow
+  off nothing is fetched: the gate reads the escrow store's own `enabled`
+  (the store the plugin handed it, not the setting) and skips the work
+  `put` would discard. The escrow step runs in a thread; retrieval itself
+  still runs on the event loop, as before this record (a gate-owned
+  follow-up, outside this phase).
+- **A passage without a span is checked paragraph by paragraph.** The plan
+  has a span-less passage be `intact` when its text occurs in the
+  document; but a passage has no span exactly when the loader merged a
+  short section into the next and dropped the heading between them, so its
+  text never occurs whole and such a passage would never verify. Each of
+  its paragraphs must occur in the document, in order (`passage_holds`),
+  at escrow time and at verify time.
+- **The RAG gate's statuses beyond the plan's.** Stored verify whose
+  escrowed text does not hold the passage reports `source_changed` (escrow
+  refuses such a document when the decision is made, so only an altered
+  record reaches it); escrowed bytes that do not hash to their key,
+  `not_verifiable`. Live verify with the provider
+  not installed, failing to build, or answering with another document
+  reports `source_unavailable`; a passage whose corpus has no query in the
+  snapshot, `not_verifiable`. `RetrievedContext.artifact_hash` is held to
+  the 64-hex pattern.
+- **The rules gate escrows only with a verdict.** An output without one
+  cites nothing and escrows nothing; every reference of an output carries
+  the same two digests (the applied rule set's). `load_rulesets` returns
+  `LoadedRuleSet(ruleset, origin)` and `read_ruleset` reads one file;
+  `build` accepts no framework (as its tests call it) and then escrows
+  nothing. The snapshot records the digest the references name
+  (`ruleset_hash`), and verify compares references with it rather than
+  with a digest recomputed from the stored rule set, whose numbers `jsonb`
+  may render differently (a constant of 1e16 comes back as an integer).
+  Live verify canonicalizes the file, so a reformatted or commented file
+  with the same rules stays `intact`; any failure reading, parsing, or
+  canonicalizing it, and a rule set whose file the gate does not know, is
+  `source_unavailable`.
+- **The fake gates script verify.** `FakeGateConfig` gains the sources a
+  fake gate cites, whether it escrows them, and what `verify` answers,
+  stored and live (any strings, so a malformed answer can be scripted), or
+  that it raises; the lookup gate escrows a listed subject's row and does
+  not verify; `STUB_REGISTRATION_WITH_LOOKUP` binds it mandatory beside
+  `fake`.
+- **The MCP tool.** `verify_decision` takes `decision_id` and an optional
+  boolean `live` (anything else is `ARGUMENTS_INVALID`); it is read-only
+  and open-world (live, it reaches the gates' sources).
+- **`EscrowStatus` belongs to the API.** `present | missing | none` is a
+  `Literal` in `app/api/models.py`; `EvidenceStatus`, which gates answer,
+  is in `core/gate/output.py`.

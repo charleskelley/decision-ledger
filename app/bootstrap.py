@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import psycopg
 import structlog
 
+from app.audit.artifacts import ArtifactStore
 from app.audit.registrations import ApiRegistrations
 from app.audit.resolution_journal import ResolutionJournal
 from app.audit.schema import apply_canonical_schema
@@ -69,14 +70,15 @@ def build_framework_services(
     the store and the journal can rely on a fresh schema, reads back the
     registrations written over the API, then records a snapshot of every
     registration the deployment serves (a version already recorded is left
-    as it is), so every bundle's ``registration_version`` has one. A gate
-    that keeps tables in the same database applies its own DDL, in its own
-    schema, when it is built. The active identity resolver is built next,
-    then the gates, each against the services built so far; every gate then
-    admits the bindings of every registration that binds it. A resolver or
-    gate that fails to build, or a registration the gates cannot serve,
-    closes what was built before it and the Postgres connection, then the
-    error propagates.
+    as it is), so every bundle's ``registration_version`` has one. The
+    store's evidence escrow writes only when ``DECISIONLEDGER_EVIDENCE_ESCROW``
+    is on (DR-34). A gate that keeps tables in the same database applies its
+    own DDL, in its own schema, when it is built. The active identity
+    resolver is built next, then the gates, each against the services built
+    so far; every gate then admits the bindings of every registration that
+    binds it. A resolver or gate that fails to build, or a registration the
+    gates cannot serve, closes what was built before it and the Postgres
+    connection, then the error propagates.
 
     Args:
         settings: Connection parameters and credentials, and the
@@ -115,7 +117,10 @@ def build_framework_services(
             reasoner is registered twice (by two sources, or twice in the
             file), or two registrations declare one native namespace
             differently.
+        ValueError: ``DECISIONLEDGER_EVIDENCE_ESCROW`` is neither ``on`` nor
+            ``off`` (raised before any connection is opened).
     """
+    escrow = settings.evidence_escrow
     composed_gate_plugins = (
         list(gate_plugins) if gate_plugins is not None else discover_gates()
     )
@@ -138,7 +143,11 @@ def build_framework_services(
             writer=api_registrations,
         )
         declared_namespaces(entry.registration for entry in registry.entries())
-        store = BundleStore(conn=pg_conn, registry=registry)
+        store = BundleStore(
+            conn=pg_conn,
+            registry=registry,
+            artifacts=ArtifactStore(pg_conn, enabled=escrow),
+        )
         for entry in registry.entries():
             store.snapshots.record(entry.registration)
         services = FrameworkServices(
@@ -171,6 +180,7 @@ def build_framework_services(
         gate_ids=list(gates),
         mandatory_gate_ids=sorted(g for g, c in gates.items() if c.mandatory),
         identity_resolver=services.identity.resolver_id,
+        evidence_escrow="on" if escrow else "off",
     )
     return dataclasses.replace(services, gates=MappingProxyType(gates))
 

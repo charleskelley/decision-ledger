@@ -3,8 +3,8 @@
 The request body of a decision is the ``core.submission.Submission`` itself
 (and one per line for a batch); a lookup returns the stored
 ``core.bundle.DecisionBundle``. Everything else the API exchanges is defined
-here: the receipt a write returns, replay results, batch results, a subject's
-timeline, resolutions, and the registrations and gates resources.
+here: the receipt a write returns, replay and verify results, batch results,
+a subject's timeline, resolutions, and the registrations and gates resources.
 ``HttpClient`` parses responses into these models and ``LocalClient`` builds
 the same ones, so a caller sees one set of types whichever client it uses.
 
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.enforcement.resolver import credited_rule
 from core.actions import DecisionAction
+from core.gate import EvidenceStatus
 from core.submission import SubmissionMode, storage_problem
 
 if TYPE_CHECKING:
@@ -174,6 +175,85 @@ class ReplayResponse(_Response):
     gates: list[GateReplayResult]
     registration_version: str | None = None
     matched: bool
+
+
+#: Whether the evidence escrow holds the artifact a reference names: it does
+#: (``present``), it does not (``missing``), or the reference names none
+#: (``none``: its gate escrows nothing, or escrow was off when it decided).
+EscrowStatus = Literal["present", "missing", "none"]
+
+
+class VerifiedReference(_Response):
+    """How one evidence reference of a decision stands (DR-34).
+
+    Two independent fields: ``escrow`` is the framework's own check (is the
+    artifact the reference names held by the escrow?), ``status`` the
+    gate's (``EvidenceStatus``: the gate compared the reference with its
+    stored record and, live, with its source; ``not_verifiable`` when the
+    gate is not composed here or does not verify its references).
+
+    Attributes:
+        gate_id: The gate whose output holds the reference.
+        source_id: The reference's source, as the gate named it.
+        locator: Its position inside the source, if any.
+        content_hash: The digest of the content the gate relied on.
+        artifact_hash: The digest of the artifact it escrowed, if any.
+        escrow: Whether the escrow holds that artifact.
+        status: How the gate says the reference stands now.
+    """
+
+    gate_id: str
+    source_id: str
+    locator: str | None = None
+    content_hash: str | None = None
+    artifact_hash: str | None = None
+    escrow: EscrowStatus
+    status: EvidenceStatus
+
+
+class VerificationSummary(_Response):
+    """Counts over a verification's references.
+
+    Attributes:
+        intact: References whose gate proved them ``intact``.
+        changed: ``source_changed`` references.
+        unavailable: ``source_unavailable`` references.
+        not_verifiable: ``not_verifiable`` references.
+        escrow_missing: References whose artifact the escrow does not hold.
+    """
+
+    intact: int
+    changed: int
+    unavailable: int
+    not_verifiable: int
+    escrow_missing: int
+
+
+class EvidenceVerification(_Response):
+    """Result of verifying the evidence a decision relied on (DR-34).
+
+    Verify is not replay: replay re-enforces the stored outputs and never
+    asks a gate anything; verify asks each gate that ran how the references
+    of its stored output stand now, beside the framework's own check of the
+    evidence escrow. ``live`` says whether gates also checked each reference
+    against its source as it is now (else against their own stored record
+    only). A decision whose gates referenced nothing (a record no gate ran
+    on) has no references.
+
+    Attributes:
+        decision_id: The decision verified.
+        checked_at: When the check ran.
+        live: Whether gates checked their sources as they are now.
+        refs: One entry per evidence reference, gate by gate in the
+            bundle's order, each gate's references in its output's order.
+        summary: Counts over ``refs``.
+    """
+
+    decision_id: str
+    checked_at: datetime
+    live: bool
+    refs: list[VerifiedReference]
+    summary: VerificationSummary
 
 
 class BatchLineResult(_Response):

@@ -3,9 +3,13 @@
 The bundle is the evidence; a corpus is only a source. Corpora change, no
 retrieval platform versions its corpus, and retrieval and generation cannot
 be reproduced later. So the RAG policy gate keeps, in every bundle it
-decides, by value what the model saw and by reference how it was produced
+decides, by value what the model saw and by reference how it was produced,
+and it escrows in the ledger the whole document each passage came from, so
+that what the decision relied on can be proven later, whatever becomes of
+the corpus
 ([DR-34](../../decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)).
-Replay re-enforces the stored output and never touches a provider.
+Replay re-enforces the stored output and never touches a provider; verify,
+a separate operation, checks the evidence ([below](#replay-and-verify)).
 
 ## The evidence contract
 
@@ -27,7 +31,7 @@ accepts nothing else.
 | `provider_chunk_id` | The provider's own id for the passage. |
 | `provenance_level` | `pinned_version`, `uri_and_hash`, or `text_only`. |
 | `document_metadata` | Opaque document metadata: the reference provider returns the document's front matter, which carries any lineage its owner put there (an approver, an effective date). |
-| `artifact_hash` | The escrowed source artifact, once escrow arrives (DR-34 part 2); `None` until then. |
+| `artifact_hash` | The SHA-256 of the whole document the gate escrowed for the passage when it decided (its text as the provider's `DocumentFetcher` returned it, UTF-8), as the ledger's evidence escrow returned it; `None` when nothing was escrowed (escrow off, a provider that cannot fetch documents, a gate built without the escrow). |
 
 The gate also checks each answer against the reference it asked about: the
 same corpus, provider, and tier on every passage, at most the quota, ranks
@@ -65,10 +69,42 @@ prompt registry, a provider, or a corpus. A bundle decided before DR-34
 keeps the version-1 shape (`retrieval_results`, one `retrieval_path`, the
 submitted `corpus_version`); replay never reads it.
 
-The gate's `evidence` is one universal `EvidenceRef` per rendered passage:
-`source_id` the document, `locator` the section, `jurisdictions` the
-passage's jurisdiction, and `content_hash` the SHA-256 of its text — so
-anyone holding the text can prove it is what the decision relied on.
+The gate's `evidence` is one universal `EvidenceRef` per rendered passage,
+in rendered order: `source_id` the document, `locator` the section,
+`jurisdictions` the passage's jurisdiction, `content_hash` the SHA-256 of
+its text (so anyone holding the text can prove it is what the decision
+relied on), and `artifact_hash` the digest of the document escrowed for it.
+The reference at position *n* is the passage at position *n* of
+`contexts`; verify matches them that way.
+
+## Escrow
+
+Right after retrieval, before the snapshot or any failure output is built,
+the gate fetches the document each passage came from — each
+`(corpus, document, version)` once per decision, from the provider of the
+corpus query that retrieved it (`DocumentFetcher.fetch_document`; the
+reference provider reads `policy_rag.documents`, never Elasticsearch) — and
+hands its text (UTF-8, `text/markdown`) to the ledger's evidence escrow.
+Every passage from that document then cites the digest the escrow returned
+as its `artifact_hash`. The escrow is the framework's
+(`decisionledger.evidence_artifacts`, content-addressed by SHA-256, one row
+per distinct document however many decisions cite it); the gate's plugin
+takes it from the framework's store when the gate is built, and the gate
+writes through it from a worker thread.
+
+- **Escrow off** (`DECISIONLEDGER_EVIDENCE_ESCROW=off`): the escrow stores
+  nothing, so the passages cite no artifact, and the gate fetches nothing
+  (it asks the escrow store it was handed whether it keeps anything; it
+  never reads the setting). It records only what the escrow returned.
+- **A provider without `DocumentFetcher`**: its passages cite no artifact.
+- **A fetch or escrow that fails** fails the gate closed, as any retrieval
+  error does: the decision is held, not decided on evidence that cannot be
+  kept. A fetched document that is not the one asked for (another id or
+  version, or a digest that is not its text's) is a provider contract error
+  (`ProviderContractError`). One that no longer holds a passage cited to it
+  (the document was reloaded under the same version while the decision was
+  made) is refused with `EvidenceEscrowError`, and the decision is held: the
+  escrow could never prove that passage.
 
 ## Precedence and merging
 
@@ -128,8 +164,47 @@ retrieval metrics per corpus.
 
 ## Replay and verify
 
-Replay re-enforces the stored output under the bundle's registration
-snapshot; it never calls a provider or reads a corpus. Proving later that
-a decision's cited text is intact — against an escrowed copy of each source
-document, and live against the provider — is a separate operation, `verify`,
-which DR-34's second part adds.
+**Replay** (`POST /api/v1/decisions/{decision_id}/replay`) re-enforces the
+stored output under the bundle's registration snapshot. It never calls a
+gate, a provider, or the LLM, and reads no corpus: it answers whether the
+recorded action follows from what was recorded.
+
+**Verify** (`POST /api/v1/decisions/{decision_id}/verify`, with
+`?live=true` to read the sources as they are now) answers whether what the
+decision relied on is still provable. It decides nothing again and changes
+nothing. For every evidence reference of every gate that ran it reports two
+independent things:
+
+- `escrow`, the framework's own check: whether the escrow holds the
+  artifact the reference names (`present`, `missing`), or `none` when the
+  reference names none.
+- `status`, the gate's answer (`EvidenceVerifier.verify`): how the
+  reference stands.
+
+The policy gate matches each reference to its passage by position in the
+snapshot's `contexts`; a reference whose `content_hash` is not that
+passage's, or any reference of a version-1 snapshot, is `not_verifiable`.
+It then checks the passage against a document's text — `intact` when the
+document holds it: with a `span`, the text at those offsets hashes to the
+passage's `content_hash`; without one (the loader merged a short section
+into the next and dropped the heading between them, so the passage is not
+contiguous in the document), each of its paragraphs occurs in the
+document, in order:
+
+| Mode | Checked against | `intact` | `source_changed` | `source_unavailable` | `not_verifiable` |
+|---|---|---|---|---|---|
+| stored (default) | the escrowed document | the escrowed text holds the passage | it does not (escrow refuses such a document when deciding, so only an altered record gets here) | — | nothing escrowed, the escrow no longer holds it, or its bytes are not what was kept |
+| live | the document as the provider holds it now | the current text holds the passage | the text changed, or the corpus is held but no longer that version | the corpus is not loaded, the provider is not installed or fails, or it answers with another document | the provider cannot fetch documents, or the snapshot has no query for the passage's corpus |
+
+Stored verify reads only the escrow, so it still proves a decision's
+passages after the corpus was reloaded, edited, or deleted; live verify
+says whether the source still says the same. Each document is read once
+per call; neither mode calls the LLM or retrieves. With escrow off, stored
+verify can prove nothing for decisions made then (`not_verifiable`), and
+live verify still compares with the source.
+
+For example, after a cited document is edited without a new version and
+reloaded, live verify reports its passages `source_changed` (its spans no
+longer hash to the passages) while stored verify reports them `intact`
+from the escrow; after the corpus is deleted from `policy_rag`, live verify
+reports `source_unavailable` and stored verify still `intact`.

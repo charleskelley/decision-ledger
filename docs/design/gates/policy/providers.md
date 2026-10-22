@@ -88,6 +88,10 @@ class RetrievalProvider(Protocol):
     def retrieve(self, query: str, corpus: CorpusRef, *, k: int,
                  jurisdictions: Sequence[str] | None,
                  risk_tier: str | None) -> ProviderResult: ...
+
+class DocumentFetcher(Protocol):  # optional capability
+    def fetch_document(self, corpus: CorpusRef, document_id: str,
+                       version: str | None) -> DocumentBlob: ...
 ```
 
 - `describe` reports a `CorpusState`: a state marker (the reference
@@ -104,6 +108,18 @@ class RetrievalProvider(Protocol):
   document, rank, provenance level, and the SHA-256 of its text, which must
   match. The gate refuses anything else (`ProviderContractError`, and the
   decision is held).
+- `fetch_document`, an optional capability (`DocumentFetcher`), returns one
+  document whole as a `DocumentBlob`: its corpus, id, and version, title,
+  `media_type` (`text/markdown`), `text` (the text the passages' spans
+  index), the SHA-256 of that text (which must match), and the provider's
+  metadata. It raises `DocumentNotHeldError` when the provider holds the
+  corpus but not that document version, and anything else when it cannot
+  read the document at all (the corpus not held, the store unreachable).
+  The gate uses it twice: to escrow, in the ledger, the document each
+  passage came from when it decides, and to read the document as it is now
+  when a decision is verified live ([Evidence](evidence.md#escrow)). A
+  provider without it gets neither: its passages cite no escrowed artifact,
+  and live verify reports them `not_verifiable`.
 
 Providers are discovered under the gate's own entry-point group,
 `policy_rag_gate.providers`; each entry point names a `ProviderPlugin`
@@ -111,9 +127,7 @@ whose `provider_id` equals the entry point's name and whose
 `build(ProviderServices)` opens the provider (the services carry the
 framework's DSN and the gate's settings). The gate's `ProviderRegistry`
 builds a provider the first time a binding names it, once, and closes it
-with the gate. The optional capability to fetch a whole document
-(`DocumentFetcher`, for evidence escrow and live verification) arrives with
-DR-34's second part.
+with the gate.
 
 ## The reference provider
 
@@ -149,6 +163,15 @@ version), so its passages carry `pinned_version` provenance; each passage's
 `provider_chunk_id` the chunk's deterministic id. It takes no `resource`.
 A corpus it does not hold cannot be described, so a binding to it is
 refused at admission.
+
+It is a `DocumentFetcher`: `fetch_document` returns one document version
+whole from `policy_rag.documents` (its `body`, front matter stripped, and
+its front matter as `metadata`), in one statement over the provider's own
+Postgres connection; Elasticsearch is never involved. The version is
+required, since a corpus may hold several versions of one document. A
+corpus that is not loaded raises `CorpusNotLoadedError`; a loaded corpus
+without that version (removed or re-versioned by a reload) raises
+`DocumentNotHeldError`.
 
 ### Loading a corpus
 
@@ -186,4 +209,6 @@ state marker (for example the corpus's update time), and declares the
 provenance it can supply (a provider that returns document URIs and text
 supplies `uri_and_hash`). A binding then names it per corpus:
 `{corpus_id: regulatory, provider: vertex, resource: projects/…/ragCorpora/…, tier: 1}`.
-No framework or reasoner code changes.
+No framework or reasoner code changes. To have its passages' documents
+escrowed and checked live, it also implements `fetch_document`; this
+repository ships that only for `reference`.

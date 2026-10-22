@@ -1,4 +1,4 @@
-"""The ledger's six MCP tools — what an agent can do with a DecisionLedger.
+"""The ledger's seven MCP tools — what an agent can do with a DecisionLedger.
 
 Each tool is a thin call on a ``LedgerClient`` (an ``HttpClient`` to a ledger
 service, normally), so an agent goes through exactly the checks a reasoner
@@ -10,6 +10,8 @@ descriptions are written for the agent that reads them.
 - ``gate_decision`` — ask the ledger's gates to decide (or check) one.
 - ``lookup_decision`` — read a decision's full bundle.
 - ``replay_decision`` — re-run enforcement on a decision's stored evidence.
+- ``verify_decision`` — say how the evidence a decision relied on stands now
+  (the ledger's escrow, and each gate's check of its own references).
 - ``list_decisions_for_entity`` — a subject's decisions, newest first.
 - ``resolve_hold`` — a human's terminal resolution of a held decision
   (needs the operator key).
@@ -117,6 +119,16 @@ decision's stored gate outputs and evidence, under the registration version \
 it was made under, without calling any gate or LLM again. `matched: true` \
 means the recorded action is reproduced exactly; use it to audit a \
 decision."""
+
+_VERIFY_DESCRIPTION = """\
+Verify the evidence a decision relied on: for each evidence reference of \
+each gate that ran, `escrow` says whether the ledger's evidence escrow holds \
+the copy of the content the gate relied on (`present`, `missing`, or `none` \
+when the gate kept none), and `status` is the gate's own check (`intact`, \
+`source_changed`, `source_unavailable`, or `not_verifiable`) against its \
+stored record, or with `live: true` against each source as it is now. \
+Unlike replay, verify answers whether what the decision relied on is still \
+provable; it decides nothing again and changes nothing."""
 
 _ENTITY_DESCRIPTION = """\
 List the decisions about one subject (`entity_id`, a UUID), newest first: \
@@ -232,14 +244,15 @@ def _submitting(
 
 
 def ledger_tools(client: LedgerClient) -> list[Tool]:
-    """The six tools, bound to ``client``.
+    """The seven tools, bound to ``client``.
 
     Args:
         client: The ledger the tools act on.
 
     Returns:
         ``record_decision``, ``gate_decision``, ``lookup_decision``,
-        ``replay_decision``, ``list_decisions_for_entity``, ``resolve_hold``.
+        ``replay_decision``, ``verify_decision``,
+        ``list_decisions_for_entity``, ``resolve_hold``.
     """
 
     async def _lookup(arguments: dict[str, Any]) -> Any:
@@ -251,6 +264,20 @@ def ledger_tools(client: LedgerClient) -> list[Tool]:
     async def _replay(arguments: dict[str, Any]) -> Any:
         try:
             result = await client.replay(str(_required(arguments, "decision_id")))
+        except LedgerError as err:
+            raise _problem(err) from err
+        return result.model_dump(mode="json")
+
+    async def _verify(arguments: dict[str, Any]) -> Any:
+        live = arguments.get("live", False)
+        if not isinstance(live, bool):
+            raise ToolError(
+                {"code": "ARGUMENTS_INVALID", "detail": "live must be a boolean"}
+            )
+        try:
+            result = await client.verify(
+                str(_required(arguments, "decision_id")), live=live
+            )
         except LedgerError as err:
             raise _problem(err) from err
         return result.model_dump(mode="json")
@@ -335,6 +362,28 @@ def ledger_tools(client: LedgerClient) -> list[Tool]:
                 "idempotentHint": True,
                 "openWorldHint": False,
             },
+        ),
+        Tool(
+            name="verify_decision",
+            title="Verify a decision's evidence",
+            description=_VERIFY_DESCRIPTION,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "decision_id": {**_UUID, "description": "The decision's id."},
+                    "live": {
+                        "type": "boolean",
+                        "description": (
+                            "Also check each source as it is now (default: "
+                            "false, the gates' stored records only)."
+                        ),
+                    },
+                },
+                "required": ["decision_id"],
+                "additionalProperties": False,
+            },
+            handler=_reaching_the_ledger(_verify),
+            annotations={"readOnlyHint": True, "openWorldHint": True},
         ),
         Tool(
             name="list_decisions_for_entity",

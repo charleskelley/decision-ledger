@@ -1,6 +1,6 @@
 """A minimal Model Context Protocol server: JSON-RPC 2.0 over stdio, tools only.
 
-Hand-rolled on purpose (plan section 9): the ledger exposes six tools and
+Hand-rolled on purpose (plan section 9): the ledger exposes seven tools and
 nothing else (no resources, prompts, or sampling), so the server is the MCP
 lifecycle plus ``tools/list`` and ``tools/call``, with no SDK dependency.
 

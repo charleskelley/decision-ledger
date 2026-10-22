@@ -1,4 +1,4 @@
-"""Decision routes — write, batch-record, look up, replay, and resolve (DR-31).
+"""Decision routes — write, batch-record, look up, replay, verify, and resolve.
 
 Each route is a thin HTTP shell over an *operation*: a plain function that
 takes the request's raw body (or path values), the caller's ``Principal``,
@@ -20,6 +20,12 @@ Routes:
   version.
 - ``POST /api/v1/decisions/{decision_id}/replay`` — re-run enforcement on the
   bundle's cached states, against the registration version it cites.
+- ``POST /api/v1/decisions/{decision_id}/verify`` — say how the evidence the
+  decision relied on stands now (DR-34): for each evidence reference of each
+  gate that ran, whether the evidence escrow holds the artifact it names,
+  and what its gate reports when it checks the reference against its own
+  record (``?live=true``: against its source as it is now). Replay never
+  does this; verify decides nothing again.
 - ``POST /api/v1/decisions/{decision_id}/resolutions`` — a human resolution
   of a held or challenged decision (operator key).
 
@@ -30,6 +36,7 @@ decision reads as ``404 DECISION_NOT_FOUND``.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -44,14 +51,20 @@ from app.api.models import (
     BatchLineResult,
     BatchResult,
     DecisionReceipt,
+    EscrowStatus,
+    EvidenceVerification,
     GateReplayResult,
     ReplayResponse,
     ResolutionReceipt,
     ResolutionRequest,
+    VerificationSummary,
+    VerifiedReference,
 )
 from app.audit import as_bundle
 from app.auth import Caller, require_operator, require_submitter
-from app.submit import decide, submit
+from app.gates import verify_evidence
+from app.monitoring import duration_ms
+from app.submit import DEFAULT_GATE_BUDGET_MS, decide, submit
 from core.actions import DecisionAction
 from core.bundle import BUNDLE_SCHEMA_VERSION
 from core.exceptions import (
@@ -424,15 +437,7 @@ def replay_decision(
     except KeyError as err:
         raise _not_found(decision_id) from err
     except BundleSchemaUnsupportedError as err:
-        raise LedgerError(
-            409,
-            "BUNDLE_SCHEMA_UNSUPPORTED",
-            str(err),
-            extra={
-                "schema_version": err.schema_version,
-                "supported_schema_version": err.supported,
-            },
-        ) from err
+        raise _schema_unsupported(err) from err
     except UnregisteredReasonerError as err:
         raise LedgerError(
             409,
@@ -469,6 +474,113 @@ def replay_decision(
         ],
         registration_version=result.registration_version,
         matched=result.matched,
+    )
+
+
+def _schema_unsupported(err: BundleSchemaUnsupportedError) -> LedgerError:
+    return LedgerError(
+        409,
+        "BUNDLE_SCHEMA_UNSUPPORTED",
+        str(err),
+        extra={
+            "schema_version": err.schema_version,
+            "supported_schema_version": err.supported,
+        },
+    )
+
+
+async def verify_decision(
+    decision_id: str,
+    *,
+    live: bool,
+    principal: Principal,
+    framework: FrameworkServices,
+) -> EvidenceVerification:
+    """Say how the evidence a decision relied on stands now (DR-34).
+
+    For every gate that ran (its record holds an output), each evidence
+    reference gets two independent answers. ``escrow``: whether the evidence
+    escrow holds the artifact the reference names (``none`` when it names
+    none). ``status``: what the gate answers when asked (``EvidenceVerifier``)
+    to check the reference against its own stored record and, with
+    ``live``, against its source as it is now; a gate that is not composed
+    here, does not verify, fails, or answers out of contract leaves its
+    references ``not_verifiable``. Nothing is decided again, the bundle is
+    not changed, and replay is unaffected.
+
+    Raises:
+        LedgerError: 404 ``DECISION_NOT_FOUND`` (also another tenant's); 409
+            ``BUNDLE_SCHEMA_UNSUPPORTED`` (a version-1 bundle, as replay);
+            500 ``BUNDLE_UNREADABLE``.
+    """
+    t0 = time.perf_counter()
+    stored = await asyncio.to_thread(
+        _readable, decision_id, principal=principal, framework=framework
+    )
+    try:
+        bundle = as_bundle(stored)
+    except BundleSchemaUnsupportedError as err:
+        raise _schema_unsupported(err) from err
+    except ValidationError as err:
+        raise _unreadable(decision_id, stored.schema_version, err) from err
+    ran = [
+        (record.gate_id, record.output)
+        for record in bundle.gates
+        if record.output is not None
+    ]
+    named = [ref.artifact_hash for _, output in ran for ref in output.evidence]
+    held = await asyncio.to_thread(
+        framework.store.artifacts.held, [h for h in named if h is not None]
+    )
+    refs: list[VerifiedReference] = []
+    for gate_id, output in ran:
+        statuses = await verify_evidence(
+            framework.gates.get(gate_id),
+            output,
+            live=live,
+            budget_ms=DEFAULT_GATE_BUDGET_MS,
+        )
+        for ref, status in zip(output.evidence, statuses, strict=True):
+            escrow: EscrowStatus = (
+                "none"
+                if ref.artifact_hash is None
+                else "present"
+                if ref.artifact_hash in held
+                else "missing"
+            )
+            refs.append(
+                VerifiedReference(
+                    gate_id=gate_id,
+                    source_id=ref.source_id,
+                    locator=ref.locator,
+                    content_hash=ref.content_hash,
+                    artifact_hash=ref.artifact_hash,
+                    escrow=escrow,
+                    status=status,
+                )
+            )
+    summary = VerificationSummary(
+        intact=sum(r.status == "intact" for r in refs),
+        changed=sum(r.status == "source_changed" for r in refs),
+        unavailable=sum(r.status == "source_unavailable" for r in refs),
+        not_verifiable=sum(r.status == "not_verifiable" for r in refs),
+        escrow_missing=sum(r.escrow == "missing" for r in refs),
+    )
+    log.info(
+        "api.decision_verified",
+        component="api",
+        decision_id=decision_id,
+        live=live,
+        references=len(refs),
+        **summary.model_dump(),
+        duration_ms=duration_ms(t0),
+    )
+    return EvidenceVerification(
+        decision_id=decision_id,
+        checked_at=datetime.now(UTC),
+        live=live,
+        refs=refs,
+        summary=summary,
     )
 
 
@@ -669,6 +781,25 @@ def post_replay(
     """Replay enforcement against a bundle's cached states (no gate re-runs)."""
     return replay_decision(
         decision_id, principal=principal, framework=_framework(request)
+    )
+
+
+@router.post(
+    "/decisions/{decision_id}/verify",
+    response_model=EvidenceVerification,
+    responses=problem_responses(401, 404, 409, 500),
+)
+async def post_verify(
+    decision_id: str, request: Request, principal: Caller, live: bool = False
+) -> EvidenceVerification:
+    """Verify the evidence a decision relied on (no gate decides again).
+
+    ``live=false`` (the default) asks each gate to check its references
+    against its own stored record; ``live=true`` also against each source
+    as it is now.
+    """
+    return await verify_decision(
+        decision_id, live=live, principal=principal, framework=_framework(request)
     )
 
 

@@ -86,7 +86,11 @@ for development. Security is disabled for the local Elasticsearch service
 
 Every framework table lives in the `decisionledger` schema and is shared by
 every reasoner; tenant separation is the `reasoner_id` column, on the tables
-that have one, and the `decision_id` join on the rest (DR-24). The canonical
+that have one, and the `decision_id` join on the rest (DR-24). The one
+exception is `evidence_artifacts`: its rows are deployment-wide, shared by
+content across reasoners (two reasoners' decisions that rely on the same
+document cite one row), so retention cannot be scoped to one reasoner
+through `first_decision_id`. The canonical
 DDL ships inside the framework package: `app/audit/sql/01_init.sql` creates
 the schema (and no extension), and `app/audit/sql/02_tables.sql` creates every
 table and index. Both are idempotent (`create ... if not exists`; the one
@@ -112,6 +116,7 @@ upgrade statement is guarded) and are applied three ways:
 | `reasoner_registry` | The registrations written over the API, as served now (DR-33; see [Registration](registration.md)) | `reasoner_id` (PK), `registration_version` (FK to `reasoner_registrations`), `source` (`api`), `registered_by`, `registered_at`, `updated_at` |
 | `entity_events` | The identity journal, append-only (DR-32) | `event_id` (PK), `event_sequence`, `event_type`, `subject_entity_id`, `object_entity_id`, `relationship_type`, `effective_at`, `recorded_at`, `provenance` (JSONB) |
 | `entity_membership` | The membership projection, rebuildable (DR-32) | `subject_entity_id`, `related_entity_id`, `relationship_type`, `valid_from`, `valid_to` |
+| `evidence_artifacts` | The evidence escrow: the content gates relied on, content-addressed (DR-34) | `artifact_hash` (PK), `media_type`, `byte_length`, `artifact_bytes` (bytea), `first_seen_at`, `first_decision_id`, `first_gate_id` |
 
 #### `decision_bundles`
 
@@ -170,6 +175,39 @@ nothing`) and is never updated, so a decision replays against the profile it
 was made under even after its registration changed or its reasoner left the
 deployment.
 
+#### `evidence_artifacts`
+
+```sql
+create table if not exists decisionledger.evidence_artifacts (
+    artifact_hash text primary key,     -- SHA-256 of artifact_bytes, lowercase hex
+    media_type text not null,
+    byte_length bigint not null,
+    artifact_bytes bytea not null,
+    first_seen_at timestamptz not null default now(),
+    first_decision_id text not null,    -- not a foreign key
+    first_gate_id text not null
+);
+```
+
+The evidence escrow (DR-34). A gate that keeps a copy of what it relied on
+(the RAG gate: each cited document, whole; the rules gate: the rule set it
+applied) hands the bytes to `app.audit.ArtifactStore.put` while it decides;
+the store writes one row per distinct content (`insert ... on conflict do
+nothing`) and returns the digest, which the gate records as the evidence
+reference's `artifact_hash`. The excerpt omits the check constraints: the
+key is a 64-character hex digest, it is the SHA-256 of `artifact_bytes`
+(the database pins the content address), and `byte_length` is their
+length. `first_decision_id` names the decision that first escrowed the
+content, as the gate received it; it is not a foreign key, since a gate
+escrows before its decision's bundle is written. A row is shared by every
+decision, of any reasoner, that relied on the same content. Rows are never
+updated, and nothing in the framework deletes one: retention is the
+deployment's records rule. Verify (`POST /api/v1/decisions/{decision_id}/verify`) reads
+which artifacts are held (`ArtifactStore.held`), and a gate verifying its
+references reads its own back (`get`). With
+`DECISIONLEDGER_EVIDENCE_ESCROW=off` nothing is written; rows written
+earlier stay readable.
+
 #### `entity_events` and `entity_membership`
 
 ```sql
@@ -218,7 +256,9 @@ journal's use.
 Gates own their infrastructure (DR-28). What follows belongs to the **RAG
 policy gate** (`gates/policy_rag`, package `policy_rag_gate`); the framework's
 DDL creates none of it, and the gate's DDL touches nothing of the framework's.
-The rules gate (`gates/rules`) stores nothing.
+The rules gate (`gates/rules`) owns no storage. Both gates escrow what they
+rely on in the framework's `evidence_artifacts`, through the framework's
+store, never through DDL or SQL of their own.
 
 #### PostgreSQL schema: `policy_rag`
 
@@ -493,6 +533,7 @@ compose file.
 | `DECISIONLEDGER_API_KEYS` | Framework | Reasoner API keys as comma-separated `reasoner_id:key` pairs | blank (no reasoner keys; with no key at all, every route but `/health` answers 401) |
 | `DECISIONLEDGER_API_KEYS_FILE` | Framework | Path to a YAML file mapping `reasoner_id` to a key or a list of keys, read in addition | blank (no file) |
 | `DECISIONLEDGER_OPERATOR_KEY` | Framework | The operator key: reads every reasoner's decisions, resolves held ones, and registers reasoners over the API (DR-33) | blank (operator access disabled) |
+| `DECISIONLEDGER_EVIDENCE_ESCROW` | Framework | `on` or `off` (any case): whether gates' evidence is escrowed in `evidence_artifacts` (DR-34). Read by the bootstrap only; any other value refuses startup. Off, nothing is written and references name no artifact; rows written earlier stay readable | `on` |
 | `DECISIONLEDGER_EVAL_REASONER` | Eval harness | Reasoner to evaluate when `--reasoner-id` is not passed | none |
 
 ### Gates

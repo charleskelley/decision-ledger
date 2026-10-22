@@ -41,8 +41,9 @@ none). It mounts no reasoner router and runs no reasoner code (DR-31).
 
 The framework's only infrastructure is PostgreSQL. Its `decisionledger`
 schema holds the decision bundles, the replay logs, the resolution attempts,
-the registration snapshots, and the identity journal and its membership
-projection (`app/audit/sql/`). The RAG policy gate (`gates/policy_rag`) owns
+the registration snapshots and the registrations written over the API, the
+identity journal and its membership projection, and the evidence escrow
+(the content gates relied on, content-addressed; DR-34) (`app/audit/sql/`). The RAG policy gate (`gates/policy_rag`) owns
 its own stores: Elasticsearch for BM25 search (its `compose.yaml`) and the
 `policy_rag` schema with the pgvector extension, which its own DDL creates on
 the same Postgres server. That is why the root `docker-compose.yml` runs the
@@ -61,8 +62,8 @@ Outside the boundary:
 - **The LLM service** is called by the RAG policy gate only.
 - **The enterprise identity resolver** is an installed plugin
   (`decisionledger.identity_resolvers`); none ships with this repository.
-- **The decision analyst** uses the ledger's routes (lookup, replay, the
-  subject timeline, resolutions).
+- **The decision analyst** uses the ledger's routes (lookup, replay, verify,
+  the subject timeline, resolutions).
 
 The offline tools (each reasoner's scorer trainer, scenario generator, and
 eval adapter; the RAG gate's corpus loader; the two eval harnesses) run on
@@ -78,8 +79,8 @@ the corpus ids reasoners' bindings name
 Level 3 zooms into the Ledger API. A route authenticates its caller by the
 `X-DecisionLedger-Key` header (`app/auth.py`) and calls an *operation*
 (`app/api/`): `create_decision`, `record_batch`, `lookup_decision`,
-`replay_decision`, `resolve_decision`, `entity_decisions`, and the read-only
-resources. `LocalClient` (`app/client.py`) calls the same operations in
+`replay_decision`, `verify_decision`, `resolve_decision`, `entity_decisions`,
+and the read-only resources. `LocalClient` (`app/client.py`) calls the same operations in
 process as the trusted principal, so an HTTP request and an in-process call
 run identical code. A decision goes through `app/submit.py`: intake
 validation, the identity step (`app/identity/`), the gate set, gate
@@ -88,7 +89,10 @@ advisory ones), gate-level enforcement, the decision-level rules and the
 combinator (`app/enforcement/resolver.py`), and the bundle write
 (`app/audit/store.py`). Replay re-enforces a bundle's stored gate outputs
 under the snapshot of the registration version it cites, without invoking a
-gate. [Pipeline](pipeline.md) walks the same path step by step.
+gate. Verify (`verify_decision`) asks each gate that ran how its evidence
+references stand (`app.gates.verify_evidence`), beside the store's own check
+of the evidence escrow; it decides nothing again (DR-34).
+[Pipeline](pipeline.md) walks the same path step by step.
 
 ---
 
@@ -127,10 +131,10 @@ decision-ledger/
 │   ├── auth.py                   API keys to principals (reasoner, operator, trusted in-process)
 │   ├── client.py                 LedgerClient: LocalClient (in process) and HttpClient (httpx)
 │   ├── submit.py                 decide() and submit(): validate → identity → gate set → gates → enforce → write
-│   ├── gates.py                  Gate seam: GateKind, Gate, GatePlugin, ConfigAuthorizer, BindingValidator, ReasonerScope, discovery, check_gate_set, invoke_gate
+│   ├── gates.py                  Gate seam: GateKind, Gate, GatePlugin, ConfigAuthorizer, BindingValidator, ReasonerScope, EvidenceVerifier, discovery, check_gate_set, invoke_gate, verify_evidence
 │   ├── identity/                 The identity step: resolver plugin seam and discovery, the passthrough
 │   ├── enforcement/              Gate-level tiers, decision-level rules, the combinator
-│   ├── audit/                    Bundle assembly, BundleStore and replay, registration snapshots and API registrations, resolution and entity journals, sql/ (canonical DDL)
+│   ├── audit/                    Bundle assembly, BundleStore and replay, registration snapshots and API registrations, resolution and entity journals, the evidence escrow (ArtifactStore), sql/ (canonical DDL)
 │   ├── plugin.py                 ReasonerPlugin protocol, FrameworkServices
 │   ├── plugins.py                Reasoner plugin discovery, the registration file, build_registry
 │   ├── reasoner_registry.py      LiveReasonerRegistry: plugin, file, and API registrations (DR-33)
@@ -153,7 +157,7 @@ decision-ledger/
 │   └── example/                  example-reasoner (example_reasoner): a minimal documented reasoner (widgets)
 │
 ├── integrations/
-│   └── mcp/                      decisionledger-mcp (decisionledger_mcp): the ledger as six MCP tools over HttpClient
+│   └── mcp/                      decisionledger-mcp (decisionledger_mcp): the ledger as seven MCP tools over HttpClient
 │
 ├── conformance/              Black-box HTTP pytest suite and example payloads, run against any instance (`make conformance`)
 ├── schemas/                  submission-v2.json, bundle-v2.json: exported from the models; tests/test_schemas.py fails on drift
@@ -253,9 +257,9 @@ Framework components (the ledger):
 | Clients | `app/client.py` | `LocalClient` and `HttpClient`, one `LedgerClient` protocol |
 | Intake and orchestration | `app/submit.py`, `core/submission.py` | Validation, gate set, mandatory then advisory gates |
 | Identity step | `app/identity/`, `core/identity.py` | Resolver plugin or passthrough; the subject on every bundle |
-| Gate seam | `app/gates.py` | Discovery, build, fail-closed invocation |
+| Gate seam | `app/gates.py` | Discovery, build, fail-closed invocation, fail-safe verify |
 | Deterministic enforcement | `app/enforcement/`, `core/gate/combinator.py` | Gate-level tiers, decision-level rules, most restrictive action |
-| Bundle store and replay | `app/audit/` | Version-2 bundles, replay, registration snapshots, journals |
+| Bundle store and replay | `app/audit/` | Version-2 bundles, replay, registration snapshots, journals, evidence escrow |
 | Contract artifacts | `app/schemas.py`, `schemas/`, `conformance/` | JSON schemas and the black-box HTTP suite |
 | Eval harness | `eval/` | Consistency, robustness, and shadow dimensions per reasoner |
 | Monitoring | `app/monitoring/` | Structured JSON logging, `duration_ms` |
@@ -268,7 +272,7 @@ Members (plugins and clients the framework never imports):
 | RAG policy gate | `gates/policy_rag/` | Retrieval through providers from the corpora a binding names, prompt rendering, LLM verdict; its own eval |
 | Account Takeover | `reasoners/account_takeover/` | Reference reasoner: ingestion, features, scorer, assembler, its own service |
 | Example reasoner | `reasoners/example/` | Minimal documented reasoner for the conformance suite and new teams |
-| MCP server | `integrations/mcp/` | Six tools for agent reasoners over `HttpClient` |
+| MCP server | `integrations/mcp/` | Seven tools for agent reasoners over `HttpClient` |
 
 ---
 

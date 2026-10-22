@@ -4,9 +4,11 @@
 point (name ``rules``). It declares the gate's identity (``gate_id="rules"``,
 ``kind=rules``, ``deterministic=True``), its ``config_model``
 (``RulesGateConfig``, validated by the framework at intake), and ``build`` —
-which loads the deployment's rule sets from ``RULES_GATE_RULESETS_DIR`` and
-returns a ``RulesGate``. The gate needs no infrastructure: it never touches
-the framework's Postgres connection or any index.
+which loads the deployment's rule sets from ``RULES_GATE_RULESETS_DIR``, each
+with the file it came from, and returns a ``RulesGate`` holding the
+framework store's evidence escrow (DR-34 part 2). The gate owns no
+infrastructure: it opens no connection or index of its own, and the rule
+sets it escrows go through the framework's store.
 """
 
 from __future__ import annotations
@@ -60,12 +62,13 @@ class RulesGatePlugin:
             self._settings = RulesGateSettings()
         return self._settings
 
-    def build(self, framework: FrameworkServices) -> RulesGate:
+    def build(self, framework: FrameworkServices | None) -> RulesGate:
         """Load the registered rule sets and build the gate.
 
         Args:
-            framework: Shared services. Unused — the rules gate owns no
-                infrastructure — but every gate plugin receives it.
+            framework: Shared services: the gate takes the store's evidence
+                escrow (``store.artifacts``) to escrow the rule sets it
+                applies. ``None`` builds a gate that escrows nothing.
 
         Returns:
             A ``RulesGate`` over every rule set in ``rulesets_dir``.
@@ -75,16 +78,24 @@ class RulesGatePlugin:
             ValueError: Two rule-set files share a ``ruleset_id``.
             pydantic.ValidationError: A rule-set file is malformed.
         """
-        del framework
         directory = self.settings.rulesets_dir
-        rulesets = load_rulesets(Path(directory)) if directory else {}
+        loaded = load_rulesets(Path(directory)) if directory else {}
+        escrow = framework.store.artifacts if framework is not None else None
         log.info(
             "rules_gate.built",
             component="rules_gate",
             rulesets_dir=directory or None,
-            ruleset_ids=sorted(rulesets),
+            ruleset_ids=sorted(loaded),
+            escrow=escrow is not None,
         )
-        return RulesGate(rulesets)
+        return RulesGate(
+            {ruleset_id: entry.ruleset for ruleset_id, entry in loaded.items()},
+            origins={
+                ruleset_id: Path(directory) / entry.origin
+                for ruleset_id, entry in loaded.items()
+            },
+            escrow=escrow,
+        )
 
 
 #: The entry-point target: ``rules = "rules_gate.plugin:PLUGIN"``.

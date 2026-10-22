@@ -16,11 +16,13 @@ returns the universal ``GateOutput``:
   (``None`` on any failure). A template with tiered evidence asks for a
   ``TieredPolicyGateVerdict``; when the model reports passages on point
   that disagree, or evidence that does not cover the case, the gate holds
-  the decision for review: the verdict it returns permits only HOLD and
-  escalates to a human, and the model's own is kept in ``extra``;
+  the decision for review: the verdict it returns is floored at HOLD (a
+  BLOCK stays a BLOCK) and escalates to a human, and the model's own is
+  kept in ``extra``;
 - ``evidence`` — one ``EvidenceRef`` per rendered passage, carrying its
   jurisdiction (enforcement's jurisdiction-conflict tier sees exactly the
-  rendered set) and the SHA-256 of its text;
+  rendered set), the SHA-256 of its text, and the digest of the document
+  the gate escrowed for it (``artifact_hash``);
 - ``evidence_snapshot`` — a ``PolicyGateSnapshot`` (v2): one ``CorpusQuery``
   per bound corpus (reference, provider state, quota, filters, ranking
   requested and applied, duration), the rendered passages under the
@@ -54,6 +56,16 @@ other is admitted from its directory under the asset root
 (``POLICY_RAG_GATE_ASSETS_ROOT``, ``policy_rag_gate.assets``), and
 ``serves`` then answers yes.
 
+Evidence escrow and verify (DR-34 part 2): right after retrieval the gate
+fetches each document its passages came from, once (through the provider's
+optional ``DocumentFetcher``), hands its text to the ledger's evidence
+escrow (the ``EvidenceEscrow`` its plugin took from the framework's store),
+and cites it by the digest the escrow returned. ``verify`` later says, for
+a stored output, how each reference stands: against the escrowed document
+(the passage's ``span`` in it hashes to the passage's digest), or live
+against the document as its provider holds it now. Verify never calls the
+LLM or retrieves again, and replay never calls verify.
+
 Strict structured output is enforced at the SDK layer — the ``LLMClient``
 returns a Pydantic-validated verdict directly. Any failure to reach a
 verdict (no retrieval query, template render error, LLM error or
@@ -71,6 +83,9 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -82,7 +97,13 @@ from pydantic import ValidationError
 from app.monitoring import duration_ms
 from core.actions import DecisionAction
 from core.exceptions import GateConfigError
-from core.gate import EvidenceRef, GateOutput, GateVerdict, severity
+from core.gate import (
+    EvidenceRef,
+    EvidenceStatus,
+    GateOutput,
+    GateVerdict,
+    severity,
+)
 from policy_rag_gate.assets import load_root_assets
 from policy_rag_gate.config import PolicyGateConfig
 from policy_rag_gate.corpus import (
@@ -102,7 +123,13 @@ from policy_rag_gate.models import (
     TokenCost,
     content_hash,
 )
-from policy_rag_gate.providers import ProviderContractError, ProviderResult
+from policy_rag_gate.providers import (
+    DocumentBlob,
+    DocumentFetcher,
+    DocumentNotHeldError,
+    ProviderContractError,
+    ProviderResult,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -147,6 +174,31 @@ _GAP_REASON = (
 
 class _Closeable(Protocol):
     def close(self) -> None: ...
+
+
+class EvidenceEscrow(Protocol):
+    """The ledger's evidence escrow, as the gate uses it (DR-34 part 2).
+
+    The framework's store satisfies it (``framework.store.artifacts``): the
+    gate's plugin takes it when the gate is built. ``enabled`` is the store's
+    own state (the deployment turned escrow off when it is ``False``); the
+    gate reads it only to skip fetching documents nothing would keep.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        """Whether ``put`` keeps anything."""
+        ...
+
+    def put(
+        self, content: bytes, *, media_type: str, decision_id: str, gate_id: str
+    ) -> str | None:
+        """Escrow ``content``; its digest, or ``None`` when escrow is off."""
+        ...
+
+    def get(self, artifact_hash: str) -> bytes | None:
+        """The escrowed bytes with that digest, or ``None``."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +331,7 @@ def _evidence(contexts: Sequence[RetrievedContext]) -> tuple[EvidenceRef, ...]:
             if context.jurisdiction
             else frozenset(),
             content_hash=context.content_hash,
+            artifact_hash=context.artifact_hash,
         )
         for context in contexts
     )
@@ -565,6 +618,180 @@ def retrieve_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Evidence escrow and verify (DR-34 part 2)
+# ---------------------------------------------------------------------------
+
+#: Which document a passage came from: corpus, document, version.
+_DocumentKey = tuple[str, str, str | None]
+
+#: The snapshot version whose references ``verify`` can match to passages.
+SNAPSHOT_VERSION: int = PolicyGateSnapshot.model_fields["snapshot_version"].default
+
+
+def _check_document(document: object, key: _DocumentKey) -> DocumentBlob:
+    """Hold a fetched document to what was asked for, or refuse it."""
+    corpus_id, document_id, version = key
+    if (
+        not isinstance(document, DocumentBlob)
+        or (document.corpus_id, document.document_id) != (corpus_id, document_id)
+        or (version is not None and document.version != version)
+        or content_hash(document.text) != document.content_hash
+    ):
+        msg = (
+            f"asked for {corpus_id}/{document_id} version {version!r}, the provider "
+            f"returned {type(document).__name__} that is not that document whole"
+        )
+        raise ProviderContractError(msg)
+    return document
+
+
+class EvidenceEscrowError(RuntimeError):
+    """The document fetched to escrow no longer holds a passage cited to it.
+
+    The document changed between retrieval and escrow (a reload of the same
+    version racing the decision): the escrow could never prove what the
+    decision relied on, so the gate fails closed and the decision is held.
+    """
+
+
+def escrow_documents(
+    providers: ProviderRegistry,
+    queries: Sequence[CorpusQuery],
+    contexts: Sequence[RetrievedContext],
+    escrow: EvidenceEscrow,
+    *,
+    decision_id: str,
+) -> list[RetrievedContext]:
+    """Escrow the document each passage came from, and cite it on the passage.
+
+    Each ``(corpus, document, version)`` is fetched once, from the provider
+    of the corpus query the passage was retrieved by, and its text is handed
+    to the escrow as UTF-8. Every passage from that document then carries
+    the digest the escrow returned as its ``artifact_hash`` (none when the
+    deployment runs with escrow off, in which case nothing is fetched at
+    all). A provider without ``DocumentFetcher`` escrows nothing for its
+    passages. A fetched document must still hold every passage cited to it.
+    Blocking: run it in a thread.
+
+    Args:
+        providers: The providers bindings may name.
+        queries: The decision's corpus queries (each passage's corpus has one).
+        contexts: The passages to render.
+        escrow: The ledger's evidence escrow.
+        decision_id: The decision being decided.
+
+    Returns:
+        The passages, in order, citing their escrowed documents.
+
+    Raises:
+        ProviderContractError: A provider returned another document than asked.
+        EvidenceEscrowError: A fetched document no longer holds a passage
+            retrieved from it.
+        Exception: Whatever a provider or the escrow raises (the gate fails
+            closed: a decision whose evidence cannot be escrowed is held).
+    """
+    if not escrow.enabled:
+        return list(contexts)
+    corpora = {query.corpus_ref.corpus_id: query.corpus_ref for query in queries}
+    cited: dict[_DocumentKey, list[RetrievedContext]] = {}
+    for context in contexts:
+        key = (context.corpus_id, context.document_id, context.version)
+        cited.setdefault(key, []).append(context)
+    digests: dict[_DocumentKey, str | None] = {}
+    for key, passages in cited.items():
+        corpus = corpora[key[0]]
+        provider = providers.get(corpus.provider)
+        if not isinstance(provider, DocumentFetcher):
+            digests[key] = None
+            continue
+        document = _check_document(provider.fetch_document(corpus, key[1], key[2]), key)
+        stale = [p.rank for p in passages if not passage_holds(document.text, p)]
+        if stale:
+            msg = (
+                f"{key[0]}/{key[1]} version {key[2]!r}, fetched to escrow, no longer "
+                f"holds the passage(s) ranked {stale} retrieved from it: it changed "
+                "while the decision was being made"
+            )
+            raise EvidenceEscrowError(msg)
+        digests[key] = escrow.put(
+            document.text.encode("utf-8"),
+            media_type=document.media_type,
+            decision_id=decision_id,
+            gate_id=POLICY_GATE_ID,
+        )
+    escrowed: list[RetrievedContext] = []
+    for context in contexts:
+        digest = digests[(context.corpus_id, context.document_id, context.version)]
+        escrowed.append(
+            context
+            if digest is None
+            else context.model_copy(update={"artifact_hash": digest})
+        )
+    return escrowed
+
+
+def stored_snapshot(output: GateOutput) -> PolicyGateSnapshot | None:
+    """The output's evidence snapshot, when it is a version-2 policy snapshot.
+
+    Args:
+        output: A stored policy-gate output.
+
+    Returns:
+        The snapshot, or ``None`` for an older snapshot or one that does not
+        validate (its references cannot be matched to their passages).
+    """
+    raw = output.evidence_snapshot
+    if not isinstance(raw, dict) or raw.get("snapshot_version") != SNAPSHOT_VERSION:
+        return None
+    try:
+        return PolicyGateSnapshot.model_validate_json(json.dumps(raw))
+    except ValidationError:
+        return None
+
+
+def passage_holds(text: str, context: RetrievedContext) -> bool:
+    """Whether a document's text still holds a passage as the decision cited it.
+
+    With a ``span``, the text at those offsets must hash to the passage's
+    digest. Without one (the loader merged a short section into the next and
+    dropped the heading between them, so the passage is not contiguous in
+    the document), each of its paragraphs must occur in the document, in
+    order.
+
+    Args:
+        text: A document's whole text (escrowed, or as its provider holds it).
+        context: The passage, as the snapshot stores it.
+
+    Returns:
+        ``True`` when the document holds the passage.
+    """
+    if context.span is not None:
+        start, end = context.span
+        return (
+            end <= len(text) and content_hash(text[start:end]) == context.content_hash
+        )
+    cursor = 0
+    for paragraph in context.text.split("\n\n"):
+        if not paragraph.strip():
+            continue
+        found = text.find(paragraph, cursor)
+        if found < 0:
+            return False
+        cursor = found + len(paragraph)
+    return True
+
+
+def _escrowed_text(content: bytes | None, digest: str) -> str | None:
+    """An escrowed document's text, or ``None`` when absent or not what was kept."""
+    if content is None or hashlib.sha256(content).hexdigest() != digest:
+        return None
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # PolicyGate
 # ---------------------------------------------------------------------------
 
@@ -573,10 +800,10 @@ class PolicyGate:
     """LLM-backed policy gate: per-corpus retrieval plus a structured LLM verdict.
 
     Satisfies ``app.gates.Gate`` and its optional ``ConfigAuthorizer``,
-    ``BindingValidator``, and ``ReasonerScope`` capabilities. Owns its
-    providers, prompt registry, LLM client, and per-reasoner profiles;
-    ``close()`` releases the providers it built and the handles it was
-    given.
+    ``BindingValidator``, ``ReasonerScope``, and ``EvidenceVerifier``
+    capabilities. Owns its providers, prompt registry, LLM client, and
+    per-reasoner profiles; ``close()`` releases the providers it built and
+    the handles it was given.
 
     Args:
         client: SDK-agnostic ``LLMClient`` adapter. Decouples gate
@@ -602,6 +829,9 @@ class PolicyGate:
         assets_root: The asset root a reasoner registered without a plugin
             ships its prompts and corpus under
             (``POLICY_RAG_GATE_ASSETS_ROOT``), or ``None`` for none.
+        escrow: The ledger's evidence escrow (the framework store's
+            ``artifacts``), or ``None`` for a gate built without one: it then
+            escrows nothing, and ``verify`` checks references live only.
     """
 
     def __init__(
@@ -615,6 +845,7 @@ class PolicyGate:
         profiles: Mapping[str, ReasonerProfile] | None = None,
         resources: Sequence[_Closeable] = (),
         assets_root: Path | None = None,
+        escrow: EvidenceEscrow | None = None,
     ) -> None:
         """Initialize the policy gate with its client, registry, and providers."""
         self._client = client
@@ -629,6 +860,7 @@ class PolicyGate:
         self._profiles = dict(profiles) if profiles is not None else None
         self._resources = tuple(resources)
         self._assets_root = assets_root
+        self._escrow = escrow
         self._admission = threading.Lock()
 
     @property
@@ -640,6 +872,11 @@ class PolicyGate:
     def prompt_registry(self) -> PromptRegistry:
         """The prompt registry the gate renders from."""
         return self._registry
+
+    @property
+    def escrow(self) -> EvidenceEscrow | None:
+        """The ledger's evidence escrow the gate writes to, if it was given one."""
+        return self._escrow
 
     @property
     def providers(self) -> ProviderRegistry:
@@ -659,6 +896,127 @@ class PolicyGate:
     def assets_root(self) -> Path | None:
         """The asset root reasoners without a plugin are admitted from."""
         return self._assets_root
+
+    async def verify(
+        self, output: GateOutput, *, live: bool
+    ) -> tuple[EvidenceStatus, ...]:
+        """Say how each evidence reference of an output this gate returned stands.
+
+        Each reference is matched to the passage it was built from (the
+        snapshot's ``contexts``, in evidence order; a version-1 snapshot, a
+        missing passage, or a digest that is not the passage's leaves it
+        ``not_verifiable``). Then, without ``live``, the passage is checked
+        against the document escrowed for it: ``intact`` when the escrowed
+        text holds it (``passage_holds``), ``source_changed`` when it does
+        not, ``not_verifiable`` when nothing was escrowed or the escrow no
+        longer holds it. With ``live``, against the document as its provider
+        holds it now (the corpus reference comes from the snapshot's corpus
+        queries): ``intact`` or ``source_changed``; ``source_changed`` too
+        when the provider holds the corpus but no longer that version;
+        ``source_unavailable`` when the provider is not installed, cannot be
+        built, or cannot read the document (the corpus not loaded, the store
+        unreachable); ``not_verifiable`` for a provider without
+        ``DocumentFetcher``. Each document is read once per call. Neither
+        mode calls the LLM or retrieves.
+
+        Args:
+            output: An output this gate returned, as the bundle stores it.
+            live: Whether to read each document as its provider holds it now.
+
+        Returns:
+            One status per reference in ``output.evidence``, in order.
+        """
+        return await asyncio.to_thread(self._verify, output, live=live)
+
+    def _verify(self, output: GateOutput, *, live: bool) -> tuple[EvidenceStatus, ...]:
+        refs = output.evidence
+        snapshot = stored_snapshot(output)
+        if snapshot is None:
+            return ("not_verifiable",) * len(refs)
+        corpora = {
+            q.corpus_ref.corpus_id: q.corpus_ref for q in snapshot.corpus_queries
+        }
+        documents: dict[_DocumentKey, DocumentBlob | EvidenceStatus] = {}
+        escrowed: dict[str, str | None] = {}
+        statuses: list[EvidenceStatus] = []
+        for index, ref in enumerate(refs):
+            context = (
+                snapshot.contexts[index] if index < len(snapshot.contexts) else None
+            )
+            if context is None or ref.content_hash != context.content_hash:
+                statuses.append("not_verifiable")
+            elif live:
+                statuses.append(self._live_status(context, corpora, documents))
+            else:
+                statuses.append(self._stored_status(ref, context, escrowed))
+        return tuple(statuses)
+
+    def _stored_status(
+        self,
+        ref: EvidenceRef,
+        context: RetrievedContext,
+        escrowed: dict[str, str | None],
+    ) -> EvidenceStatus:
+        """The passage checked against the document escrowed for it."""
+        digest = ref.artifact_hash
+        if digest is None or self._escrow is None:
+            return "not_verifiable"
+        if digest not in escrowed:
+            escrowed[digest] = _escrowed_text(self._escrow.get(digest), digest)
+        text = escrowed[digest]
+        if text is None:
+            return "not_verifiable"
+        return "intact" if passage_holds(text, context) else "source_changed"
+
+    def _live_status(
+        self,
+        context: RetrievedContext,
+        corpora: Mapping[str, CorpusRef],
+        documents: dict[_DocumentKey, DocumentBlob | EvidenceStatus],
+    ) -> EvidenceStatus:
+        """The passage checked against its document as its provider holds it now."""
+        key = (context.corpus_id, context.document_id, context.version)
+        if key not in documents:
+            documents[key] = self._fetch_now(key, corpora.get(context.corpus_id))
+        found = documents[key]
+        if not isinstance(found, DocumentBlob):
+            return found
+        return "intact" if passage_holds(found.text, context) else "source_changed"
+
+    def _fetch_now(
+        self, key: _DocumentKey, corpus: CorpusRef | None
+    ) -> DocumentBlob | EvidenceStatus:
+        """A document as its provider holds it now, or why it cannot be read."""
+        if corpus is None:
+            return "not_verifiable"
+        _, document_id, version = key
+        log_ctx = {
+            "component": "policy_gate",
+            "corpus_id": corpus.corpus_id,
+            "provider": corpus.provider,
+            "document_id": document_id,
+            "version": version,
+        }
+        try:
+            provider = self._providers.get(corpus.provider)
+        except Exception as err:
+            log.warning(
+                "policy_gate.verify_provider_unavailable", error=str(err), **log_ctx
+            )
+            return "source_unavailable"
+        if not isinstance(provider, DocumentFetcher):
+            return "not_verifiable"
+        try:
+            return _check_document(
+                provider.fetch_document(corpus, document_id, version), key
+            )
+        except DocumentNotHeldError:
+            return "source_changed"
+        except Exception as err:
+            log.warning(
+                "policy_gate.verify_document_unavailable", error=str(err), **log_ctx
+            )
+            return "source_unavailable"
 
     def close(self) -> None:
         """Release the providers this gate built and the handles it owns."""
@@ -945,6 +1303,17 @@ class PolicyGate:
         queries, contexts = evidence.queries, evidence.contexts
         dedup_merged = evidence.dedup_merged
         retrieval_ms = duration_ms(t_retrieval)
+
+        # --- Escrow: each cited document, once, before anything is built ---
+        if self._escrow is not None and contexts:
+            contexts = await asyncio.to_thread(
+                escrow_documents,
+                self._providers,
+                queries,
+                contexts,
+                self._escrow,
+                decision_id=request.decision_id,
+            )
 
         # --- Render prompt ---
         try:

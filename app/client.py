@@ -16,6 +16,7 @@ Both return the same wire models (``app.api.models``) and raise the same
 ``core.exceptions.LedgerError`` (``status`` and stable ``code``), so code
 written against one runs against the other. ``submit`` returns the
 decision's receipt; ``get_bundle`` reads the full ``DecisionBundle``;
+``verify`` says how the evidence a decision relied on stands now (DR-34);
 ``register`` writes a reasoner's registration (an operator act, DR-33).
 
 The methods are coroutines; close a client with ``aclose()`` (or use it as
@@ -36,6 +37,7 @@ from app.api.decisions import (
     record_batch,
     replay_decision,
     resolve_decision,
+    verify_decision,
 )
 from app.api.entities import DEFAULT_LIMIT, entity_decisions
 from app.api.gates import list_gates
@@ -44,6 +46,7 @@ from app.api.models import (
     BatchResult,
     DecisionReceipt,
     EntityDecisions,
+    EvidenceVerification,
     GateList,
     ReasonerList,
     RegisteredReasonerView,
@@ -100,6 +103,12 @@ class LedgerClient(Protocol):
 
     async def replay(self, decision_id: str) -> ReplayResponse:
         """Replay enforcement on the bundle's cached states."""
+        ...
+
+    async def verify(
+        self, decision_id: str, *, live: bool = False
+    ) -> EvidenceVerification:
+        """How the evidence a decision relied on stands now (``live``: its sources)."""
         ...
 
     async def entity_decisions(
@@ -264,6 +273,21 @@ class LocalClient:
         """Replay enforcement on the bundle's cached states."""
         return replay_decision(
             decision_id, principal=self._principal, framework=self._framework
+        )
+
+    async def verify(
+        self, decision_id: str, *, live: bool = False
+    ) -> EvidenceVerification:
+        """How the evidence a decision relied on stands now (``live``: its sources).
+
+        Raises:
+            LedgerError: As ``POST /api/v1/decisions/{id}/verify`` would answer.
+        """
+        return await verify_decision(
+            decision_id,
+            live=live,
+            principal=self._principal,
+            framework=self._framework,
         )
 
     async def entity_decisions(
@@ -483,6 +507,17 @@ class HttpClient:
             "POST", f"/api/v1/decisions/{decision_id}/replay"
         )
         return ReplayResponse.model_validate_json(response.content)
+
+    async def verify(
+        self, decision_id: str, *, live: bool = False
+    ) -> EvidenceVerification:
+        """How the evidence a decision relied on stands now (``live``: its sources)."""
+        response = await self._request(
+            "POST",
+            f"/api/v1/decisions/{decision_id}/verify",
+            params={"live": "true" if live else "false"},
+        )
+        return EvidenceVerification.model_validate_json(response.content)
 
     async def entity_decisions(
         self,

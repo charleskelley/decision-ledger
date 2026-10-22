@@ -15,14 +15,18 @@ Universal base (what enforcement and replay consume):
     schema-failure tier (DR-19).
   * ``evidence`` — references to the sources the gate relied on. The
     jurisdiction-conflict tier reads their ``jurisdictions`` and runs only
-    when at least one reference carries any.
+    when at least one reference carries any. A reference may carry the
+    digest of the content the gate relied on (``content_hash``) and of the
+    artifact the ledger's evidence escrow holds for it (``artifact_hash``,
+    DR-34); ``verify`` reports how each reference stands now
+    (``EvidenceStatus``), which replay never does.
 
 Opaque extension (gate-owned; stored verbatim, never interpreted):
 
   * ``evidence_snapshot`` — everything the gate consulted to reach its
-    verdict (for a retrieving gate: the query, the retrieved passages, the
+    verdict (for a retrieving gate: the query, what it retrieved, the
     rendered prompt). It makes the bundle self-contained for audit and
-    replay; replay never re-invokes the gate or reads a corpus.
+    replay; replay never re-invokes the gate or reads its sources.
   * ``extra`` — gate-specific output fields (a raw model response, token
     cost, a rationale, rule traces).
 
@@ -38,28 +42,57 @@ or ``failed``), not a ``GateOutput`` state.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from core.gate.verdict import GateVerdict
+
+#: How one evidence reference stands when a gate verifies it (DR-34):
+#:
+#: * ``intact`` — the content the gate relied on is proven: it is the content
+#:   of the gate's record of the source (the escrowed artifact) or, live, of
+#:   the source as it is now.
+#: * ``source_changed`` — the source no longer holds that content (it was
+#:   edited, or the version the reference names is gone while the source is
+#:   still there).
+#: * ``source_unavailable`` — the source could not be reached (it is gone, or
+#:   reading it failed).
+#: * ``not_verifiable`` — the reference cannot be checked: the gate keeps no
+#:   record to check it against, does not verify its references, or is not
+#:   composed here.
+EvidenceStatus = Literal[
+    "intact", "source_changed", "source_unavailable", "not_verifiable"
+]
+
+_SHA256_HEX = r"^[0-9a-f]{64}$"
 
 
 class EvidenceRef(BaseModel):
     """A reference to one source a gate relied on (generalizes a citation).
 
     Attributes:
-        source_id: Stable identifier of the source (a policy document id, a
-            rule-set id, a lookup table name).
+        source_id: Stable identifier of the source (a document id, the id
+            and version of a set of rules, a lookup table name).
         locator: Optional position inside the source (a section path, a
             rule id, a row key). ``None`` when the source is atomic.
         jurisdictions: Regulatory jurisdiction tags the source carries.
             Empty for sources that have no jurisdiction. Enforcement's
             jurisdiction-conflict tier reads the union across a gate's
             evidence and checks it against the reasoner's conflict groups.
-        content_hash: The SHA-256 digest (lowercase hex) of the exact text
-            the gate relied on from this source, as the gate saw it (a
-            passage, a rule set). Anyone holding that text can recompute
-            and compare it; the framework stores it and never reads the
-            text. ``None`` when the gate records no digest (DR-34).
+        content_hash: The SHA-256 digest (lowercase hex) of the exact
+            content the gate relied on from this source, as the gate saw it
+            (an excerpt, a whole set of rules). Anyone holding that content
+            can recompute and compare it; the framework stores it and never
+            reads the content. ``None`` when the gate records no digest
+            (DR-34).
+        artifact_hash: The SHA-256 digest (lowercase hex) of the artifact
+            the ledger's evidence escrow holds for this reference: the
+            source's content as the gate read it while deciding, which the
+            gate handed to the escrow (``decisionledger.evidence_artifacts``,
+            DR-34). The gate sets it only from what the escrow returned, so
+            it is ``None`` when the gate escrows nothing for the reference
+            or the deployment runs with escrow off.
     """
 
     model_config = ConfigDict(
@@ -69,7 +102,8 @@ class EvidenceRef(BaseModel):
     source_id: str
     locator: str | None = None
     jurisdictions: frozenset[str] = frozenset()
-    content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    content_hash: str | None = Field(default=None, pattern=_SHA256_HEX)
+    artifact_hash: str | None = Field(default=None, pattern=_SHA256_HEX)
 
 
 class GateOutput(BaseModel):

@@ -1,4 +1,4 @@
-"""The six tools are thin, faithful calls on a ``LedgerClient``.
+"""The seven tools are thin, faithful calls on a ``LedgerClient``.
 
 A recording client stands in for the ledger: each tool must call the right
 client method with the right arguments and return its result as JSON; a
@@ -19,8 +19,10 @@ import pytest
 from app.api.models import (
     DecisionReceipt,
     EntityDecisions,
+    EvidenceVerification,
     ReplayResponse,
     ResolutionReceipt,
+    VerificationSummary,
 )
 from core.actions import DecisionAction
 from core.exceptions import LedgerError
@@ -99,6 +101,18 @@ class _Recording:
         self._record("get_decision", decision_id)
         return {"decision_id": decision_id, "schema_version": 2}
 
+    async def verify(self, decision_id, *, live=False):
+        self._record("verify", (decision_id, live))
+        return EvidenceVerification(
+            decision_id=decision_id,
+            checked_at=datetime(2026, 10, 22, tzinfo=UTC),
+            live=live,
+            refs=[],
+            summary=VerificationSummary(
+                intact=0, changed=0, unavailable=0, not_verifiable=0, escrow_missing=0
+            ),
+        )
+
     async def replay(self, decision_id):
         self._record("replay", decision_id)
         return ReplayResponse(
@@ -147,13 +161,14 @@ def _tools(client: Any) -> dict[str, Any]:
     return {tool.name: tool for tool in ledger_tools(client)}
 
 
-def test_the_six_tools_and_their_schemas():
+def test_the_seven_tools_and_their_schemas():
     tools = _tools(_Recording())
     assert list(tools) == [
         "record_decision",
         "gate_decision",
         "lookup_decision",
         "replay_decision",
+        "verify_decision",
         "list_decisions_for_entity",
         "resolve_hold",
     ]
@@ -227,6 +242,31 @@ async def test_an_unreachable_ledger_is_a_tool_error():
             {"decision_id": _DECISION_ID}
         )
     assert err.value.payload["code"] == "LEDGER_UNAVAILABLE"
+
+
+async def test_verify_decision_asks_the_ledger_stored_or_live():
+    client = _Recording()
+    verify = _tools(client)["verify_decision"]
+
+    stored = await verify.handler({"decision_id": _DECISION_ID})
+    live = await verify.handler({"decision_id": _DECISION_ID, "live": True})
+
+    assert client.calls == [
+        ("verify", (_DECISION_ID, False)),
+        ("verify", (_DECISION_ID, True)),
+    ]
+    assert (stored["live"], live["live"]) == (False, True)
+    assert stored["summary"]["intact"] == 0
+    assert verify.annotations["readOnlyHint"] is True
+    assert verify.input_schema["required"] == ["decision_id"]
+
+
+async def test_verify_decision_refuses_a_live_flag_that_is_not_a_boolean():
+    with pytest.raises(ToolError) as err:
+        await _tools(_Recording())["verify_decision"].handler(
+            {"decision_id": _DECISION_ID, "live": "yes"}
+        )
+    assert err.value.payload["code"] == "ARGUMENTS_INVALID"
 
 
 async def test_the_reading_tools_call_the_client():

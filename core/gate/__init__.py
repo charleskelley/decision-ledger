@@ -8,6 +8,7 @@ Defines what every gate satisfies and what the framework stores (DR-28):
   stores verbatim and never interprets. The framework never defines or
   imports a ``GateOutput`` subclass.
 - ``EvidenceRef`` — a reference to one source a gate relied on.
+- ``EvidenceStatus`` — how a reference stands when its gate verifies it.
 - ``GateVerdict`` — the universal verdict enforcement consumes.
 - ``GateInput`` — the framework's record that it invoked a gate.
 - The predicate language (``Compare``, ``AllOf``, ``AnyOf``, ``Not``,
@@ -32,6 +33,7 @@ Public API at this level:
     GateInput:        The framework's record of one gate invocation.
     GateOutput:       Open output contract — universal base + opaque extension.
     EvidenceRef:      Reference to a source a gate relied on.
+    EvidenceStatus:   How a reference stands when its gate verifies it.
     GateVerdict:      Universal verdict — what enforcement consumes.
     Predicate:        Discriminated union of the four predicate node kinds.
     Compare, AllOf, AnyOf, Not:  Predicate nodes.
@@ -47,7 +49,7 @@ from core.gate.combinator import (
     severity,
 )
 from core.gate.input import GateInput
-from core.gate.output import EvidenceRef, GateOutput
+from core.gate.output import EvidenceRef, EvidenceStatus, GateOutput
 from core.gate.predicate import (
     AllOf,
     AnyOf,
@@ -66,6 +68,7 @@ __all__ = [
     "AnyOf",
     "Compare",
     "EvidenceRef",
+    "EvidenceStatus",
     "GateInput",
     "GateOutput",
     "GateStatus",

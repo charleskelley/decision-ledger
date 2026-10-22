@@ -87,6 +87,12 @@ Scans and build-metadata checks codify those rules:
   ``corpus``, ``provider``, ``tier``, or ``policy`` beyond enforcement's
   numbered tiers and a listed exception per file that must stay needed. No
   reasoner or integration member's source imports the gate's provider seam.
+- **Evidence escrow and verify** (DR-34 part 2): the framework escrows what
+  a gate hands it and asks a gate that verifies its own references to do
+  so. The escrow store, its table, and the verify seam, operation, route,
+  models, and client methods describe a gate's part generically: no plain
+  word a gate owns (corpus, provider, provenance, rule set, passage,
+  chunk, a document fetcher) in their code, docstrings, or comments.
 - **Gate subclass scan** (AST): no framework module defines or imports a
   ``GateOutput``, ``GateInput``, or ``GateVerdict`` subclass, aliased bases
   included.
@@ -285,6 +291,9 @@ POLICY_GATE_PROVIDERS_DIR = (
 POLICY_GATE_PROVIDER_SEAM = frozenset(
     {
         "CorpusNotLoadedError",
+        "DocumentBlob",
+        "DocumentFetcher",
+        "DocumentNotHeldError",
         "PROVIDER_GROUP",
         "ProviderContractError",
         "ProviderPlugin",
@@ -407,6 +416,47 @@ CREATE_EXTENSION = re.compile(r"\bcreate\s+extension\b", re.IGNORECASE)
 
 #: A schema-qualified reference to the framework's own schema.
 FRAMEWORK_SCHEMA_REF = re.compile(r"\bdecisionledger\.\w", re.IGNORECASE)
+
+
+#: The framework's evidence escrow and verify (DR-34 part 2): the escrow
+#: store (a whole module), and the verify seam, operation, route, response
+#: models, and client methods (by name, wherever they are defined), plus the
+#: evidence reference they read. A gate verifies its own references; the
+#: framework's prose about it stays generic ("a gate compares each reference
+#: against its stored record and, live, against its source").
+EVIDENCE_PROSE_MODULES = ("app/audit/artifacts.py",)
+EVIDENCE_PROSE_SYMBOLS = frozenset(
+    {
+        "ArtifactStore",
+        "EscrowStatus",
+        "EvidenceRef",
+        "EvidenceStatus",
+        "EvidenceVerification",
+        "EvidenceVerifier",
+        "VerificationSummary",
+        "VerifiedReference",
+        "artifacts",
+        "decisionledger_evidence_escrow",
+        "evidence_escrow",
+        "post_verify",
+        "verify",
+        "verify_decision",
+        "verify_evidence",
+    }
+)
+#: The escrow table's DDL block, from its header to the next table's.
+EVIDENCE_PROSE_DDL = re.compile(
+    r"^-- evidence_artifacts\b.*?(?=^-- -{10,}\n-- \w+ —|\Z)", re.M | re.S
+)
+#: Plain words a gate owns (a retrieving gate's, the rules gate's). Framework
+#: prose elsewhere may use some of them for its own concepts (an identity's
+#: provenance, an LLM provider, a body read in chunks); escrow and verify
+#: prose may not.
+GATE_PLAIN_WORDS = re.compile(
+    r"\b(?:corpus|corpora|providers?|provenance|rule[-_ ]?sets?|passages?|"
+    r"chunks?|document[-_ ]?fetch\w*)\b",
+    re.IGNORECASE,
+)
 
 
 def _py_files(root: Path) -> list[Path]:
@@ -1069,6 +1119,85 @@ def test_framework_names_no_gate_asset_location():
     assert not offenders, (
         f"framework files name where a gate reads reasoner assets: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Evidence escrow and verify — the framework's part is generic (DR-34 part 2)
+# ---------------------------------------------------------------------------
+
+
+def _symbol_sources(path: Path, names: frozenset[str]) -> list[tuple[str, str]]:
+    """``(name, source)`` of each definition in ``path`` named in ``names``.
+
+    Classes and functions (methods and properties included), and assignments
+    to a plain name (``EvidenceStatus = Literal[...]``, a settings field), at
+    any depth. The source is the node's full text (its code, docstrings, and
+    comments) with its decorators and the comment block just above it, where
+    a ``#:`` comment documents an assignment.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            name: str | None = node.name
+            first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            named = [t.id for t in targets if isinstance(t, ast.Name)]
+            name = named[0] if len(named) == 1 else None
+            first = node.lineno
+        else:
+            continue
+        if name not in names or node.end_lineno is None:
+            continue
+        start = first - 1
+        while start > 0 and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        found.append((name, "\n".join(lines[start : node.end_lineno])))
+    return found
+
+
+def test_the_escrow_store_is_in_the_framework_scans():
+    """The escrow store is framework code: every framework scan reads it."""
+    scanned = {_rel(p) for p in _scan_files()}
+    missing = [m for m in EVIDENCE_PROSE_MODULES if m not in scanned]
+    assert not missing, f"not under the framework scans: {missing}"
+
+
+def test_escrow_and_verify_name_no_gate_vocabulary():
+    """The escrow and verify describe a gate's part generically (DR-34 part 2).
+
+    The framework escrows the bytes a gate hands it and asks a gate that
+    verifies its own references how each one stands; it never learns what a
+    gate compared them with. So the escrow store, its table's DDL, and the
+    verify seam, operation, route, response models, and client methods (and
+    the evidence reference they read) use no plain word a gate owns.
+    """
+    offenders: list[tuple[str, str, list[str]]] = []
+    for module in EVIDENCE_PROSE_MODULES:
+        path = REPO_ROOT / module
+        hits = sorted(
+            {m.group(0) for m in GATE_PLAIN_WORDS.finditer(path.read_text("utf-8"))}
+        )
+        if hits:
+            offenders.append((module, "<module>", hits))
+    for path in _scan_files():
+        if path.suffix != ".py" or _rel(path) in EVIDENCE_PROSE_MODULES:
+            continue
+        for name, source in _symbol_sources(path, EVIDENCE_PROSE_SYMBOLS):
+            hits = sorted({m.group(0) for m in GATE_PLAIN_WORDS.finditer(source)})
+            if hits:
+                offenders.append((_rel(path), name, hits))
+    blocks: list[str] = []
+    for sql in _files(FRAMEWORK_SQL_DIR, ".sql"):
+        blocks.extend(m.group(0) for m in EVIDENCE_PROSE_DDL.finditer(sql.read_text()))
+    assert blocks, "no evidence_artifacts DDL block found in the framework DDL"
+    for block in blocks:
+        hits = sorted({m.group(0) for m in GATE_PLAIN_WORDS.finditer(block)})
+        if hits:
+            offenders.append(("app/audit/sql", "evidence_artifacts", hits))
+    assert not offenders, f"escrow and verify name a gate's vocabulary: {offenders}"
 
 
 # ---------------------------------------------------------------------------

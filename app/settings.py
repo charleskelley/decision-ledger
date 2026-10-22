@@ -12,7 +12,7 @@ multiple reasoners share one deployment.
 
 Per-plugin configuration lives in that plugin's own ``Settings`` class with
 its own env-var prefix, inside its package: a reasoner's model artifact
-paths, corpus version, or queue; a gate's search index or model endpoint
+paths, prompt template, or queue; a gate's search index or model endpoint
 (DR-28). A gate that keeps tables in the framework's database (in its own
 schema) reads the Postgres DSN from here.
 
@@ -108,6 +108,15 @@ class FrameworkSettings(BaseSettings):
     #: decisions. Blank disables operator access.
     decisionledger_operator_key: SecretStr = SecretStr("")
 
+    #: Whether gates may escrow the content they rely on in the ledger's
+    #: evidence escrow (DR-34): ``on`` (the default) or ``off``. Off, the
+    #: escrow stores nothing, so gates record no artifact digests on their
+    #: evidence references and verify reports ``escrow: none``; artifacts
+    #: escrowed earlier stay readable. Read by the bootstrap only (gates are
+    #: handed the escrow store and never read this). Any other value refuses
+    #: startup.
+    decisionledger_evidence_escrow: str = "on"
+
     @property
     def mandatory_gate_ids(self) -> frozenset[str]:
         """The parsed ``DECISIONLEDGER_MANDATORY_GATES`` set (empty when blank)."""
@@ -116,6 +125,22 @@ class FrameworkSettings(BaseSettings):
             for part in self.decisionledger_mandatory_gates.split(",")
             if part.strip()
         )
+
+    @property
+    def evidence_escrow(self) -> bool:
+        """Whether ``DECISIONLEDGER_EVIDENCE_ESCROW`` turns escrow on.
+
+        Raises:
+            ValueError: The setting is neither ``on`` nor ``off`` (any case).
+        """
+        value = self.decisionledger_evidence_escrow.strip().lower()
+        if value not in ("on", "off"):
+            msg = (
+                "DECISIONLEDGER_EVIDENCE_ESCROW must be 'on' or 'off', not "
+                f"{self.decisionledger_evidence_escrow!r}"
+            )
+            raise ValueError(msg)
+        return value == "on"
 
     @property
     def identity_resolver_id(self) -> str | None:

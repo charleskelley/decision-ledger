@@ -14,23 +14,29 @@ Public API:
     Rule, RuleSet:      A rule and a versioned, tenant-owned rule set.
     RulesGateConfig:    The gate's ``config_model`` (``ruleset_id``).
     RulesGateSnapshot:  Schema of the gate's ``evidence_snapshot``.
-    load_rulesets:      Load every rule-set YAML file in a directory.
+    load_rulesets:      Load every rule-set YAML file in a directory, each
+                        with the file it came from (``LoadedRuleSet``).
+    canonical_ruleset:  The canonical JSON the gate escrows and hashes.
 """
 
 from rules_gate.gate import RULES_GATE_ID, RulesGate, RulesGateSnapshot
 from rules_gate.plugin import PLUGIN, RulesGatePlugin
 from rules_gate.ruleset import (
+    LoadedRuleSet,
     Rule,
     RuleSet,
     RulesGateConfig,
+    canonical_ruleset,
     load_rulesets,
     parse_ruleset,
+    read_ruleset,
 )
 from rules_gate.settings import RulesGateSettings
 
 __all__ = [
     "PLUGIN",
     "RULES_GATE_ID",
+    "LoadedRuleSet",
     "Rule",
     "RuleSet",
     "RulesGate",
@@ -38,6 +44,8 @@ __all__ = [
     "RulesGatePlugin",
     "RulesGateSettings",
     "RulesGateSnapshot",
+    "canonical_ruleset",
     "load_rulesets",
     "parse_ruleset",
+    "read_ruleset",
 ]

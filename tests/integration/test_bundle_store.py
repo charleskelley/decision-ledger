@@ -47,13 +47,16 @@ from app.settings import FrameworkSettings
 from app.submit import submit
 from core.actions import DecisionAction
 from core.exceptions import BundleSchemaUnsupportedError
-from core.observation import GateBinding, GateContext, ReasonerRegistration
+from core.observation import GateContext
 from tests._fake_gate.plugin import FakeGatePlugin, FakeLookupGatePlugin
 from tests._memory_ledger import STUB_KEY, TEST_KEYRING
 from tests._stub_reasoner.assembler import build_submission
 from tests._stub_reasoner.events import StubEvent
 from tests._stub_reasoner.plugin import PLUGIN
-from tests._stub_reasoner.registry import STUB_REGISTRATION
+from tests._stub_reasoner.registry import (
+    STUB_REGISTRATION,
+    STUB_REGISTRATION_WITH_LOOKUP,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -69,16 +72,7 @@ _PG_DSN = FrameworkSettings().postgres_dsn
 _INGESTION_TS = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
 
 #: The stub registration with a mandatory lookup gate in its gate set.
-_WITH_LOOKUP = ReasonerRegistration.model_validate_json(
-    STUB_REGISTRATION.model_copy(
-        update={
-            "gates": (
-                GateBinding(gate_id="fake-lookup", mandatory=True),
-                GateBinding(gate_id="fake"),
-            )
-        }
-    ).model_dump_json()
-)
+_WITH_LOOKUP = STUB_REGISTRATION_WITH_LOOKUP
 
 
 # ---------------------------------------------------------------------------

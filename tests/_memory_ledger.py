@@ -16,6 +16,9 @@ the production code:
   production fold (``core.identity.project_membership``).
 - ``MemorySnapshots`` keeps registration snapshots as canonical JSON and
   reloads them on read, as the table does.
+- ``MemoryArtifacts`` keeps the evidence escrow (DR-34) in a dict keyed by
+  digest, writing only while enabled, as the table does; ``get`` and
+  ``held`` read it whatever the setting.
 - ``MemoryApiRegistrations`` keeps the registrations written over the API
   (DR-33) in a dict and records each version's snapshot in the store's
   ``MemorySnapshots``, as ``ApiRegistrations`` writes both in one statement;
@@ -26,7 +29,8 @@ the production code:
 
 ``memory_framework`` composes them into ``FrameworkServices`` the way the
 bootstrap does (the live registry with its API registrations, snapshots, the
-identity step with an optional resolver, gates built against the services),
+evidence escrow, the identity step with an optional resolver, gates built
+against the services),
 and ``TEST_KEYRING`` holds the keys the API tests authenticate with.
 """
 
@@ -42,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from app.audit.artifacts import ARTIFACT_HASH, ArtifactStore, artifact_hash
 from app.audit.entity_journal import EntityJournal
 from app.audit.registrations import (
     ApiRegistrations,
@@ -136,6 +141,56 @@ class MemorySnapshots(RegistrationSnapshots):
         return [snapshot for snapshot in found if snapshot is not None]
 
 
+@dataclass(frozen=True)
+class MemoryArtifact:
+    """One escrowed artifact, as its row holds it."""
+
+    media_type: str
+    content: bytes
+    first_decision_id: str
+    first_gate_id: str
+
+
+class MemoryArtifacts(ArtifactStore):
+    """The evidence escrow in a dict; digests and checks are the real ones.
+
+    Attributes:
+        rows: Digest → the artifact first escrowed under it.
+    """
+
+    def __init__(self, *, enabled: bool = True) -> None:  # no connection
+        self._enabled = enabled
+        self.rows: dict[str, MemoryArtifact] = {}
+
+    def put(
+        self, content: bytes, *, media_type: str, decision_id: str, gate_id: str
+    ) -> str | None:
+        for name, value in (
+            ("media_type", media_type),
+            ("decision_id", decision_id),
+            ("gate_id", gate_id),
+        ):
+            if not value.strip():
+                msg = f"an escrowed artifact needs a {name}"
+                raise ValueError(msg)
+        digest = artifact_hash(content)
+        if not self._enabled:
+            return None
+        self.rows.setdefault(
+            digest, MemoryArtifact(media_type, bytes(content), decision_id, gate_id)
+        )
+        return digest
+
+    def get(self, artifact_hash: str) -> bytes | None:
+        row = self.rows.get(artifact_hash)
+        return row.content if row is not None else None
+
+    def held(self, artifact_hashes: Iterable[str]) -> frozenset[str]:
+        return frozenset(
+            h for h in artifact_hashes if ARTIFACT_HASH.fullmatch(h) and h in self.rows
+        )
+
+
 class MemoryApiRegistrations(ApiRegistrations):
     """The API registrations in a dict; each save also records its snapshot.
 
@@ -200,9 +255,11 @@ class MemoryBundleStore(BundleStore):
         registry: LiveReasonerRegistry,
         *,
         snapshots: RegistrationSnapshots | None = None,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         self._registry = registry
         self._snapshots = snapshots if snapshots is not None else MemorySnapshots()
+        self._artifacts = artifacts if artifacts is not None else MemoryArtifacts()
         self.rows: dict[str, MemoryRow] = {}
         self.memberships: list[Membership] = []
         self.replays: list[ReplayResult] = []
@@ -485,6 +542,7 @@ def memory_framework(
     resolver_plugin: IdentityResolverPlugin | None = None,
     identity_budget_ms: int = DEFAULT_IDENTITY_BUDGET_MS,
     api_registrations: MemoryApiRegistrations | None = None,
+    artifacts: MemoryArtifacts | None = None,
 ) -> FrameworkServices:
     """Compose in-memory ``FrameworkServices`` the way the bootstrap does.
 
@@ -501,6 +559,10 @@ def memory_framework(
             restart reads them back (pass the one an earlier
             ``memory_framework`` wrote to); a fresh, empty one by default.
             Its snapshots become the store's.
+        artifacts: The evidence escrow (pass one built with
+            ``enabled=False`` for a deployment with escrow off, or the one
+            an earlier ``memory_framework`` wrote to); a fresh, enabled one
+            by default.
 
     Returns:
         The services, with a ``MemoryBundleStore`` whose snapshots hold every
@@ -517,7 +579,11 @@ def memory_framework(
         writer=written,
     )
     declared_namespaces(entry.registration for entry in registry.entries())
-    store = MemoryBundleStore(registry, snapshots=written.snapshots)
+    store = MemoryBundleStore(
+        registry,
+        snapshots=written.snapshots,
+        artifacts=artifacts if artifacts is not None else MemoryArtifacts(),
+    )
     for entry in registry.entries():
         store.snapshots.record(entry.registration)
     services = FrameworkServices(

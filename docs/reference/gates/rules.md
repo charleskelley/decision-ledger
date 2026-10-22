@@ -8,7 +8,10 @@ one `reasoner_id`) of predicates over a submission's `label_value` and
 `feature_set`, written in the framework's closed predicate language
 ([`core.gate.predicate`][core.gate.predicate]) and evaluated
 deterministically. A reasoner selects a rule set with
-`gate_config = {"ruleset_id": ...}` and never authors rules. It plugs in
+`gate_config = {"ruleset_id": ...}` and never authors rules. The gate keeps
+a copy of every rule set it applies in the ledger's evidence escrow, through
+the framework's store, and verifies its references against that copy or,
+live, the rule set's file (DR-34). It plugs in
 through the `decisionledger.gates` entry point (`rules_gate.plugin:PLUGIN`);
 the framework never imports it.
 

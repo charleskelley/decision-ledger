@@ -38,7 +38,7 @@ def test_build_loads_the_rulesets_from_the_configured_directory(write_ruleset):
     directory = write_ruleset()
     plugin = RulesGatePlugin(RulesGateSettings(rulesets_dir=str(directory)))
 
-    gate = plugin.build(framework=None)  # type: ignore[arg-type]
+    gate = plugin.build(framework=None)
 
     assert isinstance(gate, RulesGate)
     assert gate.ruleset_ids == ["widget-guardrails"]
@@ -47,14 +47,14 @@ def test_build_loads_the_rulesets_from_the_configured_directory(write_ruleset):
 def test_build_with_no_directory_registers_no_rulesets():
     plugin = RulesGatePlugin(RulesGateSettings(rulesets_dir=""))
 
-    assert plugin.build(framework=None).ruleset_ids == []  # type: ignore[arg-type]
+    assert plugin.build(framework=None).ruleset_ids == []
 
 
 def test_build_fails_fast_on_a_missing_directory(tmp_path):
     plugin = RulesGatePlugin(RulesGateSettings(rulesets_dir=str(tmp_path / "absent")))
 
     with pytest.raises(FileNotFoundError):
-        plugin.build(framework=None)  # type: ignore[arg-type]
+        plugin.build(framework=None)
 
 
 def test_settings_read_the_prefixed_environment_variable(monkeypatch, tmp_path):

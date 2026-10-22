@@ -285,6 +285,16 @@ snapshotted bypass rules, under the snapshot of the registration version the
 bundle cites. No gate is re-invoked and no corpus is read. The result is
 written to `replay_logs`.
 
+**Verify** (`POST /api/v1/decisions/{decision_id}/verify`, DR-34) is a
+different question: whether what the decision relied on is still provable.
+For each evidence reference of each gate that ran, the ledger says whether
+its evidence escrow holds the artifact the reference names (the gate
+escrowed it while deciding, in step 4 or 5), and asks the gate, when it verifies
+its own references, how the reference stands: against its own record, or
+with `?live=true` against the source as it is now (`intact`,
+`source_changed`, `source_unavailable`, `not_verifiable`). Nothing is
+decided again and nothing is written.
+
 ### After the decision: resolution
 
 CHALLENGE and HOLD are non-terminal. The bundle is immutable; a human

@@ -282,6 +282,7 @@ FRAMEWORK_PATHS = {
     "/api/v1/decisions:batch",
     "/api/v1/decisions/{decision_id}",
     "/api/v1/decisions/{decision_id}/replay",
+    "/api/v1/decisions/{decision_id}/verify",
     "/api/v1/decisions/{decision_id}/resolutions",
     "/api/v1/entities/{entity_id}/decisions",
     "/api/v1/identity/resolve",
