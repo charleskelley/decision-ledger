@@ -453,8 +453,21 @@
     },
     "EvidenceRef": {
       "additionalProperties": false,
-      "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a policy document id, a\n        rule-set id, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.\n    content_hash: The SHA-256 digest (lowercase hex) of the exact text\n        the gate relied on from this source, as the gate saw it (a\n        passage, a rule set). Anyone holding that text can recompute\n        and compare it; the framework stores it and never reads the\n        text. ``None`` when the gate records no digest (DR-34).",
+      "description": "A reference to one source a gate relied on (generalizes a citation).\n\nAttributes:\n    source_id: Stable identifier of the source (a document id, the id\n        and version of a set of rules, a lookup table name).\n    locator: Optional position inside the source (a section path, a\n        rule id, a row key). ``None`` when the source is atomic.\n    jurisdictions: Regulatory jurisdiction tags the source carries.\n        Empty for sources that have no jurisdiction. Enforcement's\n        jurisdiction-conflict tier reads the union across a gate's\n        evidence and checks it against the reasoner's conflict groups.\n    content_hash: The SHA-256 digest (lowercase hex) of the exact\n        content the gate relied on from this source, as the gate saw it\n        (an excerpt, a whole set of rules). Anyone holding that content\n        can recompute and compare it; the framework stores it and never\n        reads the content. ``None`` when the gate records no digest\n        (DR-34).\n    artifact_hash: The SHA-256 digest (lowercase hex) of the artifact\n        the ledger's evidence escrow holds for this reference: the\n        source's content as the gate read it while deciding, which the\n        gate handed to the escrow (``decisionledger.evidence_artifacts``,\n        DR-34). The gate sets it only from what the escrow returned, so\n        it is ``None`` when the gate escrows nothing for the reference\n        or the deployment runs with escrow off.",
       "properties": {
+        "artifact_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Hash"
+        },
         "content_hash": {
           "anyOf": [
             {

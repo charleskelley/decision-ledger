@@ -9,12 +9,13 @@ round trip the bundle store performs, unchanged.
 
 import hashlib
 import json
+import typing
 
 import pytest
 from pydantic import ValidationError
 
 from core.actions import DecisionAction
-from core.gate import EvidenceRef, GateOutput, GateVerdict
+from core.gate import EvidenceRef, EvidenceStatus, GateOutput, GateVerdict
 
 
 def _make_verdict(**overrides) -> GateVerdict:
@@ -180,6 +181,7 @@ def test_evidence_ref_defaults_to_no_locator_no_jurisdictions_and_no_digest():
     assert ref.locator is None
     assert ref.jurisdictions == frozenset()
     assert ref.content_hash is None
+    assert ref.artifact_hash is None
 
 
 def test_evidence_ref_carries_the_digest_of_the_text_the_gate_relied_on():
@@ -188,25 +190,34 @@ def test_evidence_ref_carries_the_digest_of_the_text_the_gate_relied_on():
     assert ref.content_hash == digest
 
 
-@pytest.mark.parametrize(
-    "digest",
-    [
-        "",
-        "ABCDEF" + "0" * 58,  # upper case
-        "0" * 63,  # one character short
-        "0" * 65,
-        "sha256:" + "0" * 64,  # a prefixed notation
-        "g" * 64,
-    ],
-)
-def test_evidence_ref_refuses_a_digest_that_is_not_sha256_hex(digest: str):
-    with pytest.raises(ValidationError):
-        EvidenceRef(source_id="DOC-A", content_hash=digest)
+def test_evidence_ref_carries_the_digest_of_its_escrowed_artifact():
+    text = hashlib.sha256(b"Section 3.2 applies.").hexdigest()
+    artifact = hashlib.sha256(b"# Policy A\n\nSection 3.2 applies.").hexdigest()
+    ref = EvidenceRef(source_id="DOC-A", content_hash=text, artifact_hash=artifact)
+    assert (ref.content_hash, ref.artifact_hash) == (text, artifact)
 
 
-def test_evidence_ref_digest_is_strictly_a_string():
+_NOT_SHA256_HEX = [
+    "",
+    "ABCDEF" + "0" * 58,  # upper case
+    "0" * 63,  # one character short
+    "0" * 65,
+    "sha256:" + "0" * 64,  # a prefixed notation
+    "g" * 64,
+]
+
+
+@pytest.mark.parametrize("field", ["content_hash", "artifact_hash"])
+@pytest.mark.parametrize("digest", _NOT_SHA256_HEX)
+def test_evidence_ref_refuses_a_digest_that_is_not_sha256_hex(field: str, digest: str):
     with pytest.raises(ValidationError):
-        EvidenceRef(source_id="DOC-A", content_hash=b"0" * 64)  # type: ignore[arg-type]
+        EvidenceRef(source_id="DOC-A", **{field: digest})
+
+
+@pytest.mark.parametrize("field", ["content_hash", "artifact_hash"])
+def test_evidence_ref_digest_is_strictly_a_string(field: str):
+    with pytest.raises(ValidationError):
+        EvidenceRef(source_id="DOC-A", **{field: b"0" * 64})
 
 
 def test_a_stored_evidence_ref_without_a_digest_still_loads():
@@ -215,6 +226,7 @@ def test_a_stored_evidence_ref_without_a_digest_still_loads():
     stored = {"source_id": "DOC-A", "locator": "2.1", "jurisdictions": ["A"]}
     ref = EvidenceRef.model_validate(stored, strict=False)
     assert ref.content_hash is None
+    assert ref.artifact_hash is None
     assert ref == EvidenceRef(
         source_id="DOC-A", locator="2.1", jurisdictions=frozenset({"A"})
     )
@@ -224,3 +236,12 @@ def test_evidence_ref_is_immutable():
     ref = EvidenceRef(source_id="DOC-A")
     with pytest.raises(ValidationError):
         ref.source_id = "tampered"
+
+
+def test_evidence_status_names_the_four_ways_a_reference_can_stand():
+    assert typing.get_args(EvidenceStatus) == (
+        "intact",
+        "source_changed",
+        "source_unavailable",
+        "not_verifiable",
+    )
