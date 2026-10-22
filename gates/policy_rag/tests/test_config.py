@@ -36,6 +36,7 @@ from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
 from policy_rag_gate.gate import PolicyGate
 from policy_rag_gate.plugin import PLUGIN
 from policy_rag_gate.prompt_registry import YamlPromptRegistry
+from policy_rag_gate.providers import ProviderRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,7 +65,6 @@ def test_config_types_every_key_and_defaults_the_optional_ones():
     assert config.retrieval_query is None
     assert config.jurisdictions == []
     assert config.risk_tier is None
-    assert config.corpus_version == "unknown"
 
 
 def test_config_accepts_a_reasoners_plain_dict_with_string_enum_values():
@@ -75,7 +75,6 @@ def test_config_accepts_a_reasoners_plain_dict_with_string_enum_values():
             "retrieval_query": "calibration review",
             "jurisdictions": ["REGION_A"],
             "risk_tier": _Tier.HIGH,
-            "corpus_version": "c-1",
         }
     )
 
@@ -140,9 +139,9 @@ def test_profile_reads_the_corpus_recursively_and_skips_unparseable_documents(
 def test_profile_skips_a_document_whose_front_matter_is_not_valid_yaml(
     tmp_path: Path, fixture_reasoner
 ):
-    # An unquoted colon in a title is a YAML syntax error. The loader skips
-    # such a document, so it grants nothing — and building the gate (which
-    # derives profiles at startup) must not fail on it.
+    # An unquoted colon in a title is a YAML syntax error. The loader refuses
+    # a corpus holding such a document, so it grants nothing — and building
+    # the gate (which derives profiles at startup) must not fail on it.
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     (corpus / "good.md").write_text(
@@ -188,11 +187,6 @@ def test_profile_refuses_a_jurisdiction_outside_the_reasoners_corpus():
 # ---------------------------------------------------------------------------
 
 
-class _UnusedRetriever:
-    def retrieve(self, **_: Any) -> Any:
-        raise AssertionError("authorization must not retrieve")
-
-
 class _UnusedClient:
     model = "never-called"
 
@@ -204,7 +198,7 @@ def _gate(fixture_reasoner: Any, *, profiles: Any) -> PolicyGate:
     return PolicyGate(
         client=_UnusedClient(),  # type: ignore[arg-type]
         prompt_registry=YamlPromptRegistry([fixture_reasoner.prompts_dir]),
-        retriever=_UnusedRetriever(),  # type: ignore[arg-type]
+        providers=ProviderRegistry(),  # authorization asks no provider
         profiles=profiles,
     )
 
@@ -338,7 +332,7 @@ async def test_intake_rejects_a_recorded_context_the_gate_refuses(
 async def test_intake_rejects_a_routed_context_the_gate_refuses_before_evaluating(
     submission, fixture_reasoner
 ):
-    # _UnusedRetriever / _UnusedClient fail the test if the gate runs.
+    # An empty provider registry and _UnusedClient fail the test if the gate runs.
     store = _RecordingStore()
     routed = submission.model_copy(
         update={

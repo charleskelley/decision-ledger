@@ -18,37 +18,39 @@ builds none of it:
   validate that reasoner's binding (at startup, or when the registration is
   written over the API), the gate reads ``<root>/<reasoner_id>/prompts`` and
   ``corpus`` and adds the reasoner's templates and profile;
-- its own Postgres connection (autocommit) to the framework's database, on
-  which it applies its own DDL — the vector extension and the
-  ``policy_rag`` schema with the chunk table — before registering the
-  pgvector adapters, for the dense retrieval leg;
-- the Elasticsearch client for the BM25 leg
-  (``POLICY_RAG_GATE_ELASTICSEARCH_URL``);
-- the embedding and cross-encoder models and the hybrid ``PolicyRetriever``;
+- the retrieval providers (DR-34): every plugin published under the gate's
+  own ``policy_rag_gate.providers`` entry-point group, each built the first
+  time a binding names one (the reference provider opens its own Postgres
+  connection on the framework's database, applies the gate's DDL, and loads
+  the embedding and cross-encoder models and the Elasticsearch client);
 - the OpenAI-backed ``LLMClient``, with the settings' ``OPENAI_API_KEY``.
 
-Building opens no Elasticsearch connection (the client connects lazily), so
-a deployment whose decisions never route to this gate runs with
-Elasticsearch down.
+The plugin's ``binding_config_model`` is ``PolicyBindingConfig``: a
+reasoner's binding to this gate names the corpora the gate retrieves from
+(DR-34), and the framework validates it with this model before the gate
+admits it.
+
+Building opens no provider, so a deployment whose registrations bind no
+corpus opens neither Elasticsearch nor the models.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import psycopg
 import structlog
-from elasticsearch import Elasticsearch
-from pgvector.psycopg import register_vector
-from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.gates import GateKind
 from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
+from policy_rag_gate.corpus import PolicyBindingConfig
 from policy_rag_gate.gate import POLICY_GATE_ID, PolicyGate
 from policy_rag_gate.llm.openai import OpenAILLMClient
 from policy_rag_gate.prompt_registry import YamlPromptRegistry
-from policy_rag_gate.retriever import PolicyRetriever
-from policy_rag_gate.schema import apply_schema
+from policy_rag_gate.providers import (
+    ProviderRegistry,
+    ProviderServices,
+    discover_provider_plugins,
+)
 from policy_rag_gate.settings import PolicyRagGateSettings
 
 if TYPE_CHECKING:
@@ -59,11 +61,6 @@ if TYPE_CHECKING:
     from app.plugin import FrameworkServices, ReasonerPlugin
 
 log = structlog.get_logger(__name__)
-
-#: Sentence-transformer used to embed queries (must match the corpus loader).
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-#: Cross-encoder used to rerank fused candidates.
-CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 def reasoner_profiles(
@@ -88,42 +85,6 @@ def reasoner_profiles(
     }
 
 
-def open_retriever(
-    *, postgres_dsn: str, elasticsearch_url: str
-) -> tuple[PolicyRetriever, tuple[Elasticsearch, psycopg.Connection]]:
-    """Open the gate's stores and models and build the hybrid retriever.
-
-    Applies the gate's own DDL first, so a fresh database gets the vector
-    extension and the ``policy_rag`` schema before the pgvector adapters are
-    registered.
-
-    Args:
-        postgres_dsn: DSN of the database that holds the ``policy_rag``
-            schema (the framework's database; the gate owns the schema).
-        elasticsearch_url: URL of the gate's Elasticsearch.
-
-    Returns:
-        The retriever and the handles to close when done, in closing order:
-        the Elasticsearch client, then the autocommit Postgres connection. On
-        failure the connection is closed before the error propagates.
-    """
-    pg_conn = psycopg.connect(postgres_dsn, autocommit=True)
-    try:
-        apply_schema(pg_conn)
-        register_vector(pg_conn)
-        es = Elasticsearch(elasticsearch_url)
-        retriever = PolicyRetriever(
-            pg_conn=pg_conn,
-            es=es,
-            model=SentenceTransformer(EMBEDDING_MODEL),
-            cross_encoder=CrossEncoder(CROSS_ENCODER_MODEL),
-        )
-    except Exception:
-        pg_conn.close()
-        raise
-    return retriever, (es, pg_conn)
-
-
 class PolicyGatePlugin:
     """``GatePlugin`` for the LLM-backed policy gate.
 
@@ -139,16 +100,17 @@ class PolicyGatePlugin:
             its input, so enforcement applies Tiers 2 and 4.
         config_model: ``PolicyGateConfig``, validated by the framework at
             intake.
-        binding_config_model: ``None`` — the gate takes no binding
-            configuration; the built gate's ``validate_binding`` admits
-            each binding (DR-33).
+        binding_config_model: ``PolicyBindingConfig`` — the corpora a
+            reasoner's binding names (DR-34), validated by the framework
+            when a registration is composed or written; the built gate's
+            ``validate_binding`` then admits the binding.
     """
 
     gate_id: str = POLICY_GATE_ID
     kind: GateKind = GateKind.LLM
     deterministic: bool = False
     config_model: type[BaseModel] | None = PolicyGateConfig
-    binding_config_model: type[BaseModel] | None = None
+    binding_config_model: type[BaseModel] | None = PolicyBindingConfig
 
     def __init__(self, settings: PolicyRagGateSettings | None = None) -> None:
         """Bind the plugin; defer reading settings to build time."""
@@ -173,45 +135,41 @@ class PolicyGatePlugin:
                 asks the gate to validate its binding.
 
         Returns:
-            The runtime ``PolicyGate``; ``close()`` releases its Postgres
-            connection and Elasticsearch client.
+            The runtime ``PolicyGate``; ``close()`` releases the providers
+            it built (the reference provider's Postgres connection and
+            Elasticsearch client).
 
         Raises:
             ValueError: Two composed reasoners ship a prompt template with
-                the same ``template_id``, or a template file is malformed.
+                the same ``template_id``, a template file is malformed, or
+                two provider plugins share an id.
         """
         settings = self.settings
         prompt_registry = YamlPromptRegistry(
             [p.prompts_dir for p in framework.reasoners]
         )
         profiles = reasoner_profiles(framework.reasoners)
-
-        retriever, resources = open_retriever(
-            postgres_dsn=framework.settings.postgres_dsn,
-            elasticsearch_url=settings.elasticsearch_url,
+        providers = ProviderRegistry(
+            discover_provider_plugins(),
+            services=ProviderServices(
+                postgres_dsn=framework.settings.postgres_dsn, settings=settings
+            ),
         )
-        try:
-            client = OpenAILLMClient(api_key=settings.openai_api_key or None)
-        except Exception:
-            for resource in resources:
-                resource.close()
-            raise
+        client = OpenAILLMClient(api_key=settings.openai_api_key or None)
 
         log.info(
             "policy_gate.built",
             component="policy_gate",
             prompt_templates=prompt_registry.registered_ids(),
             reasoner_ids=sorted(profiles),
+            providers=providers.provider_ids(),
             assets_root=str(settings.assets_root_path or ""),
-            embedding_model=EMBEDDING_MODEL,
-            cross_encoder_model=CROSS_ENCODER_MODEL,
         )
         return PolicyGate(
             client=client,
             prompt_registry=prompt_registry,
-            retriever=retriever,
+            providers=providers,
             profiles=profiles,
-            resources=resources,
             assets_root=settings.assets_root_path,
         )
 

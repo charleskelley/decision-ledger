@@ -4,18 +4,20 @@ The policy gate is a workspace member registered through the ``GatePlugin``
 protocol like any gate (DR-28). These tests pin:
 
 - the published plugin: protocol conformance, identity, its typed
-  ``config_model``, and the member's own ``decisionledger.gates`` entry point
-  that resolves to it;
+  ``config_model`` and ``binding_config_model`` (``PolicyBindingConfig``,
+  DR-34), and the member's own ``decisionledger.gates`` entry point that
+  resolves to it;
 - ``build``: everything the gate owns is constructed by the plugin, not the
   framework bootstrap — a per-reasoner profile, the prompt registry over
-  every composed reasoner's ``prompts_dir``, its own autocommit Postgres
-  connection on which it applies its own DDL before registering the pgvector
-  adapters, the Elasticsearch client from its own settings, the models, and
-  the LLM client — and a failed build releases what it opened;
+  every composed reasoner's ``prompts_dir``, the LLM client, and the
+  retrieval providers of the gate's own entry-point group, none of which is
+  opened until a binding names it;
 - ``evaluate`` on the paths that never reach the LLM: a missing retrieval
   query fails closed before retrieval, and a template render error fails
-  closed after a tenant-scoped retrieval, both with the snapshot, evidence,
-  and failure stage recorded.
+  closed after retrieving from every corpus the request's binding names,
+  with the per-corpus queries, the passages under the evidence contract,
+  the evidence references, and the failure stage recorded — two corpora at
+  two tiers included.
 
 Per project rules the LLM path itself is not unit-tested with mocked
 responses; the client here fails the test if it is ever called. The gate's
@@ -32,26 +34,34 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from app.gates import GATE_GROUP, GateKind, check_gate_plugin
 from app.settings import FrameworkSettings
 from core.actions import DecisionAction
+from core.exceptions import GateConfigError
 from core.gate import GateOutput, GateVerdict
 from core.gate_request import GateRequest
 from core.submission import GateContext
 from policy_rag_gate import plugin as policy_plugin
 from policy_rag_gate.config import PolicyGateConfig, ReasonerProfile
-from policy_rag_gate.gate import PolicyGate, _policy_gate_output
+from policy_rag_gate.corpus import PolicyBindingConfig
+from policy_rag_gate.gate import PolicyGate, _held, _policy_gate_output
 from policy_rag_gate.models import (
     Citation,
     PolicyGateExtra,
     PolicyGateSnapshot,
-    PolicyGateVerdict,
     PromptSnapshot,
+    TieredPolicyGateVerdict,
+    content_hash,
 )
-from policy_rag_gate.models.snippet import RetrievedSnippet
 from policy_rag_gate.plugin import PLUGIN, PolicyGatePlugin
 from policy_rag_gate.prompt_registry import YamlPromptRegistry
+from policy_rag_gate.providers import (
+    ProviderContractError,
+    ProviderRegistry,
+)
+from policy_rag_gate.providers.reference import PLUGIN as REFERENCE_PLUGIN
 from policy_rag_gate.settings import PolicyRagGateSettings
 
 # ---------------------------------------------------------------------------
@@ -65,6 +75,7 @@ def test_the_policy_gate_plugin_satisfies_the_gate_plugin_protocol():
     assert PLUGIN.kind == GateKind.LLM
     assert PLUGIN.deterministic is False
     assert PLUGIN.config_model is PolicyGateConfig
+    assert PLUGIN.binding_config_model is PolicyBindingConfig
 
 
 def test_the_members_entry_point_resolves_to_the_policy_gate_plugin():
@@ -86,50 +97,16 @@ def test_the_members_entry_point_resolves_to_the_policy_gate_plugin():
 
 @pytest.fixture
 def infra(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replace every infrastructure constructor the plugin uses with a fake."""
+    """Record the LLM client the plugin builds; the providers stay unbuilt."""
     calls: list[str] = []
-    pg_conn = MagicMock(name="gate_pg_conn")
-    es = MagicMock(name="es")
-    embed_model = MagicMock(name="embed_model")
-    cross_encoder = MagicMock(name="cross_encoder")
     llm_client = MagicMock(name="llm_client", model="fake-llm")
-
-    def _connect(dsn: str, *, autocommit: bool = False) -> MagicMock:
-        calls.append(f"connect:{dsn}:autocommit={autocommit}")
-        return pg_conn
-
-    def _apply_schema(conn: Any) -> None:
-        assert conn is pg_conn
-        calls.append("apply_schema")
-
-    def _register_vector(conn: Any) -> None:
-        assert conn is pg_conn
-        calls.append("register_vector")
-
-    def _elasticsearch(url: str) -> MagicMock:
-        calls.append(f"elasticsearch:{url}")
-        return es
-
-    monkeypatch.setattr(policy_plugin.psycopg, "connect", _connect)
-    monkeypatch.setattr(policy_plugin, "apply_schema", _apply_schema)
-    monkeypatch.setattr(policy_plugin, "register_vector", _register_vector)
-    monkeypatch.setattr(policy_plugin, "Elasticsearch", _elasticsearch)
-    monkeypatch.setattr(policy_plugin, "SentenceTransformer", lambda n: embed_model)
-    monkeypatch.setattr(policy_plugin, "CrossEncoder", lambda n: cross_encoder)
 
     def _openai_client(**kwargs: Any) -> MagicMock:
         calls.append(f"openai_client:{sorted(kwargs.items())}")
         return llm_client
 
     monkeypatch.setattr(policy_plugin, "OpenAILLMClient", _openai_client)
-    return {
-        "calls": calls,
-        "pg_conn": pg_conn,
-        "es": es,
-        "embed_model": embed_model,
-        "cross_encoder": cross_encoder,
-        "llm_client": llm_client,
-    }
+    return {"calls": calls, "llm_client": llm_client}
 
 
 def _framework(*reasoners: Any) -> Any:
@@ -156,29 +133,35 @@ def _plugin(assets_root: str = "") -> PolicyGatePlugin:
     )
 
 
-def test_build_opens_the_gates_own_connection_schema_index_client_and_models(
-    infra, fixture_reasoner
-):
-    framework = _framework(fixture_reasoner)
-
-    gate = _plugin().build(framework)
+def test_build_opens_no_provider_until_a_binding_names_one(infra, fixture_reasoner):
+    gate = _plugin().build(_framework(fixture_reasoner))
 
     assert isinstance(gate, PolicyGate)
-    # The gate's own DDL (vector extension, policy_rag schema) runs before
-    # the pgvector adapters are registered on its connection.
-    assert infra["calls"] == [
-        f"connect:{framework.settings.postgres_dsn}:autocommit=True",
-        "apply_schema",
-        "register_vector",
-        "elasticsearch:http://es.example:9200",
-        "openai_client:[('api_key', None)]",
-    ]
+    assert infra["calls"] == ["openai_client:[('api_key', None)]"]
     assert gate.client is infra["llm_client"]
-    retriever = gate.retriever
-    assert retriever._pg is infra["pg_conn"]
-    assert retriever._es is infra["es"]
-    assert retriever._model is infra["embed_model"]
-    assert retriever._cross_encoder is infra["cross_encoder"]
+    assert isinstance(gate.providers, ProviderRegistry)
+    # The member's own provider group is discovered, nothing is built yet.
+    assert gate.providers.provider_ids() == ["reference"]
+    assert gate.providers._built == {}
+
+
+def test_providers_are_built_with_the_frameworks_dsn_and_the_gates_settings(
+    infra, monkeypatch, fixture_reasoner, stub_provider
+):
+    seen: list[Any] = []
+
+    def _build(services: Any) -> Any:
+        seen.append(services)
+        return stub_provider
+
+    monkeypatch.setattr(REFERENCE_PLUGIN, "build", _build)
+    framework = _framework(fixture_reasoner)
+    gate = _plugin().build(framework)
+
+    assert gate.providers.get("reference") is stub_provider
+    (services,) = seen
+    assert services.postgres_dsn == framework.settings.postgres_dsn
+    assert services.settings.elasticsearch_url == "http://es.example:9200"
 
 
 def test_build_hands_the_settings_key_to_the_llm_client(infra, fixture_reasoner):
@@ -238,10 +221,6 @@ def test_build_hands_the_asset_root_to_the_gate(infra, fixture_reasoner, tmp_pat
     assert _plugin().build(_framework(fixture_reasoner)).assets_root is None
 
 
-def test_the_plugin_admits_bindings_through_the_gate_not_a_config_model():
-    assert PLUGIN.binding_config_model is None
-
-
 def test_a_blank_asset_root_is_no_asset_root():
     """A blank variable is unset, never the current directory."""
     assert PolicyRagGateSettings(assets_root="").assets_root_path is None
@@ -251,7 +230,7 @@ def test_a_blank_asset_root_is_no_asset_root():
     )
 
 
-def test_two_reasoners_shipping_one_template_id_fail_before_any_connection(
+def test_two_reasoners_shipping_one_template_id_fail_the_build(
     infra, fixture_reasoner, reasoner_for
 ):
     other = reasoner_for("other-reasoner")  # same prompts directory
@@ -262,42 +241,16 @@ def test_two_reasoners_shipping_one_template_id_fail_before_any_connection(
     assert infra["calls"] == []
 
 
-def test_a_failed_build_closes_the_connection_it_opened(
-    infra, monkeypatch, fixture_reasoner
+def test_close_releases_the_providers_the_gate_built(
+    infra, monkeypatch, fixture_reasoner, stub_provider
 ):
-    def _boom(name: str) -> None:
-        raise RuntimeError("model download failed")
-
-    monkeypatch.setattr(policy_plugin, "SentenceTransformer", _boom)
-
-    with pytest.raises(RuntimeError, match="model download failed"):
-        _plugin().build(_framework(fixture_reasoner))
-
-    infra["pg_conn"].close.assert_called_once()
-
-
-def test_a_failed_llm_client_closes_the_index_client_and_the_connection(
-    infra, monkeypatch, fixture_reasoner
-):
-    def _no_key(**_: Any) -> None:
-        raise RuntimeError("api_key must be set")
-
-    monkeypatch.setattr(policy_plugin, "OpenAILLMClient", _no_key)
-
-    with pytest.raises(RuntimeError, match="api_key"):
-        _plugin().build(_framework(fixture_reasoner))
-
-    infra["es"].close.assert_called_once()
-    infra["pg_conn"].close.assert_called_once()
-
-
-def test_close_releases_the_index_client_and_the_connection(infra, fixture_reasoner):
+    monkeypatch.setattr(REFERENCE_PLUGIN, "build", lambda _services: stub_provider)
     gate = _plugin().build(_framework(fixture_reasoner))
+    gate.providers.get("reference")
 
     gate.close()
 
-    infra["es"].close.assert_called_once()
-    infra["pg_conn"].close.assert_called_once()
+    assert stub_provider.closed is True
 
 
 # ---------------------------------------------------------------------------
@@ -314,57 +267,33 @@ class _ForbiddenClient:
         raise AssertionError("the LLM must not be called on this path")
 
 
-class _RecordingRetriever:
-    """Retriever fake returning two snippets from two conflict groups."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def retrieve(self, **kwargs: Any) -> tuple[list[RetrievedSnippet], str]:
-        self.calls.append(kwargs)
-        return [
-            _snippet("STUB-POLICY-A", "REGION_A"),
-            _snippet("STUB-POLICY-B", "REGION_B"),
-        ], "rrf_only"
-
-
-def _snippet(document_id: str, jurisdiction: str) -> RetrievedSnippet:
-    return RetrievedSnippet(
-        document_id=document_id,
-        title=f"Policy {document_id}",
-        version="1.0",
-        jurisdiction=jurisdiction,
-        section_path="2. Calibration Review",
-        text="Widgets with a thin history SHALL be held.",
-        relevance_score=0.5,
-        retrieval_path="rrf_only",
-    )
-
-
-def _gate(retriever: _RecordingRetriever, prompts_dir: Any) -> PolicyGate:
+def _gate(provider: Any, prompts_dir: Any) -> PolicyGate:
     return PolicyGate(
         client=_ForbiddenClient(),  # type: ignore[arg-type]
         prompt_registry=YamlPromptRegistry([prompts_dir]),
-        retriever=retriever,  # type: ignore[arg-type]
+        providers=ProviderRegistry.of(provider),
     )
 
 
-def _request(submission: Any, **config: Any) -> GateRequest:
+def _request(
+    submission: Any, *, binding: dict[str, Any] | None = None, **config: Any
+) -> GateRequest:
     context = GateContext(gate_id="policy", gate_config=config)
     return GateRequest(
         decision_id="dec-policy-001",
         submission=submission.model_copy(update={"gate_contexts": (context,)}),
         gate_context=context,
         budget_ms=1_000,
+        binding_config=binding
+        if binding is not None
+        else {"corpora": [{"corpus_id": "stub-policy", "tier": 1}]},
     )
 
 
 async def test_a_missing_retrieval_query_fails_closed_before_retrieving(
-    submission, fixture_reasoner
+    submission, fixture_reasoner, stub_provider
 ):
-    retriever = _RecordingRetriever()
-
-    output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
+    output = await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
         _request(submission, template_id="stub-v1", template_vars={})
     )
 
@@ -373,35 +302,33 @@ async def test_a_missing_retrieval_query_fails_closed_before_retrieving(
     assert output.deterministic is False
     assert output.verdict is None
     assert output.evidence == ()
-    assert retriever.calls == []
+    assert stub_provider.calls == []
     extra = PolicyGateExtra.model_validate(output.extra, strict=False)
     assert extra.failure == "missing_retrieval_query"
     snapshot = PolicyGateSnapshot.model_validate(output.evidence_snapshot, strict=False)
-    assert snapshot.retrieval_path == "skipped"
+    assert snapshot.snapshot_version == 2
+    assert snapshot.corpus_queries == []
+    assert snapshot.contexts == []
     assert snapshot.prompt_template_id == "stub-v1"
 
 
 async def test_a_blank_retrieval_query_fails_closed_before_retrieving(
-    submission, fixture_reasoner
+    submission, fixture_reasoner, stub_provider
 ):
-    retriever = _RecordingRetriever()
-
-    output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
+    output = await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
         _request(submission, template_id="stub-v1", retrieval_query="   ")
     )
 
     assert output.verdict is None
-    assert retriever.calls == []
+    assert stub_provider.calls == []
     extra = PolicyGateExtra.model_validate(output.extra, strict=False)
     assert extra.failure == "missing_retrieval_query"
 
 
-async def test_a_render_error_fails_closed_after_a_tenant_scoped_retrieval(
-    submission, fixture_reasoner
+async def test_a_render_error_fails_closed_after_retrieving_from_the_bound_corpus(
+    submission, fixture_reasoner, stub_provider
 ):
-    retriever = _RecordingRetriever()
-
-    output = await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
+    output = await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
         _request(
             submission,
             template_id="stub-v1",
@@ -410,52 +337,170 @@ async def test_a_render_error_fails_closed_after_a_tenant_scoped_retrieval(
             retrieval_query="calibration review",
             jurisdictions=["REGION_A", "REGION_B"],
             risk_tier="STANDARD",
-            corpus_version="stub-corpus-v1",
         )
     )
 
     assert output.verdict is None
-    (call,) = retriever.calls
-    assert call["query"] == "calibration review"
-    assert call["reasoner_id"] == "stub-reasoner"
-    assert call["jurisdictions"] == ["REGION_A", "REGION_B"]
-    assert call["risk_tier"] == "STANDARD"
+    (call,) = stub_provider.calls
+    assert call == {
+        "query": "calibration review",
+        "corpus_id": "stub-policy",
+        "tier": 1,
+        "k": 5,
+        "jurisdictions": ["REGION_A", "REGION_B"],
+        "risk_tier": "STANDARD",
+    }
     extra = PolicyGateExtra.model_validate(output.extra, strict=False)
     assert extra.failure == "render_error"
     assert extra.token_cost is None
     snapshot = PolicyGateSnapshot.model_validate(output.evidence_snapshot, strict=False)
     assert snapshot.retrieval_query == "calibration review"
-    assert [s.document_id for s in snapshot.retrieval_results] == [
+    (query,) = snapshot.corpus_queries
+    assert query.corpus_ref.corpus_id == "stub-policy"
+    assert query.state is not None
+    assert query.state.provenance_level == "pinned_version"
+    assert query.ranking_applied == "reranked"
+    assert query.returned == 2
+    assert [c.document_id for c in snapshot.contexts] == [
         "STUB-POLICY-A",
         "STUB-POLICY-B",
     ]
-    assert snapshot.retrieval_path == "rrf_only"
-    assert snapshot.corpus_version == "stub-corpus-v1"
+    assert snapshot.evidence_layout == "numbered_list"
+    assert snapshot.dedup_merged == 0
     assert snapshot.rendered_prompt == ""
-    # Evidence carries each retrieved snippet's jurisdiction, so the
-    # jurisdiction tier sees exactly the retrieved set.
+    # Evidence carries each rendered passage's jurisdiction, so the
+    # jurisdiction tier sees exactly the rendered set, and its digest.
     assert output.evidence_jurisdictions() == frozenset({"REGION_A", "REGION_B"})
     assert [e.source_id for e in output.evidence] == ["STUB-POLICY-A", "STUB-POLICY-B"]
+    assert [e.content_hash for e in output.evidence] == [
+        c.content_hash for c in snapshot.contexts
+    ]
 
 
-async def test_absent_filters_reach_the_retriever_as_no_filter(
-    submission, fixture_reasoner
+async def test_two_corpora_bound_at_two_tiers_are_rendered_by_tier(
+    submission, fixture_reasoner, fake_provider, fake_passage, tmp_path
 ):
-    retriever = _RecordingRetriever()
+    # A template with the conflict/gap protocol renders evidence in tiers.
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "tiered-v1.yaml").write_text(
+        "template_id: tiered-v1\nversion: 1.0.0\ndescription: d\n"
+        "evidence_layout: tiered_blocks\n"
+        "template: |\n  Case {widget_score}\n  {policy_snippets}\n",
+        encoding="utf-8",
+    )
+    provider = fake_provider(
+        {
+            "practice": [
+                fake_passage("PN-1", "Challenge thin histories."),
+                fake_passage("PN-2", "Shared passage."),
+            ],
+            "regulatory": [
+                fake_passage("REG-1", "Hold thin histories."),
+                fake_passage("REG-2", "Shared passage."),
+            ],
+        }
+    )
+    binding = {
+        "corpora": [
+            {"corpus_id": "practice", "tier": 2},
+            {"corpus_id": "regulatory", "tier": 1},
+        ],
+        "k_per_corpus": 2,
+    }
 
-    await _gate(retriever, fixture_reasoner.prompts_dir).evaluate(
+    output = await _gate(provider, prompts).evaluate(
+        _request(
+            submission,
+            binding=binding,
+            template_id="tiered-v1",
+            template_vars={},  # missing widget_score: fails closed at render
+            retrieval_query="thin history",
+        )
+    )
+
+    snapshot = PolicyGateSnapshot.model_validate(output.evidence_snapshot, strict=False)
+    assert [q.corpus_ref.corpus_id for q in snapshot.corpus_queries] == [
+        "practice",
+        "regulatory",
+    ]
+    assert [(c.tier, c.document_id) for c in snapshot.contexts] == [
+        (1, "REG-1"),
+        (1, "REG-2"),
+        (2, "PN-1"),
+    ]
+    assert snapshot.evidence_layout == "tiered_blocks"
+    assert snapshot.dedup_merged == 1
+    assert [q.merged for q in snapshot.corpus_queries] == [1, 0]
+
+
+async def test_absent_filters_reach_the_provider_as_no_filter(
+    submission, fixture_reasoner, stub_provider
+):
+    await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
         _request(submission, template_id="stub-v1", retrieval_query="q")
     )
 
-    (call,) = retriever.calls
+    (call,) = stub_provider.calls
     assert call["jurisdictions"] is None
     assert call["risk_tier"] is None
 
 
-async def test_an_unknown_template_propagates(submission, fixture_reasoner):
+async def test_an_unknown_template_propagates(
+    submission, fixture_reasoner, stub_provider
+):
     with pytest.raises(KeyError):
-        await _gate(_RecordingRetriever(), fixture_reasoner.prompts_dir).evaluate(
+        await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
             _request(submission, template_id="no-such-template", retrieval_query="q")
+        )
+
+
+async def test_a_request_without_a_binding_configuration_is_refused(
+    submission, fixture_reasoner, stub_provider
+):
+    with pytest.raises(GateConfigError, match="corpora"):
+        await _gate(stub_provider, fixture_reasoner.prompts_dir).evaluate(
+            _request(submission, binding={}, template_id="stub-v1", retrieval_query="q")
+        )
+    assert stub_provider.calls == []
+
+
+async def test_a_provider_error_propagates(submission, fixture_reasoner, fake_provider):
+    provider = fake_provider(
+        {"stub-policy": []}, retrieve_error=ConnectionError("index down")
+    )
+
+    with pytest.raises(ConnectionError, match="index down"):
+        await _gate(provider, fixture_reasoner.prompts_dir).evaluate(
+            _request(submission, template_id="stub-v1", retrieval_query="q")
+        )
+
+
+async def test_a_provider_breaking_the_evidence_contract_propagates(
+    submission, fixture_reasoner, fake_provider, fake_passage
+):
+    provider = fake_provider(
+        {"stub-policy": [fake_passage("DOC-A", "a")]},
+        tamper=lambda result: result.model_copy(
+            update={
+                "contexts": tuple(
+                    c.model_copy(update={"tier": 3}) for c in result.contexts
+                )
+            }
+        ),
+    )
+
+    with pytest.raises(ProviderContractError, match="tier 3"):
+        await _gate(provider, fixture_reasoner.prompts_dir).evaluate(
+            _request(submission, template_id="stub-v1", retrieval_query="q")
+        )
+
+
+def test_a_submission_can_no_longer_label_a_corpus_version():
+    # The gate records the state of every corpus it queries itself (DR-34).
+    with pytest.raises(ValidationError, match="corpus_version"):
+        PolicyGateConfig.model_validate(
+            {"template_id": "stub-v1", "corpus_version": "stub-corpus-v1"}
         )
 
 
@@ -464,15 +509,34 @@ async def test_an_unknown_template_propagates(submission, fixture_reasoner):
 # ---------------------------------------------------------------------------
 
 
-def test_a_verdict_becomes_the_universal_output_with_the_explanation_in_extra():
-    snippets = [
-        _snippet("STUB-POLICY-A", "REGION_A"),
-        _snippet("STUB-POLICY-B", "REGION_B").model_copy(
-            update={"relevance_score": -4.32, "retrieval_path": "reranked"}
+def _snapshot(contexts: list[Any]) -> PolicyGateSnapshot:
+    return PolicyGateSnapshot(
+        retrieval_query="calibration review",
+        corpus_queries=[],
+        contexts=contexts,
+        evidence_layout="tiered_blocks",
+        dedup_merged=0,
+        index_version="unknown",
+        model_version="m",
+        prompt_template_id="stub-v1",
+        prompt_template_version="1.0.0",
+        rendered_prompt="rendered",
+        prompt_snapshot=PromptSnapshot(
+            template_id="stub-v1", version="1.0.0", template_text="t"
         ),
-    ]
+        template_vars={},
+    )
+
+
+def test_a_verdict_becomes_the_universal_output_with_the_explanation_in_extra(
+    retrieved_context,
+):
+    negative = retrieved_context.model_copy(
+        update={"scores": {"rerank": -4.32}, "document_id": "STUB-POLICY-B"}
+    )
+    contexts = [retrieved_context, negative]
     citation = Citation(policy_id="STUB-POLICY-A", snippet="text", relevance="why")
-    verdict = PolicyGateVerdict(
+    verdict = TieredPolicyGateVerdict(
         permitted_actions=[DecisionAction.CHALLENGE],
         required_controls=["step_up"],
         rationale="Thin history; step up.",
@@ -480,28 +544,22 @@ def test_a_verdict_becomes_the_universal_output_with_the_explanation_in_extra():
         confidence=0.8,
         escalate_to_human=False,
         escalation_reason=None,
+        governing_corpus_id="stub-policy",
+        conflict_detected=False,
+        evidence_sufficient=True,
     )
-    snapshot = PolicyGateSnapshot(
-        retrieval_query="calibration review",
-        retrieval_results=snippets,
-        retrieval_path="reranked",
-        index_version="unknown",
-        model_version="m",
-        prompt_template_id="stub-v1",
-        prompt_template_version="1.0.0",
-        corpus_version="c",
-        rendered_prompt="rendered",
-        prompt_snapshot=PromptSnapshot(
-            template_id="stub-v1", version="1.0.0", template_text="t"
-        ),
-        template_vars={},
-    )
+    snapshot = _snapshot(contexts)
     extra = PolicyGateExtra(
-        rationale=verdict.rationale, citations=[citation], retrieval_ms=2.0
+        rationale=verdict.rationale,
+        citations=[citation],
+        retrieval_ms=2.0,
+        governing_corpus_id="stub-policy",
+        conflict_detected=False,
+        evidence_sufficient=True,
     )
 
     output = _policy_gate_output(
-        verdict=verdict, snippets=snippets, snapshot=snapshot, extra=extra
+        verdict=verdict.universal(), contexts=contexts, snapshot=snapshot, extra=extra
     )
 
     # Only the universal verdict is stored; the explanation rides in extra.
@@ -513,4 +571,43 @@ def test_a_verdict_becomes_the_universal_output_with_the_explanation_in_extra():
         PolicyGateSnapshot.model_validate(output.evidence_snapshot, strict=False)
         == snapshot
     )
-    assert output.evidence_jurisdictions() == frozenset({"REGION_A", "REGION_B"})
+    assert [e.content_hash for e in output.evidence] == [
+        content_hash(retrieved_context.text)
+    ] * 2
+
+
+def test_a_held_verdict_keeps_what_the_model_returned_in_extra(retrieved_context):
+    verdict = TieredPolicyGateVerdict(
+        permitted_actions=[DecisionAction.ALLOW],
+        required_controls=[],
+        rationale="Passages disagree.",
+        citations=[],
+        confidence=0.7,
+        escalate_to_human=False,
+        escalation_reason=None,
+        governing_corpus_id="stub-policy",
+        conflict_detected=True,
+        evidence_sufficient=True,
+    )
+    held, hold = _held(verdict)
+    extra = PolicyGateExtra(
+        rationale=verdict.rationale,
+        governing_corpus_id="stub-policy",
+        conflict_detected=True,
+        evidence_sufficient=True,
+        protocol_hold=hold,
+        verdict_as_returned=verdict.universal(),
+    )
+
+    output = _policy_gate_output(
+        verdict=held,
+        contexts=[retrieved_context],
+        snapshot=_snapshot([retrieved_context]),
+        extra=extra,
+    )
+
+    assert output.verdict is not None
+    assert output.verdict.permitted_actions == [DecisionAction.HOLD]
+    stored = PolicyGateExtra.model_validate(output.extra, strict=False)
+    assert stored.protocol_hold == "conflict_detected"
+    assert stored.verdict_as_returned == verdict.universal()
