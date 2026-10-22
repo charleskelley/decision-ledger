@@ -20,7 +20,7 @@ class ExamplePlugin:
 
     Attributes:
         registration: ``EXAMPLE_REGISTRATION``.
-        prompts_dir: ``prompts/`` (``example-v1.yaml``).
+        prompts_dir: ``prompts/`` (``example-v1.yaml``, ``example-v2.yaml``).
         corpus_dir: ``corpus/`` (three Markdown policy documents).
     """
 

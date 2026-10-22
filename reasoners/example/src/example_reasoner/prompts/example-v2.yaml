@@ -1,0 +1,61 @@
+# example-v2 adds the conflict/gap protocol of DR-34: the policy gate renders
+# the retrieved widget evidence in blocks by authority tier (evidence_layout:
+# tiered_blocks) and asks for a TieredPolicyGateVerdict, which names the
+# governing corpus and reports evidence that disagrees or does not cover the
+# inspection; the gate holds such an inspection for a widget steward. The
+# inspection section and its variables are example-v1's. Prompt files are
+# immutable: example-v1 stays on disk, and the assembler names the active one
+# (example_reasoner/assembler.py).
+template_id: example-v2
+version: 2.0.0
+description: >
+  Example reasoner policy gate template with the conflict/gap protocol.
+  Evaluates one widget inspection against widget policy evidence grouped by
+  authority tier and returns a structured verdict with citations, the
+  governing corpus, and whether the evidence disagrees or falls short.
+evidence_layout: tiered_blocks
+
+system: >-
+  You evaluate widget inspections for the policy gate of an example
+  reasoner. The widgets are imaginary; ground every judgment in the
+  retrieved policy evidence only. Respond with a TieredPolicyGateVerdict
+  that conforms strictly to the schema.
+
+template: |
+  Evaluate the widget inspection below against the retrieved policy evidence.
+
+  ## Widget Inspection
+
+  Widget score: {widget_score}
+  Region: {region}
+  Wobble (0 steady, 1 shaking apart): {wobble}
+  Gizmo misalignment (mm): {misalignment_mm}
+  Prior inspections: {prior_inspections}
+  Thin history: {thin_history}
+
+  ## Retrieved Policy Evidence
+
+  The evidence is grouped into blocks by authority tier. Tier 1 is the highest
+  authority, and a passage from a lower tier never overrides one from a higher
+  tier. Each passage is labeled with its corpus, tier, document, version, and
+  section.
+
+  {policy_snippets}
+
+  ## Evidence Protocol
+
+  Name the corpus whose passage governs your decision (the highest-tier corpus
+  with a passage on point) as governing_corpus_id, or null if no passage is on
+  point. Set conflict_detected to true if passages on point disagree about
+  this widget, and evidence_sufficient to false if they do not cover it. If
+  either holds, recommend a steward's review and say why: the widget will be
+  held.
+
+  ## Decision Instructions
+
+  Based solely on the retrieved policy evidence above, decide which actions
+  the policy permits for this widget (ALLOW, CHALLENGE, HOLD, BLOCK), which
+  controls must accompany them, a concise rationale grounded in cited
+  evidence, the citations, your confidence (0.0 to 1.0), and whether a widget
+  steward should review it. If the evidence is ambiguous, lower your
+  confidence and recommend review.

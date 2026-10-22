@@ -15,11 +15,11 @@ every part of the reasoner contract fits on a screen.
 | --- | --- |
 | `events.py` | The reasoner's own event (`WidgetEvent`); it names the widget as its native subject, `(example-widget, widget_id)`, and derives `entity_id` (a UUID5 of `widget_id`, type `widget`) under that declared namespace. |
 | `scorer.py` | A pure scorer: `widget_score = logistic(-3 + 4·wobble + 0.5·misalignment_mm)` and the complete feature snapshot. |
-| `registry.py` | The registration: the RAG policy gate (advisory), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, the `example-widget` native namespace, and the enforcement profile (Tier 3 on `thin_history`; Tier 5 on REGION_A vs. REGION_B evidence). |
+| `registry.py` | The registration: the RAG policy gate (advisory, bound to the corpus `example-policy` at tier 1), the `low-score` (< 0.2 → record ALLOW) and `high-score` (> 0.9 → record BLOCK) bypass rules, the `example-widget` native namespace, and the enforcement profile (Tier 3 on `thin_history`; Tier 5 on REGION_A vs. REGION_B evidence). |
 | `assembler.py` | The handoff: records a widget under the bypass rule that holds, or asks the ledger to gate it, addressing the policy gate on every submission. |
 | `pipeline.py` | `decide_widget(event, client=...)`: score, assemble, submit through a `LedgerClient`. |
 | `plugin.py` | What a ledger deployment discovers: the registration, `prompts/`, and `corpus/`. |
-| `prompts/example-v1.yaml` | The policy gate's template (immutable; a change is a new file). |
+| `prompts/example-v1.yaml`, `prompts/example-v2.yaml` | The policy gate's templates (immutable; a change is a new file). The assembler sends `example-v2`, which renders the evidence by authority tier with the conflict/gap protocol (DR-34). |
 | `corpus/` | Three policy documents: a REGION_A release policy, REGION_B guidance, and a GLOBAL escalation standard. |
 | `eval/` | The `EvalAdapter`, an in-process driver, and its datasets (consistency; robustness schema-failure and fallback). |
 | `__main__.py` | A CLI that prints sample submissions and NDJSON batches and submits widgets. |
@@ -55,7 +55,9 @@ registers through the ledger's registration file instead
 `schemas/submission-v2.json` and the `conformance/` suite.
 
 Infrastructure: none of its own. Its gated widgets go to the RAG policy
-gate, which needs its corpus indexed (`make prepare-example`).
+gate, which needs its corpus loaded as `example-policy` (`make
+prepare-example`) before a ledger that serves the example starts: the gate
+refuses a binding to a corpus that is not loaded.
 
 ## The subject
 
@@ -90,7 +92,7 @@ high (BLOCK) records over 50 widgets.
 
 | Target | What it does |
 | --- | --- |
-| `make build-policy-index-example-reasoner` | Index `corpus/` into the RAG policy gate under `reasoner_id=example-reasoner` |
+| `make build-policy-index-example-reasoner` | Load `corpus/` into the RAG policy gate as `example-policy`, the corpus the example's binding names |
 | `make prepare-example` | The same (the scorer needs no training) |
 | `make eval-example` | The framework eval harness with this adapter (the shadow dimension re-decides recorded widgets through the LLM gate: paid) |
 | `make sample-example BAND=mid` | Print one wire submission |

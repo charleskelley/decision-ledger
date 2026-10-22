@@ -10,9 +10,11 @@ the ledger to *gate* the widget, with no proposal.
 Every submission addresses the policy gate — recorded ones too, so any
 recorded decision can later be re-decided by the gate offline (shadow
 evaluation). The gate context names the prompt template the example ships
-(``prompts/example-v1.yaml``), renders its variables, and carries the
-retrieval query and jurisdiction filter: the policy gate runs retrieval
-itself (DR-28), over the example's three-document corpus.
+(``prompts/example-v2.yaml``, which renders the evidence by authority tier
+with the conflict/gap protocol of DR-34; ``example-v1`` stays selectable),
+renders its variables, and carries the retrieval query and jurisdiction
+filter: the policy gate runs retrieval itself (DR-28), over the corpus the
+example's binding names (``example-policy``, its three documents).
 """
 
 from __future__ import annotations
@@ -31,10 +33,8 @@ if TYPE_CHECKING:
     from example_reasoner.events import WidgetEvent
     from example_reasoner.scorer import WidgetScore
 
-#: The prompt template the example ships for the policy gate.
-TEMPLATE_ID = "example-v1"
-#: Version label of the example's corpus, recorded by the policy gate.
-CORPUS_VERSION = "example-v1"
+#: The prompt template the example's gate context names (DR-34's protocol).
+TEMPLATE_ID = "example-v2"
 #: Jurisdiction of the corpus document that applies in every region.
 GLOBAL_JURISDICTION = "GLOBAL"
 
@@ -82,7 +82,6 @@ def policy_gate_context(event: WidgetEvent, score: WidgetScore) -> GateContext:
             "calibration review, sprocket inspection, escalation"
         ),
         "jurisdictions": [event.region, GLOBAL_JURISDICTION],
-        "corpus_version": CORPUS_VERSION,
     }
     return GateContext(gate_id="policy", gate_config=gate_config)
 
