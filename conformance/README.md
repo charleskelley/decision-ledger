@@ -1,13 +1,13 @@
 # DecisionLedger conformance suite
 
 A pytest suite that checks a running DecisionLedger instance against the
-ledger's HTTP contract (DR-31, DR-32, DR-33) — status codes, receipts,
+ledger's HTTP contract (DR-31 to DR-34) — status codes, receipts,
 problem documents and their stable codes, authentication and tenant
-isolation, batch semantics, the subject timeline, replay, registrations
-(read and written over HTTP), gates, human resolutions, identity
-resolution, and the identity layer every decision records. It talks HTTP only (`httpx`) and imports no DecisionLedger
-code, so a reasoner team can run it against any instance instead of reading
-the implementation.
+isolation, batch semantics, the subject timeline, replay, verify,
+registrations (read and written over HTTP), gates, human resolutions,
+identity resolution, and the identity layer every decision records. It
+talks HTTP only (`httpx`) and imports no DecisionLedger code, so a reasoner
+team can run it against any instance instead of reading the implementation.
 
 The payloads under `examples/` are the example reasoner's
 (`reasoners/example`), one per route, except `registration.json`, the probe
@@ -37,6 +37,7 @@ regenerating them from `python -m example_reasoner sample`.
 | `test_refusals.py` | A body that is not a submission, a record without its citation, and an unregistered bypass rule are 422; no key or an unknown key is 401; another reasoner's key cannot write or read; the operator key writes no decision; errors outside the API are problem documents too |
 | `test_batch_and_entities.py` | A batch records its records and rejects its gated line (`BATCH_RECORD_ONLY`); an empty batch is 422; the timeline lists the recorded decisions and needs a UUID |
 | `test_resources_and_resolutions.py` | The registrations resource serves the version every receipt names; the gates resource describes each composed gate; the operator resolves a held decision once, and only a held or challenged one |
+| `test_verify.py` | `POST /api/v1/decisions/{id}/verify` answers 200 for a gated decision: one entry per evidence reference of each gate that ran, `escrow` in `present` / `missing` / `none` (`present` wherever an artifact is named) and `status` in `intact` / `source_changed` / `source_unavailable` / `not_verifiable`, a summary that counts them; a record cites only what its gates that ran cite (nothing, when none ran); `?live=true` is accepted; verify changes nothing; another reasoner's key and an unknown id are 404 |
 | `test_identity.py` | `GET /api/v1/identity/resolve` is 404 `IDENTITY_UNRESOLVED` for a subject nobody knows and 422 without both parameters; a decision that names a native subject records it in the identity's provenance, and one that names none is recorded too, both unresolved under the reasoner's own `entity_id`; the timeline says which subject each decision is about, and `include_related` with a type nothing emits adds nothing |
 | `test_registrations.py` | With the operator key, `PUT /api/v1/reasoners/{id}` registers the probe reasoner (201 the first time, 200 after) as `source: api`; an unchanged registration keeps its version; a changed one gets a new version and the old one stays readable; a reasoner key is 403 `OPERATOR_REQUIRED` and no key 401; a plugin's or the file's reasoner is 409 `REGISTRATION_SOURCE_IMMUTABLE`; a body that is not a registration for the path is 422 `REGISTRATION_INVALID`, a mandatory gate the instance does not compose 422 `GATE_BINDING_REFUSED`, a native namespace declared differently 422 `NATIVE_NAMESPACE_CONFLICT`, and a refused write stores nothing |
 
