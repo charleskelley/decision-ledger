@@ -1,0 +1,62 @@
+# mock-stream-v1 is the stream mock's policy gate template (DR-35). The gate
+# renders the retrieved practice notes in blocks by authority tier
+# (evidence_layout: tiered_blocks) and asks for a TieredPolicyGateVerdict with
+# the conflict/gap protocol of DR-34: it names the governing corpus and
+# reports evidence that disagrees or does not cover the transfer, and the gate
+# holds such a transfer for review. Prompt files are immutable: a change is a
+# new file (mock-stream-v2.yaml), and the assembler names the active one
+# (mock_stream_reasoner/assembler.py).
+template_id: mock-stream-v1
+version: "1.0.0"
+description: >
+  Stream mock policy gate template with the conflict/gap protocol. Evaluates
+  one transfer of an imaginary account, with its sliding-window activity,
+  against practice notes grouped by authority tier and returns a structured
+  verdict with citations, the governing corpus, and whether the evidence
+  disagrees or falls short.
+evidence_layout: tiered_blocks
+
+system: >-
+  You review transfers for the policy gate of a mock stream reasoner. The
+  accounts and transfers are imaginary; ground every judgment in the
+  retrieved practice notes only. Respond with a TieredPolicyGateVerdict that
+  conforms strictly to the schema.
+
+template: |
+  Evaluate the transfer below against the retrieved practice notes.
+
+  ## Transfer
+
+  Activity score (0 steady, 1 surge): {activity_score}
+  Amount: {amount}
+  Account baseline amount: {baseline_amount}
+  Amount to baseline ratio: {amount_ratio}
+  Transfers in the last ten minutes: {window_events}
+  Prior transfers on record: {prior_events}
+  Thin history: {thin_history}
+
+  ## Retrieved Practice Notes
+
+  The evidence is grouped into blocks by authority tier. Tier 1 is the highest
+  authority, and a passage from a lower tier never overrides one from a higher
+  tier. Each passage is labeled with its corpus, tier, document, version, and
+  section.
+
+  {policy_snippets}
+
+  ## Evidence Protocol
+
+  Name the corpus whose passage governs your decision (the highest-tier corpus
+  with a passage on point) as governing_corpus_id, or null if no passage is on
+  point. Set conflict_detected to true if passages on point disagree about
+  this transfer, and evidence_sufficient to false if they do not cover it. If
+  either holds, recommend a review and say why: the transfer will be held.
+
+  ## Decision Instructions
+
+  Based solely on the retrieved practice notes above, decide which actions the
+  practice permits for this transfer (ALLOW, CHALLENGE, HOLD, BLOCK), which
+  controls must accompany them, a concise rationale grounded in cited
+  evidence, the citations, your confidence (0.0 to 1.0), and whether a
+  reviewer should look at it. If the evidence is ambiguous, lower your
+  confidence and recommend review.

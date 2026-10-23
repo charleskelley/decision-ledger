@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# mock-stream-reasoner — the real-time event scorer pattern (DR-35)
+# =============================================================================
+#
+# A uv workspace member and one of the reference reasoner patterns: a mock
+# that demonstrates the framework's contracts in place, not a product. It
+# scores an in-memory stream of transfers with per-account sliding state,
+# records the clear bands under its bypass rules, and asks the ledger to gate
+# the middle through the RAG policy gate (advisory, its own corpus at tier 2).
+# It runs as its own FastAPI service and CLI and reaches the ledger over HTTP;
+# the ledger registers it by its plugin, by a registration file, or by a PUT
+# with the plugin excluded. The framework never depends on it; deployment
+# composition lives in the root `reasoners` dependency group. Discovery
+# happens through the two entry points below, whose name must equal the
+# registration's `reasoner_id`.
+
+[project]
+name = "mock-stream-reasoner"
+version = "0.1.0"
+description = "Reference reasoner pattern for DecisionLedger: a real-time event scorer (mock)."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "fastapi>=0.111,<1",
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+    "uvicorn>=0.30,<1",
+]
+
+[project.entry-points."decisionledger.reasoners"]
+mock-stream-reasoner = "mock_stream_reasoner.plugin:PLUGIN"
+
+[project.entry-points."decisionledger.eval_adapters"]
+mock-stream-reasoner = "mock_stream_reasoner.eval.adapter:ADAPTER"
+
+[project.scripts]
+mock-stream-reasoner = "mock_stream_reasoner.__main__:main"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mock_stream_reasoner"]

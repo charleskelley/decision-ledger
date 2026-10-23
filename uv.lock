@@ -18,6 +18,7 @@ members = [
     "decisionledger-gate-rules",
     "decisionledger-mcp",
     "example-reasoner",
+    "mock-stream-reasoner",
 ]
 
 [[package]]
@@ -650,6 +651,7 @@ integrations = [
 reasoners = [
     { name = "ato-reasoner" },
     { name = "example-reasoner" },
+    { name = "mock-stream-reasoner" },
 ]
 
 [package.metadata]
@@ -695,6 +697,7 @@ integrations = [{ name = "decisionledger-mcp", editable = "integrations/mcp" }]
 reasoners = [
     { name = "ato-reasoner", editable = "reasoners/account_takeover" },
     { name = "example-reasoner", editable = "reasoners/example" },
+    { name = "mock-stream-reasoner", editable = "reasoners/mock_stream" },
 ]
 
 [[package]]
@@ -1885,6 +1888,33 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/29/33/c225eaf898634bdda489a6766fc35d1683c640bffe0e0acd10646b13536d/mkdocstrings_python-2.0.3.tar.gz", hash = "sha256:c518632751cc869439b31c9d3177678ad2bfa5c21b79b863956ad68fc92c13b8", size = 199083, upload-time = "2026-02-20T10:38:36.368Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/28/79f0f8de97cce916d5ae88a7bee1ad724855e83e6019c0b4d5b3fabc80f3/mkdocstrings_python-2.0.3-py3-none-any.whl", hash = "sha256:0b83513478bdfd803ff05aa43e9b1fca9dd22bcd9471f09ca6257f009bc5ee12", size = 104779, upload-time = "2026-02-20T10:38:34.517Z" },
+]
+
+[[package]]
+name = "mock-stream-reasoner"
+version = "0.1.0"
+source = { editable = "reasoners/mock_stream" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "structlog" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "fastapi", specifier = ">=0.111,<1" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "structlog", specifier = ">=24.1,<25" },
+    { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
 [[package]]

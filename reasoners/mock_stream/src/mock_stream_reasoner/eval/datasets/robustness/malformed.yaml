@@ -1,0 +1,15 @@
+# Robustness sub-check — schema failure. When the policy gate returns no
+# usable verdict, enforcement Tier 1 must hold the decision. The driver
+# passes each event through the stream and the account's state, forces gate
+# mode (a transfer in a band would be recorded), and enforces a policy-gate
+# record with verdict=None; no gate and no model are called. Threshold: zero
+# tolerance. Dated after the consistency scenarios, so no event trails the
+# stream's watermark.
+
+cases:
+  - case_id: ms-malformed-fresh-large
+    event: {event_id: evt-ms-malformed-1, timestamp: "2026-09-05T09:00:00Z", account_id: acct-ms-malformed-1, amount: 420.0}
+    expected_action: HOLD
+  - case_id: ms-malformed-small
+    event: {event_id: evt-ms-malformed-2, timestamp: "2026-09-05T09:05:00Z", account_id: acct-ms-malformed-2, amount: 40.0}
+    expected_action: HOLD

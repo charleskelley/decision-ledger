@@ -1,0 +1,49 @@
+# Consistency scenarios for the stream mock.
+#
+# The mock's features are stateful: each transfer is scored against its
+# account's sliding window and baseline (mock_stream_reasoner/state.py). The
+# window runs on event time and the baseline is the mean of every earlier
+# transfer, so a trigger whose precursors arrive in another order (within the
+# source's five-minute lateness bound) has the same features and the same
+# decision. These scenarios pin that property through the whole pipeline:
+# the source, the windows, the scorer, the assembler, and the ledger. The
+# driver resets the state before each ordering. Both triggers fall in a
+# bypass band, so they are recorded; precursors may ask the scripted policy
+# gate (no model is called).
+#
+# Expected stable actions: ALLOW (a steady account), BLOCK (a surge).
+
+scenarios:
+  - scenario_id: ms-steady-account
+    description: >
+      Three transfers near the account's baseline within four minutes, then a
+      fourth half an hour later: the trigger has three prior transfers, none
+      in its window, and is recorded ALLOW under steady-activity in every
+      ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &steady_1 {event_id: evt-ms-steady-1, timestamp: "2026-09-01T09:00:00Z", account_id: acct-ms-steady, amount: 80.0}
+          - &steady_2 {event_id: evt-ms-steady-2, timestamp: "2026-09-01T09:02:00Z", account_id: acct-ms-steady, amount: 90.0}
+          - &steady_3 {event_id: evt-ms-steady-3, timestamp: "2026-09-01T09:04:00Z", account_id: acct-ms-steady, amount: 85.0}
+          - &steady_t {event_id: evt-ms-steady-trigger, timestamp: "2026-09-01T09:30:00Z", account_id: acct-ms-steady, amount: 88.0}
+      - ordering_id: reversed-precursors
+        events: [*steady_3, *steady_2, *steady_1, *steady_t]
+
+  - scenario_id: ms-surge-account
+    description: >
+      Six transfers of 300 within four minutes, then a seventh of 450: the
+      trigger has six transfers in its window and is recorded BLOCK under
+      activity-surge in every ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &surge_1 {event_id: evt-ms-surge-1, timestamp: "2026-09-01T10:00:00Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_2 {event_id: evt-ms-surge-2, timestamp: "2026-09-01T10:00:45Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_3 {event_id: evt-ms-surge-3, timestamp: "2026-09-01T10:01:30Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_4 {event_id: evt-ms-surge-4, timestamp: "2026-09-01T10:02:15Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_5 {event_id: evt-ms-surge-5, timestamp: "2026-09-01T10:03:00Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_6 {event_id: evt-ms-surge-6, timestamp: "2026-09-01T10:03:45Z", account_id: acct-ms-surge, amount: 300.0}
+          - &surge_t {event_id: evt-ms-surge-trigger, timestamp: "2026-09-01T10:04:30Z", account_id: acct-ms-surge, amount: 450.0}
+      - ordering_id: reversed-precursors
+        events: [*surge_6, *surge_5, *surge_4, *surge_3, *surge_2, *surge_1, *surge_t]
