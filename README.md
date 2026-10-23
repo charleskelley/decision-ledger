@@ -272,9 +272,10 @@ make eval-gate-policy_rag REASONER=ato-reasoner
 ```
 
 The ledger refuses to start until every corpus a served registration binds
-is loaded: with `DECISIONLEDGER_REASONERS` blank it serves ATO and the example
-reasoner, whose bindings name `ato-policy` and `example-policy`, and
-`make prepare-reasoners` loads both.
+is loaded: with `DECISIONLEDGER_REASONERS` blank it serves every installed
+reasoner — ATO, the example reasoner, and the stream mock — whose bindings
+name `ato-policy`, `example-policy`, and `mock-stream-practices`, and
+`make prepare-reasoners` loads them all.
 
 All infrastructure runs locally via `docker compose up`; no cloud account is
 required. Two provider keys are needed: `OPENAI_API_KEY` for the RAG policy

@@ -1,0 +1,21 @@
+# Robustness sub-check — fallback. When the policy gate fails (any
+# fallback_kind: the driver swaps in a gate that raises), the ledger fails it
+# closed and the decision holds (DR-29). Each trigger scores between the
+# bands, so the mock asks for the gate and the gate is invoked: a fresh
+# account's large first transfer, and an established account's transfer six
+# times its baseline (primed by three steady transfers). No model is called.
+# Threshold: zero tolerance.
+
+cases:
+  - case_id: ms-fallback-fresh-large
+    event: {event_id: evt-ms-fallback-1, timestamp: "2026-09-05T10:00:00Z", account_id: acct-ms-fallback-1, amount: 450.0}
+    fallback_kind: llm_5xx
+    expected_action: HOLD
+  - case_id: ms-fallback-established-large
+    priming_events:
+      - {event_id: evt-ms-fallback-2a, timestamp: "2026-09-05T10:10:00Z", account_id: acct-ms-fallback-2, amount: 100.0}
+      - {event_id: evt-ms-fallback-2b, timestamp: "2026-09-05T10:30:00Z", account_id: acct-ms-fallback-2, amount: 110.0}
+      - {event_id: evt-ms-fallback-2c, timestamp: "2026-09-05T10:50:00Z", account_id: acct-ms-fallback-2, amount: 90.0}
+    event: {event_id: evt-ms-fallback-2, timestamp: "2026-09-05T11:10:00Z", account_id: acct-ms-fallback-2, amount: 600.0}
+    fallback_kind: retrieval_error
+    expected_action: HOLD

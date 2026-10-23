@@ -1,0 +1,61 @@
+# The stream mock's registration, for a DecisionLedger deployment that does
+# not install (or leaves out) its plugin. Generated from
+# mock_stream_reasoner/registry.py by
+#
+#   uv run python -m mock_stream_reasoner registration-yaml
+#
+# (make registration-mock_stream); do not edit it by hand: a test holds it to
+# the module's registration_version. Point a ledger at it with
+#
+#   DECISIONLEDGER_REGISTRATIONS=reasoners/mock_stream/registration.yaml
+#
+# with the plugin excluded (DECISIONLEDGER_REASONERS naming the plugins to
+# keep), or PUT the same entry as JSON to /api/v1/reasoners/mock-stream-reasoner
+# with the operator key. A ledger that composes the RAG policy gate needs the
+# mock's prompts and corpus under its asset root
+# (POLICY_RAG_GATE_ASSETS_ROOT/mock-stream-reasoner/, a copy of
+# src/mock_stream_reasoner/assets/) and the corpus loaded as
+# mock-stream-practices, the corpus the binding names, before it starts.
+registrations:
+- reasoner_id: mock-stream-reasoner
+  reasoner_name: Mock Stream Reasoner
+  gates:
+  - gate_id: policy
+    mandatory: false
+    config:
+      corpora:
+      - corpus_id: mock-stream-practices
+        provider: reference
+        tier: 2
+        min_provenance: pinned_version
+      k_per_corpus: 5
+  bypass_rules:
+  - rule_id: steady-activity
+    version: '1'
+    description: 'activity_score below 0.2: the transfer fits the account''s recent
+      activity; record ALLOW without the policy gate'
+    predicate:
+      kind: compare
+      field: label_value
+      op: lt
+      value: 0.2
+    action: ALLOW
+  - rule_id: activity-surge
+    version: '1'
+    description: 'activity_score above 0.9: the account is sending a burst of transfers
+      far above its baseline; record BLOCK without the policy gate'
+    predicate:
+      kind: compare
+      field: label_value
+      op: gt
+      value: 0.9
+    action: BLOCK
+  recordable_actions:
+  - ALLOW
+  - BLOCK
+  native_namespaces:
+  - native_namespace: mock-stream-account
+    namespace_uuid: 6a6646c1-01bb-40f2-949c-d641b1ff6733
+    entity_type: account
+  novel_entity_feature: thin_history
+  jurisdiction_conflict_groups: []

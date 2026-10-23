@@ -18,8 +18,9 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 ```bash
 # 1. Install the framework and every workspace member: the reasoners
-#    (ato-reasoner, example-reasoner), the gates (rules, RAG policy), and the
-#    MCP integration, with their entry points
+#    (ato-reasoner, example-reasoner, and the stream mock,
+#    mock-stream-reasoner), the gates (rules, RAG policy), and the MCP
+#    integration, with their entry points
 uv sync
 
 # 2. Start Postgres (framework), Elasticsearch (included from
@@ -28,24 +29,27 @@ uv sync
 docker compose up -d
 
 # 3. Prepare the reasoners: load each policy corpus into the RAG policy gate
-#    under the corpus id its binding names (ato-policy, example-policy), and
-#    train ATO's scorer if the artifact is missing. The ledger does not start
-#    until every corpus a served registration binds is loaded.
-make prepare-reasoners   # = make prepare-account_takeover prepare-example
+#    under the corpus id its binding names (ato-policy, example-policy,
+#    mock-stream-practices), and train ATO's scorer if the artifact is
+#    missing. The ledger does not start until every corpus a served
+#    registration binds is loaded.
+make prepare-reasoners   # = make prepare-account_takeover prepare-example prepare-mock_stream
 
 # 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
-# Expected: ['ato-reasoner', 'example-reasoner']
+# Expected: ['ato-reasoner', 'example-reasoner', 'mock-stream-reasoner']
 
 # 5. Give the ledger API keys (in .env, or the environment): one per reasoner
 #    and the operator's. Every /api/v1 route needs one in X-DecisionLedger-Key.
-export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key"
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key"
 export DECISIONLEDGER_OPERATOR_KEY=op-key
 
 # 6. Run the ledger API (application factory; serves the framework's routes
 #    only — reasoners run as their own services or in process)
 uv run uvicorn --factory app.main:create_app --reload     # or: make serve
 ```
+
+Rule sets for the rules gate are deployment config, read from one directory when the ledger builds the gate. `make prepare-rulesets` stages every member's `rulesets/` in `outputs/stage/rulesets`, afresh (an empty directory while no member ships one); to serve them, `export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets` before `make serve`. The rules gate refuses a directory that does not exist, and the ledger does not start; left blank, the rules gate has no rule sets and holds every decision routed to it.
 
 In a second shell:
 
@@ -151,6 +155,37 @@ make eval-gate-policy_rag REASONER=ato-reasoner
 
 To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example) or over the API with the operator key (`PUT /api/v1/reasoners/{reasoner_id}`; see [Registration](../design/registration.md)). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
 
+### A reasoner without a plugin
+
+A reasoner the ledger does not compose as a plugin runs as its own service and is registered by file or over the API. The ledger needs three values for it:
+
+| Value | Variable | Why |
+|---|---|---|
+| Its key | `DECISIONLEDGER_API_KEYS` (`<reasoner_id>:<key>`) | Registering issues no key, and the ledger reads its keys when it starts: provision the key with the deployment |
+| The operator key | `DECISIONLEDGER_OPERATOR_KEY` | The `PUT /api/v1/reasoners/{reasoner_id}` that registers it (a registration file needs none) |
+| The asset root | `POLICY_RAG_GATE_ASSETS_ROOT` | When it binds the RAG policy gate: the gate reads its prompts and corpus from `<root>/<reasoner_id>/`, and the corpus loader loads its corpus from there |
+
+The stream mock is the example. Its plugin is installed in this checkout, so leave it out of the composition; the ledger and the corpus loader read the same allowlist:
+
+```bash
+make assets-mock_stream                       # copies its assets to outputs/stage/assets/mock-stream-reasoner/
+export POLICY_RAG_GATE_ASSETS_ROOT=$(pwd)/outputs/stage/assets
+export DECISIONLEDGER_REASONERS=ato-reasoner,example-reasoner
+make build-policy-index-mock-stream-reasoner  # its corpus, from the asset root: load before registering
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key"
+export DECISIONLEDGER_OPERATOR_KEY=op-key
+make serve
+```
+
+Then `PUT` its registration with the operator key, start its service (`MOCK_STREAM_LEDGER_URL=http://localhost:8000 MOCK_STREAM_LEDGER_KEY=ms-key make serve-mock_stream`), and replay a stream into it (`make replay-mock_stream`); [Reference reasoner patterns](../design/reasoners/patterns.md) walks through every step, and the registration file variant.
+
+A reasoner has one source: a ledger that composes a plugin or reads a registration file naming a reasoner that also has an API row refuses to start. Before composing the mock's plugin again (or reading its registration file), delete its API row; its snapshots stay, so the bundles that cite them still replay:
+
+```bash
+docker compose exec postgres psql -U decisionledger -d decisionledger \
+  -c "delete from decisionledger.reasoner_registry where reasoner_id = 'mock-stream-reasoner'"
+```
+
 ---
 
 ## 1. Infrastructure
@@ -219,7 +254,7 @@ docker compose down -v       # Full reset — destroys all data
 
 ## 2. Policy Corpus
 
-A corpus must be loaded before the RAG policy gate admits a binding that names it (DR-34): the ledger does not start, and a registration write is refused, while a corpus a binding names is not loaded. ATO's binding names `ato-policy`, the example's `example-policy`.
+A corpus must be loaded before the RAG policy gate admits a binding that names it (DR-34): the ledger does not start, and a registration write is refused, while a corpus a binding names is not loaded. ATO's binding names `ato-policy`, the example's `example-policy`, the stream mock's `mock-stream-practices`.
 
 ### Load
 

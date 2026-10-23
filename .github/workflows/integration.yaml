@@ -31,8 +31,10 @@ jobs:
 
     # One job per (reasoner, gate) pair of workspace members that bring
     # infrastructure (reasoners/<name>, gates/<name>); example and rules bring
-    # none and have no integration tests. Each entry runs the whole
-    # integration suite; fine while there is one entry.
+    # none and have no integration tests. The reference-pattern mocks (DR-35)
+    # bring none either and get no entry: the stream mock's integration test
+    # runs in this job, on the shared infrastructure. Each entry runs the
+    # whole integration suite; fine while there is one entry.
     strategy:
       fail-fast: false
       matrix:
@@ -128,10 +130,14 @@ jobs:
       - name: Prepare gate (own schema)
         run: make prepare-gate-${{ matrix.gate }}
 
-      # Index the reasoner's policy corpus and train its model if missing
-      # (reasoners/<name>/reasoner.mk).
-      - name: Prepare reasoner (policy index + model)
-        run: make prepare-${{ matrix.reasoner }}
+      # Index every installed reasoner's policy corpus and train any missing
+      # model (each reasoners/<name>/reasoner.mk joins prepare-reasoners), not
+      # only the matrix reasoner's: the stream mock's integration test
+      # registers it over HTTP with a binding that names mock-stream-practices,
+      # and the RAG policy gate admits a binding only to a loaded corpus (so
+      # does every ledger that composes the installed plugins by default).
+      - name: Prepare reasoners (every policy index + missing models)
+        run: make prepare-reasoners
 
       - name: Integration tests
         run: make test-integration

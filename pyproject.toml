@@ -91,6 +91,7 @@ dev = [
 reasoners = [
     "ato-reasoner",
     "example-reasoner",
+    "mock-stream-reasoner",
 ]
 # Deployment composition: the gate plugins this checkout installs (DR-28).
 # The RAG policy gate comes with its `eval` extra (RAGAS) so its eval harness
@@ -139,6 +140,7 @@ members = ["reasoners/*", "gates/*", "integrations/*"]
 [tool.uv.sources]
 ato-reasoner = { workspace = true }
 example-reasoner = { workspace = true }
+mock-stream-reasoner = { workspace = true }
 decisionledger-gate-rules = { workspace = true }
 decisionledger-gate-policy-rag = { workspace = true }
 decisionledger-mcp = { workspace = true }
