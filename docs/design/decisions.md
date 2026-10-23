@@ -34,7 +34,7 @@ Increment from the current head and append to this file. Do not edit the body
 of an accepted record — if a decision changes, open a new record that
 supersedes it and update the original record's status to `Superseded by DR-N`.
 
-**Current head: DR-34.** The next record is DR-35.
+**Current head: DR-35.** The next record is DR-36.
 
 ### Status values
 
@@ -4598,3 +4598,284 @@ replay. Retrieval and generation are never promised reproducible.
 - **`EscrowStatus` belongs to the API.** `present | missing | none` is a
   `Literal` in `app/api/models.py`; `EvidenceStatus`, which gates answer,
   is in `core/gate/output.py`.
+
+---
+
+## DR-35: Reference reasoner patterns ship as workspace members
+
+**Status:** Accepted (the stream pattern and the mock plumbing implemented
+in Phase 4a; the batch pattern lands in Phase 4b; the text and daily
+patterns in Phase 5)
+**Category:** Pipeline & System Design
+
+> Builds on DR-26 (a reasoner is a workspace member the framework discovers
+> by entry point), DR-31 (the submission contract a reasoner's own service
+> sends over HTTP), DR-33 (the three registration sources, and the asset
+> root that serves a reasoner without a plugin), and DR-34 (the corpora and
+> authority tiers a policy binding names); it amends none of them. Phase 4a
+> of the ledger-decoupling program implements the stream pattern and the
+> plumbing every mock shares (below); Phase 4b adds the batch pattern, and
+> Phase 5 the text and daily patterns.
+
+**Decision.**
+
+- **One member per pattern.** Four mock reasoners, each a workspace member
+  under `reasoners/` whose distribution is its `reasoner_id`:
+  `mock-stream-reasoner` (`reasoners/mock_stream`, package
+  `mock_stream_reasoner`), `mock-batch-reasoner` (`reasoners/mock_batch`),
+  `mock-text-reasoner` (`reasoners/mock_text`), and `mock-daily-reasoner`
+  (`reasoners/mock_daily`). Each has the example reasoner's shape (two
+  entry points, a `reasoner.mk`, `tests/` without `__init__.py`, a README,
+  a reference page) and declares a native namespace. Every member ships a
+  real `ReasonerPlugin` (the boundary test requires exactly one
+  `decisionledger.reasoners` entry point per member, and a plugin's
+  `prompts_dir` and `corpus_dir` may be empty directories), and the root
+  `reasoners` group installs it by default, so a default `make serve`
+  composes the mocks too and `make prepare-reasoners` loads every mock's
+  corpus (`REASONER_PREPARE_TARGETS`, and `POLICY_CORPUS_ID_<reasoner_id>`
+  in each `reasoner.mk`). The example reasoner stays the minimal
+  in-process walkthrough, with its native subject.
+- **Stream: the real-time event scorer (implemented in Phase 4a).** An
+  async in-memory event source with dedup, a lateness bound, and dead
+  letters; per-entity sliding state whose `reset_state` is real; bypass
+  rules that record the clear bands, and a gated middle; the RAG policy
+  gate bound advisory to a `reference` corpus at tier 2; its own FastAPI
+  service and CLI; a generated `registration.yaml` and an asset-root
+  layout. Its acceptance tests register it by file and, separately, by
+  `PUT` with the plugin excluded (in the live run,
+  `DECISIONLEDGER_REASONERS` excludes it; without Docker,
+  `memory_framework(plugins=(), ..., registration_file=...)` does, and
+  `create_app(plugins=[], ...)` with a `PUT`). The registration names a
+  `novel_entity_feature`, so a fresh
+  entity routed to gate mode is held by Tier 3, which fires only on a
+  gated decision whose advisory gate returned a verdict and whose
+  `feature_set[novel_entity_feature]` is truthy (a failed advisory gate
+  holds by Tier 1 instead). `registration.yaml` is generated from
+  `registry.py` by the `registration-yaml` subcommand, and a test holds the
+  two to one `registration_version`. Its settings are
+  `MockStreamSettings(env_prefix="MOCK_STREAM_")`, with `ledger_url`
+  (required; blank fails fast) and `ledger_key`; the ledger's
+  `DECISIONLEDGER_API_KEYS` carries `mock-stream-reasoner:<key>`, and the
+  `PUT` uses the operator key. Its template `mock-stream-v1.yaml`
+  (`evidence_layout: tiered_blocks`, the conflict/gap protocol) and two
+  corpus documents with complete front matter live in
+  `src/mock_stream_reasoner/assets/{prompts,corpus}`; the asset-root layout
+  is a copy of that directory, and a unit test checks it with the policy
+  gate's own loader and models.
+- **Batch: the daily batch scorer (Phase 4b).** NDJSON for
+  `decisions:batch` in chunks of at most 10,000 lines, record-only, with
+  one bypass rule per recordable action whose disjoint predicates leave a
+  deliberate gap (a `needs_review` feature, for example), so some rows
+  match no rule and go to gate-mode `submit` as exceptions. It binds
+  `rules` (advisory) with an empty binding configuration (the rules gate
+  declares no `binding_config_model`), and every row, records included,
+  selects the rule set with `GateContext(gate_id="rules",
+  gate_config={"ruleset_id": "mock-batch-v1"})`. It ships
+  `rulesets/mock-batch-v1.yaml` naming `reasoner_id: mock-batch-reasoner`
+  (required; a mismatch fails closed). A rule set is deployment
+  configuration: `RULES_GATE_RULESETS_DIR` is one directory, read when the
+  ledger process builds the gate, so the root Makefile stages every
+  member's `rulesets/` in `outputs/stage/rulesets/` (`RULESET_DIRS`,
+  `make prepare-rulesets`) and the runbook exports that directory before
+  `make serve`. It has no infrastructure of its own; its eval and tests
+  still need the ledger's Postgres. `BATCH_RECORD_ONLY` is provoked
+  deliberately (one gate-mode line in a chunk), and a cited rule that does
+  not hold is a recorded HOLD, not a rejection.
+- **Text: the LLM-native classifier (Phase 5).** A categorical
+  `label_value` from a deterministic keyword classifier (no LLM SDK), gate
+  mode with `proposed_action` as the floor, and the policy gate bound to
+  two corpora, tier 1 "regulatory" and tier 2 "practice notes", whose
+  documents disagree on one case, so the conflict → HOLD path is exercised;
+  it ships `injection.yaml` and `novel.yaml`.
+- **Daily: the deterministic computation with exceptions (Phase 5).** Pure
+  arithmetic over a target and an actual that records most results and
+  routes the exceptions through `rules` bound mandatory, with
+  replay-determinism tests.
+- **Mocks never enter `make eval`.** The root Makefile has
+  `MOCK_EVAL_TARGETS` and `eval-mocks: $(MOCK_EVAL_TARGETS)` (and still
+  names no reasoner); each mock's `reasoner.mk` appends to
+  `MOCK_EVAL_TARGETS`, never to `REASONER_EVAL_TARGETS`. A mock ships only
+  `scenarios/` and `robustness/` datasets, because the policy gate's
+  harness runs every adapter that ships retrieval, faithfulness, citation,
+  or authority datasets (the text mock will need a harness opt-out or
+  other dataset names). `make eval-mocks` makes no paid call but needs
+  Postgres: each mock's eval driver composes
+  `build_framework_services(settings, [PLUGIN], gate_plugins)` with its
+  own gate plugins — for the stream mock, a member-owned scripted `policy`
+  double that admits a binding shaped like `PolicyBindingConfig` and
+  returns a fixed verdict; for the batch mock,
+  `RulesGatePlugin(RulesGateSettings(rulesets_dir=<member>/rulesets))` —
+  and the same doubles serve the Docker-free tests. CI's unit tests cover
+  the mocks through the default group; the integration workflow keeps its
+  one job and runs `make prepare-reasoners` instead of
+  `make prepare-<reasoner>`, so the stream mock's integration acceptance
+  test runs there (it points `POLICY_RAG_GATE_ASSETS_ROOT` at a temporary
+  copy of its assets and deletes its registry row in teardown).
+- **The boundary.** A mock's ids and package names are banned in `app/`,
+  `core/`, and `eval/` from the moment its member exists (the boundary test
+  reads them from the members' pyprojects). Shared helpers are not a
+  member (one reasoner entry point per member): tests may import
+  `tests/_memory_ledger.py`, and member source is duplicated deliberately
+  and kept small.
+
+**Rationale.** The direction for the decoupling program was that
+DecisionLedger be finished as a decoupled system, where a reasoner is
+registered by file or over the API with no plugin installed, and that the
+repository carry mock reasoners, one per valid reasoner pattern, so the
+framework's contracts are demonstrated and tested in place. ATO exercises
+one pattern, with infrastructure of its own, and the example is
+deliberately minimal and in process; other valid shapes (a record-only
+batch, an LLM-native classifier whose corpora disagree, a deterministic
+computation whose exceptions a mandatory gate decides) had no running
+member in the repository. A mock per pattern makes each one a member whose
+tests fail when a contract moves.
+
+Workspace members with real plugins, because a mock must be a reasoner in
+every sense the framework checks: discovered by entry point, held to the
+boundary test, composed by a default deployment, its corpus loaded by
+`make prepare-reasoners`, and its eval driven by the harness through an
+adapter. A real plugin and a registration file generated from the same
+module let one registration be served by each of the three sources, so the
+by-file and by-`PUT` paths are tested against the plugin's
+`registration_version`. And a mock that runs as its own service, as the
+stream mock does, is the reference for a reasoner the ledger never imports.
+
+Out of `make eval`, because `make eval` measures the reasoners' and gates'
+quality with paid model calls against committed baselines, and a mock has
+no quality to measure: its eval is a contract check, deterministic, over
+gate doubles. Keeping the mocks to `make eval-mocks`, and to `scenarios/`
+and `robustness/` datasets, leaves the cost and reports of `make eval`, and
+the policy gate's harness, unchanged.
+
+**Rejected alternatives.**
+
+- **A `reasoners/mocks/<pattern>` nesting.** The workspace glob and the
+  boundary test assume `reasoners/*`.
+- **One member with four plugins.** The boundary test requires exactly one
+  `decisionledger.reasoners` entry point per member.
+- **A mock that calls an LLM.** LLM SDK imports are confined to the policy
+  gate's adapters (DR-23), and the project writes no tests with mocked LLM
+  responses; a mock's own logic stays deterministic, and the only model a
+  mock's decisions reach is the policy gate's.
+
+**Cross-references.**
+
+- Builds on DR-26, DR-31, DR-33, and DR-34 (see the note above). Exercises
+  DR-29 (advisory and mandatory gate sets), DR-30 (record and gate), DR-32
+  (native namespaces), and DR-23 (no LLM SDK outside the policy gate's
+  adapters).
+- Design pages: [Reference reasoner patterns](reasoners/patterns.md),
+  [Registration](registration.md),
+  [Submission contract](reasoners/reasoner-handoff.md),
+  [Policy gate](gates/policy/index.md).
+
+**Implementation (Phase 4a).**
+
+- **The member.** `reasoners/mock_stream` (`mock-stream-reasoner`, package
+  `mock_stream_reasoner`): `events.py` (`TransferEvent`, naming the account
+  as its native subject `(mock-stream-account, account_id)`), `state.py`
+  (`AccountWindows`: per-account windows on event time, features read
+  before the transfer joins them), `scorer.py` (`score_transfer`, a
+  logistic heuristic), `source.py` (`EventSource`), `assembler.py`
+  (`build_submission`), `pipeline.py` (`decide_transfer`,
+  `StreamProcessor`), `registry.py` (`MOCK_STREAM_REGISTRATION`: `policy`
+  advisory with `config.corpora` naming `mock-stream-practices` at tier 2,
+  `steady-activity` and `activity-surge`, recordable ALLOW and BLOCK,
+  `novel_entity_feature: thin_history`; `registration_yaml`), `plugin.py`,
+  `settings.py`, `api.py` and `app.py` (the service), `replay.py` (a
+  deterministic synthetic stream, and its replay into the service),
+  `__main__.py` (`serve | replay-events | registration-yaml`), `testing.py`
+  (`ScriptedPolicyGate`, `ScriptedPolicyGatePlugin`), `eval/` (the adapter,
+  the driver, `scenarios/stream_accounts.yaml`, and
+  `robustness/{malformed,fallback}.yaml`), `assets/`
+  (`prompts/mock-stream-v1.yaml`; `corpus/` with `MS-PRAC-NEW-ACCOUNT` and
+  `MS-PRAC-VELOCITY`), `registration.yaml` (version `20f6c04e5eb2cef6`),
+  `reasoner.mk`, and its tests.
+- **Root.** `pyproject.toml`: `mock-stream-reasoner` in the `reasoners`
+  group and `[tool.uv.sources]` (no `[project]` change), and `uv.lock`.
+  The Makefile: `MOCK_EVAL_TARGETS` and `eval-mocks`, `RULESET_DIRS` and
+  `prepare-rulesets` (it stages nothing while no member ships a rule set),
+  with their `.PHONY` and help lines.
+- **CI.** `integration.yaml` prepares with `make prepare-reasoners`; no
+  matrix entry; `eval.yaml` unchanged.
+- **Configuration.** `.env.example`: the `MOCK_STREAM_` block, the mock's
+  key among the example key pairs (a reasoner registered by file or `PUT`
+  still needs its key), and `RULES_GATE_RULESETS_DIR` pointing at the
+  staging directory.
+- **Docs.** The member's README, its reference page,
+  [Reference reasoner patterns](reasoners/patterns.md) (the stream
+  section), the local runbook (`prepare-reasoners`, `prepare-rulesets`, a
+  reasoner without a plugin), and this record.
+
+**Judgment calls and deviations (Phase 4a).**
+
+- **The policy double mirrors the gate's shapes; it does not import the
+  gate.** The scripted `policy` double in the member's `testing.py`
+  declares its own binding and per-submission configuration models in the
+  real gate's shapes instead of importing `policy_rag_gate`, so the member
+  declares no gate dependency, as the example declares none. An asset-root
+  test checks the shipped assets against the real models
+  (`load_root_assets`, `PolicyGateConfig`, `PolicyBindingConfig`, and the
+  profile's `authorize`) when the gate is installed.
+- **The eval driver resets at every run and serializes its calls.** The
+  harness runs consistency and robustness concurrently on one driver and
+  never calls `reset_state`, so `run()` resets the state at its start and
+  every call holds a lock. The robustness datasets are dated after the
+  scenarios, so none of their events trails the watermark.
+- **Five dead-letter reasons.** `malformed`, `late`, `rejected` (the
+  ledger refused it: a 4xx), `unreachable` (a transport error or a 5xx),
+  and `failed` (anything else). A duplicate is counted, not dead-lettered,
+  and the consumer never stops on one event.
+- **The service surface and the CLI.** The service serves
+  `/api/v1/stream/{events,stats,decisions,dead-letters,reset}` and
+  `/health`. The CLI adds `--dry-run` and `--file` to `replay-events`, and
+  starts a synthetic stream just after the service's watermark (a dry run
+  too, when the service answers), so a second replay is not dead-lettered
+  as late. The service lists its last `MOCK_STREAM_HISTORY` decisions (1,000
+  by default; the ledger holds them all), and a replay's report says how
+  many of its own it no longer lists. A synthetic stream has at least 45
+  events, so every kind of account and fault fits.
+- **Every feature runs on event time.** The plan names per-entity sliding
+  state; the mock reads a transfer's window, baseline, and history (and so
+  `thin_history`, the Tier 3 feature) only from the account's transfers
+  timestamped before it, so precursors that arrived in any order give it
+  the same features, and one that arrives after it counts only for the
+  transfers scored after that. The service keeps each account's transfers
+  whole for the window plus the source's lateness bound, so every event it
+  accepts is scored exactly; older transfers are kept as a count and a
+  total.
+- **A blank ledger URL fails with its own message.**
+  `MOCK_STREAM_LEDGER_URL` has a blank default that is validated, so a
+  missing URL fails with the explicit message rather than a generic
+  missing-field error (`serve` exits 2 before the server starts).
+- **`registration.yaml` is generated.** It lives at the member root and is
+  generated from `registry.py` (`registration-yaml`); a test holds the two
+  to one version.
+- **The live integration test records only.** It makes recorded decisions
+  only: a gated decision would call the live model, which the project
+  reserves for `@pytest.mark.evaluation`, and the live Verify covers the
+  gated path. It deletes only the API registry row, not the snapshot,
+  which the plugin's identical registration shares (one version, one
+  snapshot row).
+- **More make targets than the plan's.** `reasoner.mk` adds serve, replay,
+  registration, and assets helpers (`serve-mock_stream`,
+  `replay-mock_stream`, `registration-mock_stream`, `assets-mock_stream`)
+  beside the plan's index, prepare, and eval targets.
+- **`prepare-rulesets` always leaves its directory.** It recreates the
+  staging directory on every run (so a rule set a member stopped shipping
+  is not served), refuses two members shipping one file name, and leaves
+  the directory in place even while no member ships a rule set: the plan
+  calls the target a no-op then, but the runbook exports
+  `RULES_GATE_RULESETS_DIR` at that directory before `make serve`, and the
+  rules gate refuses to start on a directory that does not exist. An empty
+  directory serves no rule set, which is what a blank setting means.
+- **The member declares `uvicorn`.** Its `serve` command imports it; the
+  framework's dependency would reach it transitively, but a member declares
+  what its own source imports.
+- **Two sentences outside the listed docs.** A default composition now
+  serves the mock, so the README's and the contributing guide's sentences
+  that a blank `DECISIONLEDGER_REASONERS` serves ATO and the example (and
+  that `make prepare-reasoners` loads their two corpora) became false; each
+  now names the mock's corpus too. The conformance README's similar
+  parenthetical and the evaluation page's `make eval` row are left for
+  Phase 6, which owns both pages.

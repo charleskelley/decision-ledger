@@ -38,7 +38,8 @@ cp .env.example .env
 docker compose up -d
 
 # Load every reasoner's policy corpus into the RAG policy gate (ATO's
-# ato-policy, the example's example-policy) and train ATO's scorer if missing.
+# ato-policy, the example's example-policy, the stream mock's
+# mock-stream-practices) and train ATO's scorer if missing.
 # The ledger refuses to start until every corpus a served registration binds
 # is loaded.
 make prepare-reasoners
