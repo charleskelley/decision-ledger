@@ -178,7 +178,7 @@ prepare-gates: $(GATE_PREPARE_TARGETS)
 # every member's rulesets/ (RULESET_DIRS) there, afresh, refusing two files of
 # one name. Point the ledger at it before `make serve`:
 #   export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
-# While no member ships a rule set it stages nothing, but still leaves the
+# When no member ships a rule set it stages nothing, but still leaves the
 # (empty) directory, so that export never names a missing one (the rules gate
 # refuses to start on a directory that does not exist).
 prepare-rulesets:
@@ -203,8 +203,9 @@ prepare-rulesets:
 eval: $(REASONER_EVAL_TARGETS) $(GATE_EVAL_TARGETS)
 
 # The reference-pattern mocks' evals (DR-35), outside `make eval`: each
-# composes the ledger over Postgres with the mock's own gate doubles, so it
-# needs `docker compose up -d` but makes no model call.
+# composes the ledger over Postgres with the mock's own gates (a double, or a
+# gate that calls no model), so it needs `docker compose up -d` but makes no
+# model call.
 eval-mocks: $(MOCK_EVAL_TARGETS)
 
 install-hooks:
