@@ -1,0 +1,44 @@
+# The batch mock's rule set for the rules gate (DR-28, DR-35).
+#
+# Every submission of mock-batch-reasoner names it (gate_config.ruleset_id:
+# mock-batch-v1), records included; the gate runs only on the mock's
+# exceptions, the rows its bypass rules leave to the gate (an account flagged
+# needs_review upstream). Every rule is evaluated: the actions of the rules
+# that match are the gate's permitted actions, and enforcement takes the most
+# restrictive; when none matches, the gate permits default_action. The rules
+# read only features every row carries (mock_batch_reasoner/scorer.py), so a
+# rule never fails on a missing key.
+#
+# Deployment configuration, not a plugin asset: the rules gate reads it from
+# RULES_GATE_RULESETS_DIR when the ledger starts. `make prepare-rulesets`
+# stages it in outputs/stage/rulesets with every other member's rule sets.
+# reasoner_id is required: the gate refuses (fails closed) a submission from
+# any other reasoner that names this rule set.
+
+ruleset_id: mock-batch-v1
+version: "1"
+reasoner_id: mock-batch-reasoner
+description: >
+  The batch mock's exceptions: an account flagged for review is blocked when
+  90 days or more past due, held when 60 days past due or a payment came back
+  in the last 30 days, challenged when 30 days past due, and allowed
+  otherwise.
+default_action: ALLOW
+rules:
+  - rule_id: flagged-charge-off
+    description: Flagged and 90 days or more past due; block, for collections.
+    when: {kind: compare, field: feature_set.days_past_due, op: ge, value: 90}
+    action: BLOCK
+    required_controls: [collections_review]
+  - rule_id: flagged-delinquent
+    description: Flagged and 60 days or more past due; hold for review.
+    when: {kind: compare, field: feature_set.days_past_due, op: ge, value: 60}
+    action: HOLD
+  - rule_id: flagged-returned-payment
+    description: Flagged with a payment returned in the last 30 days; hold for review.
+    when: {kind: compare, field: feature_set.returned_payments, op: ge, value: 1}
+    action: HOLD
+  - rule_id: flagged-past-due
+    description: Flagged and 30 days or more past due; contact the holder.
+    when: {kind: compare, field: feature_set.days_past_due, op: ge, value: 30}
+    action: CHALLENGE

@@ -18,6 +18,7 @@ members = [
     "decisionledger-gate-rules",
     "decisionledger-mcp",
     "example-reasoner",
+    "mock-batch-reasoner",
     "mock-stream-reasoner",
 ]
 
@@ -651,6 +652,7 @@ integrations = [
 reasoners = [
     { name = "ato-reasoner" },
     { name = "example-reasoner" },
+    { name = "mock-batch-reasoner" },
     { name = "mock-stream-reasoner" },
 ]
 
@@ -697,6 +699,7 @@ integrations = [{ name = "decisionledger-mcp", editable = "integrations/mcp" }]
 reasoners = [
     { name = "ato-reasoner", editable = "reasoners/account_takeover" },
     { name = "example-reasoner", editable = "reasoners/example" },
+    { name = "mock-batch-reasoner", editable = "reasoners/mock_batch" },
     { name = "mock-stream-reasoner", editable = "reasoners/mock_stream" },
 ]
 
@@ -1888,6 +1891,29 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/29/33/c225eaf898634bdda489a6766fc35d1683c640bffe0e0acd10646b13536d/mkdocstrings_python-2.0.3.tar.gz", hash = "sha256:c518632751cc869439b31c9d3177678ad2bfa5c21b79b863956ad68fc92c13b8", size = 199083, upload-time = "2026-02-20T10:38:36.368Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/28/79f0f8de97cce916d5ae88a7bee1ad724855e83e6019c0b4d5b3fabc80f3/mkdocstrings_python-2.0.3-py3-none-any.whl", hash = "sha256:0b83513478bdfd803ff05aa43e9b1fca9dd22bcd9471f09ca6257f009bc5ee12", size = 104779, upload-time = "2026-02-20T10:38:34.517Z" },
+]
+
+[[package]]
+name = "mock-batch-reasoner"
+version = "0.1.0"
+source = { editable = "reasoners/mock_batch" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "decisionledger-gate-rules" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "decisionledger-gate-rules", editable = "gates/rules" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
 ]
 
 [[package]]
