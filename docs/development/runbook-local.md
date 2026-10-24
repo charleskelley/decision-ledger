@@ -18,9 +18,9 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 ```bash
 # 1. Install the framework and every workspace member: the reasoners
-#    (ato-reasoner, example-reasoner, and the stream mock,
-#    mock-stream-reasoner), the gates (rules, RAG policy), and the MCP
-#    integration, with their entry points
+#    (ato-reasoner, example-reasoner, and the stream and batch mocks,
+#    mock-stream-reasoner and mock-batch-reasoner), the gates (rules, RAG
+#    policy), and the MCP integration, with their entry points
 uv sync
 
 # 2. Start Postgres (framework), Elasticsearch (included from
@@ -37,19 +37,24 @@ make prepare-reasoners   # = make prepare-account_takeover prepare-example prepa
 
 # 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
-# Expected: ['ato-reasoner', 'example-reasoner', 'mock-stream-reasoner']
+# Expected: ['ato-reasoner', 'example-reasoner', 'mock-batch-reasoner', 'mock-stream-reasoner']
 
 # 5. Give the ledger API keys (in .env, or the environment): one per reasoner
 #    and the operator's. Every /api/v1 route needs one in X-DecisionLedger-Key.
-export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key"
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key"
 export DECISIONLEDGER_OPERATOR_KEY=op-key
 
-# 6. Run the ledger API (application factory; serves the framework's routes
+# 6. Stage the members' rule sets for the rules gate (today the batch mock's
+#    mock-batch-v1.yaml) and point the ledger at them before it starts
+make prepare-rulesets
+export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
+
+# 7. Run the ledger API (application factory; serves the framework's routes
 #    only — reasoners run as their own services or in process)
 uv run uvicorn --factory app.main:create_app --reload     # or: make serve
 ```
 
-Rule sets for the rules gate are deployment config, read from one directory when the ledger builds the gate. `make prepare-rulesets` stages every member's `rulesets/` in `outputs/stage/rulesets`, afresh (an empty directory while no member ships one); to serve them, `export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets` before `make serve`. The rules gate refuses a directory that does not exist, and the ledger does not start; left blank, the rules gate has no rule sets and holds every decision routed to it.
+Rule sets for the rules gate are deployment config, read from one directory when the ledger builds the gate. `make prepare-rulesets` stages every member's `rulesets/` in `outputs/stage/rulesets`, afresh (an empty directory when no member ships one); today it stages the batch mock's `mock-batch-v1.yaml`, the rule set the mock's exceptions are decided under. The ledger reads the directory only when it starts, so `export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets` before `make serve` (step 6). The rules gate refuses a directory that does not exist, and the ledger does not start; left blank, the rules gate has no rule sets and holds every decision routed to it (each of the batch mock's exceptions fails closed with `unknown_ruleset`).
 
 In a second shell:
 
@@ -157,7 +162,7 @@ To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-
 
 ### A reasoner without a plugin
 
-A reasoner the ledger does not compose as a plugin runs as its own service and is registered by file or over the API. The ledger needs three values for it:
+A reasoner the ledger does not compose as a plugin runs as its own process (a service, or a command line like the batch mock's) and is registered by file or over the API. The ledger needs three values for it:
 
 | Value | Variable | Why |
 |---|---|---|
@@ -179,11 +184,13 @@ make serve
 
 Then `PUT` its registration with the operator key, start its service (`MOCK_STREAM_LEDGER_URL=http://localhost:8000 MOCK_STREAM_LEDGER_KEY=ms-key make serve-mock_stream`), and replay a stream into it (`make replay-mock_stream`); [Reference reasoner patterns](../design/reasoners/patterns.md) walks through every step, and the registration file variant.
 
-A reasoner has one source: a ledger that composes a plugin or reads a registration file naming a reasoner that also has an API row refuses to start. Before composing the mock's plugin again (or reading its registration file), delete its API row; its snapshots stay, so the bundles that cite them still replay:
+The batch mock needs neither an asset root nor a service: it binds only the rules gate, and its CLI scores a synthetic day and submits it over HTTP. With the rule sets staged and `RULES_GATE_RULESETS_DIR` exported (step 6 above), and no API row left for the stream mock (delete it as shown below: its plugin is composed again here), leave the batch plugin out instead (`DECISIONLEDGER_REASONERS=ato-reasoner,example-reasoner,mock-stream-reasoner`), give the ledger its key (`mock-batch-reasoner:mb-key`), `PUT` its registration with the operator key, and run a day (`MOCK_BATCH_LEDGER_URL=http://localhost:8000 MOCK_BATCH_LEDGER_KEY=mb-key make run-mock_batch COUNT=25000`): three batch requests, one deliberately provoked `BATCH_RECORD_ONLY` rejection, and the exceptions decided by the rules gate. [Reference reasoner patterns](../design/reasoners/patterns.md#batch-the-daily-batch-scorer) walks through it.
+
+A reasoner has one source: a ledger that composes a plugin or reads a registration file naming a reasoner that also has an API row refuses to start. Before composing a mock's plugin again (or reading its registration file), and before `make eval-mocks`, whose eval drivers compose the mocks' plugins, delete the mock's API row; its snapshots stay, so the bundles that cite them still replay:
 
 ```bash
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "delete from decisionledger.reasoner_registry where reasoner_id = 'mock-stream-reasoner'"
+  -c "delete from decisionledger.reasoner_registry where reasoner_id in ('mock-stream-reasoner', 'mock-batch-reasoner')"
 ```
 
 ---
@@ -604,7 +611,8 @@ make test
 # Integration tests (requires docker compose up -d and make prepare-reasoners)
 make test-integration
 
-# Smoke tests (bundle replay and the ledger API, plus the ATO scenario smoke run)
+# Smoke tests (bundle replay and the ledger API, plus the ATO scenario smoke
+# run and a batch mock day, which needs no Docker)
 make test-smoke
 
 # Lint and format

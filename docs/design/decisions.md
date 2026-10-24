@@ -4604,8 +4604,8 @@ replay. Retrieval and generation are never promised reproducible.
 ## DR-35: Reference reasoner patterns ship as workspace members
 
 **Status:** Accepted (the stream pattern and the mock plumbing implemented
-in Phase 4a; the batch pattern lands in Phase 4b; the text and daily
-patterns in Phase 5)
+in Phase 4a, the batch pattern in Phase 4b; the text and daily patterns
+land in Phase 5)
 **Category:** Pipeline & System Design
 
 > Builds on DR-26 (a reasoner is a workspace member the framework discovers
@@ -4662,7 +4662,7 @@ patterns in Phase 5)
   `src/mock_stream_reasoner/assets/{prompts,corpus}`; the asset-root layout
   is a copy of that directory, and a unit test checks it with the policy
   gate's own loader and models.
-- **Batch: the daily batch scorer (Phase 4b).** NDJSON for
+- **Batch: the daily batch scorer (implemented in Phase 4b).** NDJSON for
   `decisions:batch` in chunks of at most 10,000 lines, record-only, with
   one bypass rule per recordable action whose disjoint predicates leave a
   deliberate gap (a `needs_review` feature, for example), so some rows
@@ -4879,3 +4879,129 @@ the policy gate's harness, unchanged.
   now names the mock's corpus too. The conformance README's similar
   parenthetical and the evaluation page's `make eval` row are left for
   Phase 6, which owns both pages.
+
+**Implementation (Phase 4b).**
+
+- **The member.** `reasoners/mock_batch` (`mock-batch-reasoner`, package
+  `mock_batch_reasoner`): `rows.py` (`AccountDay`, naming the account as
+  its native subject `(mock-batch-account, account_id)`), `scorer.py`
+  (`score_row`, a logistic heuristic), `registry.py`
+  (`MOCK_BATCH_REGISTRATION`: `rules` advisory with no configuration;
+  `current-account`, `watch-list`, `delinquent-hold`, and `charge-off`
+  over the `delinquency_score` bands of a row not flagged `needs_review`;
+  all four actions recordable; `RULESET_ID`; `registration_yaml`),
+  `assembler.py` (`build_submission`), `batch.py` (`score_rows`,
+  `plan_day`, `run_day`, and the run's report, `DayRun`), `synthetic.py`
+  (`synthetic_day`, a deterministic day for a seed), `plugin.py` (empty
+  `prompts/` and `corpus/`; `RULESETS_DIR`), `settings.py`
+  (`MockBatchSettings`), `__main__.py` (`run | registration-yaml`), `eval/`
+  (the adapter, the driver over `RulesGatePlugin`,
+  `scenarios/batch_days.yaml`, and `robustness/{malformed,fallback}.yaml`),
+  `rulesets/mock-batch-v1.yaml`, `registration.yaml` (version
+  `f81f57ceb103eb8a`), and its tests.
+- **Root.** `pyproject.toml`: `mock-batch-reasoner` in the `reasoners`
+  group and `[tool.uv.sources]` (no `[project]` change), and `uv.lock`.
+- **Make targets.** The member's `reasoner.mk` appends its `rulesets/` to
+  `RULESET_DIRS` and `eval-mock_batch` to `MOCK_EVAL_TARGETS`, and adds
+  `run-mock_batch` and `registration-mock_batch` with their help lines; it
+  has no prepare target, since the mock ships no corpus and trains nothing.
+  The root Makefile, which names no reasoner, changes in two comments: the
+  `prepare-rulesets` wording, and `eval-mocks`, whose mocks' evals now
+  compose either a gate double or a gate that calls no model.
+- **Configuration.** `.env.example`: the `MOCK_BATCH_` block
+  (`MOCK_BATCH_LEDGER_URL`, `MOCK_BATCH_LEDGER_KEY`), the mock's key among
+  the example key pairs, and `RULES_GATE_RULESETS_DIR` guidance that names
+  the staged rule set and the export before `make serve`.
+- **Docs.** The member's README, its reference page and nav entry,
+  [Reference reasoner patterns](reasoners/patterns.md) (the batch section),
+  the local runbook (the rule set `prepare-rulesets` stages, the export
+  before `make serve`, and the batch mock beside the stream mock), the
+  README's sentence on a default composition, the rules gate README's
+  sentence on which reasoners bind the gate, and this record.
+
+**Judgment calls and deviations (Phase 4b).**
+
+- **The rule set lives at the member root.** `rulesets/mock-batch-v1.yaml`
+  sits in `reasoners/mock_batch/rulesets/`, as the plan says, not in the
+  package: it is deployment configuration that `make prepare-rulesets`
+  stages, not a plugin asset. The eval driver and the tests resolve it from
+  the workspace checkout (`plugin.RULESETS_DIR`).
+- **Empty asset directories, kept by a `.gitkeep`.** The plugin's
+  `prompts_dir` and `corpus_dir` are empty directories, each holding a
+  `.gitkeep` because git holds no empty directory. The mock binds no gate
+  that reads them; the policy gate, which derives a profile from every
+  composed plugin, finds nothing there.
+- **The member depends on the rules gate.** `decisionledger-gate-rules` is
+  a dependency because the eval driver composes `RulesGatePlugin`, as ATO
+  depends on the policy gate for its driver.
+- **The provoked line.** It is the run's first exception, sent at its
+  row's place among the records (line 5 of the first request, in a
+  synthetic day); once the ledger rejects that line, the mock submits the
+  row like every other exception, so every row is decided. It is on by
+  default (`run --no-provoke` turns it off), and the eval driver never
+  provokes.
+- **Each exception's verdict is read back.** The run reads it from the
+  exception's bundle (one `GET` per exception), so its report counts the
+  matched rules, the defaults, and any gate failure.
+- **No deduplication.** The ledger does not deduplicate, so a day must not
+  repeat an `event_id` (`score_rows` refuses one), and a day sent twice is
+  recorded twice; the CLI's random run tag keeps runs apart.
+- **What stops a run, and what it keeps.** A refused or failed batch
+  request (a missing or wrong key, for example), a failed read of a decided
+  exception, or a ledger that cannot be reached stops the run: `run_day`
+  raises `DayRunStopped`, which carries everything the ledger answered until
+  then, so the CLI still prints the report (`stopped` names the error, with
+  the run tag) and writes `--results-out`; the ledger does not deduplicate,
+  so the operator must know which rows a stopped run recorded. A refused
+  exception is reported, and the run goes on. `run` exits 1 when the run
+  stopped or left any row undecided.
+- **A run checks the registration the ledger serves.** The mock picks each
+  row's bypass rule under its own registration, and a ledger serving
+  another version of it could find a cited rule that does not hold and
+  record the line under a HOLD floor, silently, for a whole day. So `run`
+  first reads the ledger's registration of the mock and sends nothing
+  (exit 1) unless it has the same `registration_version`
+  (`batch.registration_problem`); the report also counts any line recorded
+  under that floor (`batch.cited_rule_not_held`).
+- **The rule set reads only features every row carries.** One predicate
+  that cannot evaluate fails the whole evaluation (`predicate_error`), so
+  its rules read only `days_past_due` and `returned_payments`. They are not
+  conditioned on `needs_review`, so the shadow dimension re-decides
+  recorded rows under the same rules (report-only).
+- **All four actions are recordable.** The plan asks for one bypass rule
+  per recordable action and for four disjoint rules, so HOLD is recorded
+  (`delinquent-hold`) without the gate.
+- **The driver's state is the actions of the rows it decided.** A batch
+  scores each row alone, so nothing else carries from one day to the next;
+  `run` resets the state, and every call holds the lock.
+- **No timeout setting.** `HttpClient` reads a batch response with no read
+  timeout by default, so the mock's settings carry none.
+- **More make targets than the plan's.** `reasoner.mk` adds
+  `run-mock_batch` and `registration-mock_batch` beside the plan's
+  `eval-mock_batch`.
+- **One smoke test.** `docs/development/style.md` suggests three to five
+  smoke tests in all, and the repository already had seven; the plan asks
+  for one per mock pattern.
+- **A mock without a corpus has no prepare target.** The first bullet
+  above says each mock's `reasoner.mk` names its corpus
+  (`POLICY_CORPUS_ID_<reasoner_id>`) for `make prepare-reasoners`; the batch
+  mock binds no gate that retrieves, so its `reasoner.mk` names none and
+  adds no prepare target, and `make prepare-reasoners` does nothing for it.
+- **The batch eval composes a real gate.** The rationale above calls a
+  mock's eval a contract check over gate doubles; the batch mock's driver
+  composes the real rules gate over the member's rule set, as the eval
+  bullet says, which is as deterministic and calls no model.
+- **The tests need no Postgres.** The batch bullet above says the mock's
+  eval and tests still need the ledger's Postgres; only the eval does. The
+  tests, the smoke test included, run over the in-memory ledger with the
+  real rules gate, as the plan's test strategy asks (no Docker in a mock's
+  unit tests).
+- **Sentences outside the listed docs.** The Makefile's comment on
+  `prepare-rulesets` now reads "When no member ships a rule set", since one
+  member does, and its comment on `eval-mocks` no longer says every mock's
+  eval runs over gate doubles; the README's sentence on what a blank
+  `DECISIONLEDGER_REASONERS` serves now names the batch mock, which binds
+  only the rules gate; and the rules gate's README no longer says that no
+  shipped reasoner binds the gate, since the batch mock does. The
+  contributing guide names the reasoners only through their corpora, so it
+  is unchanged.

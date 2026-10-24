@@ -65,10 +65,11 @@ rules:
     action: BLOCK
 ```
 
-The example is illustrative: neither shipped reasoner binds the rules gate
-today. A reasoner that does binds it in its registration
-(`GateBinding(gate_id="rules")`) and addresses it with a gate context naming
-a registered rule set:
+The example is illustrative: ATO and the example reasoner do not bind the
+rules gate; the batch mock (`reasoners/mock_batch`, DR-35) does, under its
+rule set `rulesets/mock-batch-v1.yaml`. A reasoner that does binds it in its
+registration (`GateBinding(gate_id="rules")`) and addresses it with a gate
+context naming a registered rule set:
 
 ```python
 GateContext(gate_id="rules", gate_config={"ruleset_id": "widget-guardrails"})
