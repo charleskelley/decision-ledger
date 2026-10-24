@@ -1,0 +1,20 @@
+# Robustness sub-check — fallback. When the rules gate fails (any
+# fallback_kind: the driver swaps in a gate that raises), the ledger fails it
+# closed and the decision holds (DR-29). Each trigger is flagged for review,
+# so no bypass rule covers it, the mock submits it in gate mode, and the gate
+# is invoked: a current account the rule set would allow, and an account the
+# rule set would block. The second is primed with the same account's previous
+# day, recorded on its own: a batch decides each day's row from that row
+# alone. No model is called. Threshold: zero tolerance.
+
+cases:
+  - case_id: mb-fallback-flagged-current
+    event: {event_id: row-mb-fallback-1, as_of: "2026-09-02T23:59:59Z", account_id: acct-mb-fallback-1, balance: 150.0, credit_limit: 1000.0, days_past_due: 0, returned_payments: 0, needs_review: true}
+    fallback_kind: ruleset_unreadable
+    expected_action: HOLD
+  - case_id: mb-fallback-flagged-charge-off
+    priming_events:
+      - {event_id: row-mb-fallback-2a, as_of: "2026-09-01T23:59:59Z", account_id: acct-mb-fallback-2, balance: 950.0, credit_limit: 1000.0, days_past_due: 30, returned_payments: 0, needs_review: false}
+    event: {event_id: row-mb-fallback-2, as_of: "2026-09-02T23:59:59Z", account_id: acct-mb-fallback-2, balance: 1200.0, credit_limit: 1000.0, days_past_due: 90, returned_payments: 2, needs_review: true}
+    fallback_kind: gate_error
+    expected_action: HOLD

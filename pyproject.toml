@@ -91,6 +91,7 @@ dev = [
 reasoners = [
     "ato-reasoner",
     "example-reasoner",
+    "mock-batch-reasoner",
     "mock-stream-reasoner",
 ]
 # Deployment composition: the gate plugins this checkout installs (DR-28).
@@ -140,6 +141,7 @@ members = ["reasoners/*", "gates/*", "integrations/*"]
 [tool.uv.sources]
 ato-reasoner = { workspace = true }
 example-reasoner = { workspace = true }
+mock-batch-reasoner = { workspace = true }
 mock-stream-reasoner = { workspace = true }
 decisionledger-gate-rules = { workspace = true }
 decisionledger-gate-policy-rag = { workspace = true }

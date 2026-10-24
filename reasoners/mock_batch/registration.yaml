@@ -1,0 +1,109 @@
+# The batch mock's registration, for a DecisionLedger deployment that does
+# not install (or leaves out) its plugin. Generated from
+# mock_batch_reasoner/registry.py by
+#
+#   uv run python -m mock_batch_reasoner registration-yaml
+#
+# (make registration-mock_batch); do not edit it by hand: a test holds it to
+# the module's registration_version. Point a ledger at it with
+#
+#   DECISIONLEDGER_REGISTRATIONS=reasoners/mock_batch/registration.yaml
+#
+# with the plugin excluded (DECISIONLEDGER_REASONERS naming the plugins to
+# keep), or PUT the same entry as JSON to /api/v1/reasoners/mock-batch-reasoner
+# with the operator key. The rules gate decides the mock's exceptions under
+# the rule set they name (mock-batch-v1), which the ledger reads from
+# RULES_GATE_RULESETS_DIR when it starts: run `make prepare-rulesets` and
+# export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets first.
+registrations:
+- reasoner_id: mock-batch-reasoner
+  reasoner_name: Mock Batch Reasoner
+  gates:
+  - gate_id: rules
+    mandatory: false
+  bypass_rules:
+  - rule_id: current-account
+    version: '1'
+    description: 'delinquency_score below 0.3 and no review flag: the account is current;
+      record ALLOW without the rules gate'
+    predicate:
+      kind: all
+      predicates:
+      - kind: compare
+        field: label_value
+        op: lt
+        value: 0.3
+      - kind: compare
+        field: feature_set.needs_review
+        op: eq
+        value: false
+    action: ALLOW
+  - rule_id: watch-list
+    version: '1'
+    description: 'delinquency_score from 0.3 to below 0.6 and no review flag: the
+      account is falling behind; record CHALLENGE (contact the holder) without the
+      rules gate'
+    predicate:
+      kind: all
+      predicates:
+      - kind: compare
+        field: label_value
+        op: ge
+        value: 0.3
+      - kind: compare
+        field: label_value
+        op: lt
+        value: 0.6
+      - kind: compare
+        field: feature_set.needs_review
+        op: eq
+        value: false
+    action: CHALLENGE
+  - rule_id: delinquent-hold
+    version: '1'
+    description: 'delinquency_score from 0.6 to below 0.85 and no review flag: the
+      account is delinquent; record HOLD (new spending held for review) without the
+      rules gate'
+    predicate:
+      kind: all
+      predicates:
+      - kind: compare
+        field: label_value
+        op: ge
+        value: 0.6
+      - kind: compare
+        field: label_value
+        op: lt
+        value: 0.85
+      - kind: compare
+        field: feature_set.needs_review
+        op: eq
+        value: false
+    action: HOLD
+  - rule_id: charge-off
+    version: '1'
+    description: 'delinquency_score from 0.85 and no review flag: the account is headed
+      for charge-off; record BLOCK without the rules gate'
+    predicate:
+      kind: all
+      predicates:
+      - kind: compare
+        field: label_value
+        op: ge
+        value: 0.85
+      - kind: compare
+        field: feature_set.needs_review
+        op: eq
+        value: false
+    action: BLOCK
+  recordable_actions:
+  - ALLOW
+  - BLOCK
+  - CHALLENGE
+  - HOLD
+  native_namespaces:
+  - native_namespace: mock-batch-account
+    namespace_uuid: f9de1e07-b713-4718-bef9-7f78585b0608
+    entity_type: account
+  novel_entity_feature: null
+  jurisdiction_conflict_groups: []

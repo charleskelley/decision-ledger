@@ -1,0 +1,13 @@
+# Robustness sub-check — schema failure. When the rules gate returns no
+# usable verdict, enforcement Tier 1 must hold the decision. The driver
+# scores each row, forces gate mode (a row a bypass rule covers would be
+# recorded), and enforces a rules-gate record with verdict=None; no gate runs
+# and nothing is written. Threshold: zero tolerance.
+
+cases:
+  - case_id: mb-malformed-current
+    event: {event_id: row-mb-malformed-1, as_of: "2026-09-02T23:59:59Z", account_id: acct-mb-malformed-1, balance: 300.0, credit_limit: 1000.0, days_past_due: 0, returned_payments: 0, needs_review: false}
+    expected_action: HOLD
+  - case_id: mb-malformed-flagged
+    event: {event_id: row-mb-malformed-2, as_of: "2026-09-02T23:59:59Z", account_id: acct-mb-malformed-2, balance: 5500.0, credit_limit: 5000.0, days_past_due: 90, returned_payments: 1, needs_review: true}
+    expected_action: HOLD
