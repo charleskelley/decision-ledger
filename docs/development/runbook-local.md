@@ -18,9 +18,10 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 ```bash
 # 1. Install the framework and every workspace member: the reasoners
-#    (ato-reasoner, example-reasoner, and the stream and batch mocks,
-#    mock-stream-reasoner and mock-batch-reasoner), the gates (rules, RAG
-#    policy), and the MCP integration, with their entry points
+#    (ato-reasoner, example-reasoner, and the stream, batch, and text mocks,
+#    mock-stream-reasoner, mock-batch-reasoner, and mock-text-reasoner), the
+#    gates (rules, RAG policy), and the MCP integration, with their entry
+#    points
 uv sync
 
 # 2. Start Postgres (framework), Elasticsearch (included from
@@ -30,18 +31,19 @@ docker compose up -d
 
 # 3. Prepare the reasoners: load each policy corpus into the RAG policy gate
 #    under the corpus id its binding names (ato-policy, example-policy,
-#    mock-stream-practices), and train ATO's scorer if the artifact is
+#    mock-stream-practices, and the text mock's two, mock-text-regulatory
+#    and mock-text-practice), and train ATO's scorer if the artifact is
 #    missing. The ledger does not start until every corpus a served
 #    registration binds is loaded.
-make prepare-reasoners   # = make prepare-account_takeover prepare-example prepare-mock_stream
+make prepare-reasoners   # = make prepare-account_takeover prepare-example prepare-mock_stream prepare-mock_text
 
 # 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
-# Expected: ['ato-reasoner', 'example-reasoner', 'mock-batch-reasoner', 'mock-stream-reasoner']
+# Expected: ['ato-reasoner', 'example-reasoner', 'mock-batch-reasoner', 'mock-stream-reasoner', 'mock-text-reasoner']
 
 # 5. Give the ledger API keys (in .env, or the environment): one per reasoner
 #    and the operator's. Every /api/v1 route needs one in X-DecisionLedger-Key.
-export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key"
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key"
 export DECISIONLEDGER_OPERATOR_KEY=op-key
 
 # 6. Stage the members' rule sets for the rules gate (today the batch mock's
@@ -162,7 +164,7 @@ To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-
 
 ### A reasoner without a plugin
 
-A reasoner the ledger does not compose as a plugin runs as its own process (a service, or a command line like the batch mock's) and is registered by file or over the API. The ledger needs three values for it:
+A reasoner the ledger does not compose as a plugin runs as its own process (a service, or a command line like the batch and text mocks') and is registered by file or over the API. The ledger needs three values for it:
 
 | Value | Variable | Why |
 |---|---|---|
@@ -186,11 +188,28 @@ Then `PUT` its registration with the operator key, start its service (`MOCK_STRE
 
 The batch mock needs neither an asset root nor a service: it binds only the rules gate, and its CLI scores a synthetic day and submits it over HTTP. With the rule sets staged and `RULES_GATE_RULESETS_DIR` exported (step 6 above), and no API row left for the stream mock (delete it as shown below: its plugin is composed again here), leave the batch plugin out instead (`DECISIONLEDGER_REASONERS=ato-reasoner,example-reasoner,mock-stream-reasoner`), give the ledger its key (`mock-batch-reasoner:mb-key`), `PUT` its registration with the operator key, and run a day (`MOCK_BATCH_LEDGER_URL=http://localhost:8000 MOCK_BATCH_LEDGER_KEY=mb-key make run-mock_batch COUNT=25000`): three batch requests, one deliberately provoked `BATCH_RECORD_ONLY` rejection, and the exceptions decided by the rules gate. [Reference reasoner patterns](../design/reasoners/patterns.md#batch-the-daily-batch-scorer) walks through it.
 
+The text mock binds the RAG policy gate to two corpora, and the corpus loader loads one directory as one corpus id, so from an asset root it is loaded by two loader calls, one per directory of its copy, each with `--corpus-dir` (`make build-policy-index-mock-text-reasoner` stops instead of loading both directories as one corpus, and `make index-mock_text` loads the member's own directories). With no API row left for the other mocks (their plugins are composed again here), leave the text plugin out instead:
+
+```bash
+make assets-mock_text                         # copies its assets to outputs/stage/assets/mock-text-reasoner/
+export POLICY_RAG_GATE_ASSETS_ROOT=$(pwd)/outputs/stage/assets
+export DECISIONLEDGER_REASONERS=ato-reasoner,example-reasoner,mock-batch-reasoner,mock-stream-reasoner
+uv run python -m policy_rag_gate.corpus_loader --corpus-id mock-text-regulatory \
+  --corpus-dir outputs/stage/assets/mock-text-reasoner/corpus/regulatory
+uv run python -m policy_rag_gate.corpus_loader --corpus-id mock-text-practice \
+  --corpus-dir outputs/stage/assets/mock-text-reasoner/corpus/practice
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key"
+export DECISIONLEDGER_OPERATOR_KEY=op-key
+make serve
+```
+
+Then `PUT` its registration with the operator key and decide a message (`MOCK_TEXT_LEDGER_URL=http://localhost:8000 MOCK_TEXT_LEDGER_KEY=mt-key uv run python -m mock_text_reasoner decide --text "..."`): every message is gated, and a statement of financial hardship meets the corpora's planted disagreement, which the policy gate holds for review when its model reports it (`extra.protocol_hold: "conflict_detected"`; a model judges the evidence, so decide the text again if it does not). [Reference reasoner patterns](../design/reasoners/patterns.md#text-the-llm-native-classifier) walks through the pattern.
+
 A reasoner has one source: a ledger that composes a plugin or reads a registration file naming a reasoner that also has an API row refuses to start. Before composing a mock's plugin again (or reading its registration file), and before `make eval-mocks`, whose eval drivers compose the mocks' plugins, delete the mock's API row; its snapshots stay, so the bundles that cite them still replay:
 
 ```bash
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "delete from decisionledger.reasoner_registry where reasoner_id in ('mock-stream-reasoner', 'mock-batch-reasoner')"
+  -c "delete from decisionledger.reasoner_registry where reasoner_id in ('mock-stream-reasoner', 'mock-batch-reasoner', 'mock-text-reasoner')"
 ```
 
 ---
@@ -261,7 +280,7 @@ docker compose down -v       # Full reset — destroys all data
 
 ## 2. Policy Corpus
 
-A corpus must be loaded before the RAG policy gate admits a binding that names it (DR-34): the ledger does not start, and a registration write is refused, while a corpus a binding names is not loaded. ATO's binding names `ato-policy`, the example's `example-policy`, the stream mock's `mock-stream-practices`.
+A corpus must be loaded before the RAG policy gate admits a binding that names it (DR-34): the ledger does not start, and a registration write is refused, while a corpus a binding names is not loaded. ATO's binding names `ato-policy`, the example's `example-policy`, the stream mock's `mock-stream-practices`, and the text mock's two corpora, `mock-text-regulatory` (tier 1) and `mock-text-practice` (tier 2).
 
 ### Load
 
@@ -271,7 +290,7 @@ make build-policy-index-ato-reasoner
 uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner
 ```
 
-The loader loads the corpus under `--corpus-id` (the id the binding names), reading its documents from the composed plugin whose `reasoner_id` matches `--reasoner-id` (`ato_reasoner/corpus/`), else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` for a reasoner registered without a plugin; pass `--corpus-dir` to override. It asks no registry, so load before you register. A load replaces the corpus, so a file that does not parse (or whose front matter JSON cannot carry) refuses the whole load, naming the files, rather than dropping its document; two loads of one corpus never interleave (an advisory lock per corpus covers both stores). Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
+The loader loads the corpus under `--corpus-id` (the id the binding names), reading its documents from the composed plugin whose `reasoner_id` matches `--reasoner-id` (`ato_reasoner/corpus/`), else from `<POLICY_RAG_GATE_ASSETS_ROOT>/<reasoner_id>/corpus` for a reasoner registered without a plugin; pass `--corpus-dir` to override. It loads every document under that directory, recursively, as the one corpus, so a binding that names two corpora keeps each in its own directory and loads each by its own call with `--corpus-dir` (the text mock's `make index-mock_text`). It asks no registry, so load before you register. A load replaces the corpus, so a file that does not parse (or whose front matter JSON cannot carry) refuses the whole load, naming the files, rather than dropping its document; two loads of one corpus never interleave (an advisory lock per corpus covers both stores). Expected output: progress lines per document, then a summary. Typical run: 32 documents → ~215 chunks. The first run is slower (model download on first use); subsequent runs use the cached model.
 
 If the Elasticsearch index was created before `corpus_id` was mapped as `keyword` (any index from before DR-34), the loader logs that it is recreating the index. That drops every corpus's BM25 documents, so run `make build-policy-index` afterward to reload all of them. A Postgres `policy_rag` schema from before DR-34 is refused outright: run `docker compose down -v` (or `drop schema policy_rag cascade`), start the stack again, and reload every corpus.
 
