@@ -20,6 +20,7 @@ members = [
     "example-reasoner",
     "mock-batch-reasoner",
     "mock-stream-reasoner",
+    "mock-text-reasoner",
 ]
 
 [[package]]
@@ -654,6 +655,7 @@ reasoners = [
     { name = "example-reasoner" },
     { name = "mock-batch-reasoner" },
     { name = "mock-stream-reasoner" },
+    { name = "mock-text-reasoner" },
 ]
 
 [package.metadata]
@@ -701,6 +703,7 @@ reasoners = [
     { name = "example-reasoner", editable = "reasoners/example" },
     { name = "mock-batch-reasoner", editable = "reasoners/mock_batch" },
     { name = "mock-stream-reasoner", editable = "reasoners/mock_stream" },
+    { name = "mock-text-reasoner", editable = "reasoners/mock_text" },
 ]
 
 [[package]]
@@ -1941,6 +1944,27 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "structlog", specifier = ">=24.1,<25" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
+]
+
+[[package]]
+name = "mock-text-reasoner"
+version = "0.1.0"
+source = { editable = "reasoners/mock_text" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
 ]
 
 [[package]]

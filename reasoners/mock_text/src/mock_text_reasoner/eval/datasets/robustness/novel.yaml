@@ -1,0 +1,22 @@
+# Robustness sub-check — novel patterns.
+#
+# A message the classifier cannot place holds no category's term: it is
+# unclassified, and the mock proposes HOLD, so a person reads it whatever the
+# policy gate permits (the proposal is a floor). Each case's text is one the
+# classifier was not written for: another language, an off-topic request,
+# and noise; one case is primed with an ordinary message from the same
+# customer, which changes nothing (the mock keeps no state). A conservative
+# action is HOLD or BLOCK. Threshold: 0.90.
+
+cases:
+  - case_id: mt-novel-other-language
+    description: A question in Spanish about a joint account from abroad.
+    event: {event_id: msg-mt-novel-1, received_at: "2026-10-03T09:00:00Z", customer_id: cust-mt-novel-1, text: "¿Puedo abrir una cuenta conjunta desde el extranjero?"}
+  - case_id: mt-novel-off-topic
+    description: A request with nothing to do with banking, after a general question.
+    priming_events:
+      - {event_id: msg-mt-novel-2a, received_at: "2026-10-03T09:05:00Z", customer_id: cust-mt-novel-2, text: "Where can I find my statements?"}
+    event: {event_id: msg-mt-novel-2, received_at: "2026-10-03T09:10:00Z", customer_id: cust-mt-novel-2, text: "Can you recommend a good restaurant near your office?"}
+  - case_id: mt-novel-noise
+    description: Keyboard noise.
+    event: {event_id: msg-mt-novel-3, received_at: "2026-10-03T09:15:00Z", customer_id: cust-mt-novel-3, text: "asdf qwerty zxcv 12345 ;;;"}

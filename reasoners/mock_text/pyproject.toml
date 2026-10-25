@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# mock-text-reasoner — the LLM-native classifier pattern (DR-35)
+# =============================================================================
+#
+# A uv workspace member and one of the reference reasoner patterns: a mock
+# that demonstrates the framework's contracts in place, not a product. It
+# labels a short customer text with a deterministic keyword classifier (no
+# model of its own), proposes the label's action as a floor, and asks the
+# ledger to gate every text through the RAG policy gate (advisory), bound to
+# two corpora of different authority: regulatory text at tier 1 and practice
+# notes at tier 2, which disagree on one category so the gate's protocol hold
+# is exercised. It has no service and no infrastructure of its own: its CLI
+# reaches the ledger over HTTP, and the ledger registers it by its plugin, by
+# a registration file, or by a PUT with the plugin excluded. The framework
+# never depends on it; deployment composition lives in the root `reasoners`
+# dependency group. Discovery happens through the two entry points below,
+# whose name must equal the registration's `reasoner_id`.
+
+[project]
+name = "mock-text-reasoner"
+version = "0.1.0"
+description = "Reference reasoner pattern for DecisionLedger: an LLM-native classifier (mock)."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+]
+
+[project.entry-points."decisionledger.reasoners"]
+mock-text-reasoner = "mock_text_reasoner.plugin:PLUGIN"
+
+[project.entry-points."decisionledger.eval_adapters"]
+mock-text-reasoner = "mock_text_reasoner.eval.adapter:ADAPTER"
+
+[project.scripts]
+mock-text-reasoner = "mock_text_reasoner.__main__:main"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mock_text_reasoner"]

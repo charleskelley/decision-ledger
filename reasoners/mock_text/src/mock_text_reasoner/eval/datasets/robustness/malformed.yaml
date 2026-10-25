@@ -1,0 +1,14 @@
+# Robustness sub-check — schema failure. When the policy gate returns no
+# usable verdict, enforcement Tier 1 must hold the decision. The driver
+# classifies and assembles each message as usual (gate mode, proposing the
+# label's action) and enforces a policy-gate record with verdict=None; no gate
+# and no model are called. Both messages propose ALLOW, so the hold is Tier
+# 1's. Threshold: zero tolerance.
+
+cases:
+  - case_id: mt-malformed-general-question
+    event: {event_id: msg-mt-malformed-1, received_at: "2026-10-04T09:00:00Z", customer_id: cust-mt-malformed-1, text: "What is the interest rate on your savings account?"}
+    expected_action: HOLD
+  - case_id: mt-malformed-hardship
+    event: {event_id: msg-mt-malformed-2, received_at: "2026-10-04T09:05:00Z", customer_id: cust-mt-malformed-2, text: "I cannot afford my card payment this month."}
+    expected_action: HOLD
