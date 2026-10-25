@@ -1,0 +1,41 @@
+# Consistency scenarios for the text mock.
+#
+# The mock keeps no state between messages: each text is classified on its
+# own words, and every one is gated (the registration has no bypass rules).
+# A customer's earlier messages, in whatever order they reach the ledger,
+# therefore leave the trigger's label, proposal, and decision unchanged.
+# These scenarios pin that property through the whole pipeline: the
+# classifier, the assembler, and the ledger, with the scripted policy double
+# (it permits the proposal; no model is called).
+#
+# Expected stable actions: ALLOW (a general question), CHALLENGE (a change of
+# address, which needs a step-up identity check).
+
+scenarios:
+  - scenario_id: mt-general-question
+    description: >
+      A customer reports a payment they did not make, asks to change their
+      email address, then asks about opening hours: the trigger is a general
+      inquiry and decides ALLOW in every ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &general_1 {event_id: msg-mt-general-1, received_at: "2026-10-01T09:00:00Z", customer_id: cust-mt-general, text: "There is a payment on my statement that I did not make."}
+          - &general_2 {event_id: msg-mt-general-2, received_at: "2026-10-01T09:05:00Z", customer_id: cust-mt-general, text: "Please change my email to the one I use for work."}
+          - &general_t {event_id: msg-mt-general-trigger, received_at: "2026-10-01T09:10:00Z", customer_id: cust-mt-general, text: "What are your opening hours on Saturday?"}
+      - ordering_id: reversed-precursors
+        events: [*general_2, *general_1, *general_t]
+
+  - scenario_id: mt-address-change
+    description: >
+      A customer asks about fees and says money is tight, then asks to change
+      their address: the trigger is an account change and decides CHALLENGE
+      in every ordering.
+    orderings:
+      - ordering_id: chronological
+        events:
+          - &change_1 {event_id: msg-mt-change-1, received_at: "2026-10-01T10:00:00Z", customer_id: cust-mt-change, text: "What fees do you charge for a replacement card?"}
+          - &change_2 {event_id: msg-mt-change-2, received_at: "2026-10-01T10:05:00Z", customer_id: cust-mt-change, text: "I am struggling to pay my loan this month."}
+          - &change_t {event_id: msg-mt-change-trigger, received_at: "2026-10-01T10:10:00Z", customer_id: cust-mt-change, text: "I moved house last week, please change my address to 12 Elm Street."}
+      - ordering_id: reversed-precursors
+        events: [*change_2, *change_1, *change_t]

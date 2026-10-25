@@ -1,0 +1,44 @@
+# The text mock's registration, for a DecisionLedger deployment that does
+# not install (or leaves out) its plugin. Generated from
+# mock_text_reasoner/registry.py by
+#
+#   uv run python -m mock_text_reasoner registration-yaml
+#
+# (make registration-mock_text); do not edit it by hand: a test holds it to
+# the module's registration_version. Point a ledger at it with
+#
+#   DECISIONLEDGER_REGISTRATIONS=reasoners/mock_text/registration.yaml
+#
+# with the plugin excluded (DECISIONLEDGER_REASONERS naming the plugins to
+# keep), or PUT the same entry as JSON to /api/v1/reasoners/mock-text-reasoner
+# with the operator key. A ledger that composes the RAG policy gate needs the
+# mock's prompts and corpora under its asset root
+# (POLICY_RAG_GATE_ASSETS_ROOT/mock-text-reasoner/, a copy of
+# src/mock_text_reasoner/assets/) and both corpora the binding names loaded
+# before it starts, one loader call each: corpus/regulatory/ as
+# mock-text-regulatory and corpus/practice/ as mock-text-practice.
+registrations:
+- reasoner_id: mock-text-reasoner
+  reasoner_name: Mock Text Reasoner
+  gates:
+  - gate_id: policy
+    mandatory: false
+    config:
+      corpora:
+      - corpus_id: mock-text-regulatory
+        provider: reference
+        tier: 1
+        min_provenance: pinned_version
+      - corpus_id: mock-text-practice
+        provider: reference
+        tier: 2
+        min_provenance: pinned_version
+      k_per_corpus: 5
+  bypass_rules: []
+  recordable_actions: []
+  native_namespaces:
+  - native_namespace: mock-text-customer
+    namespace_uuid: a2f8a070-abbb-4956-abdb-127755ca4b30
+    entity_type: customer
+  novel_entity_feature: null
+  jurisdiction_conflict_groups: []

@@ -1,0 +1,18 @@
+# Robustness sub-check — fallback. When the policy gate fails (any
+# fallback_kind: the driver swaps in a gate that raises), the ledger fails it
+# closed and the decision holds (DR-29), above a milder proposal: a general
+# question proposes ALLOW, an address change CHALLENGE. One case is primed
+# with an ordinary message from the same customer, which changes nothing.
+# No model is called. Threshold: zero tolerance.
+
+cases:
+  - case_id: mt-fallback-general-question
+    event: {event_id: msg-mt-fallback-1, received_at: "2026-10-05T09:00:00Z", customer_id: cust-mt-fallback-1, text: "Where can I see the fees for international transfers?"}
+    fallback_kind: llm_5xx
+    expected_action: HOLD
+  - case_id: mt-fallback-address-change
+    priming_events:
+      - {event_id: msg-mt-fallback-2a, received_at: "2026-10-05T09:05:00Z", customer_id: cust-mt-fallback-2, text: "How do I order a new debit card?"}
+    event: {event_id: msg-mt-fallback-2, received_at: "2026-10-05T09:10:00Z", customer_id: cust-mt-fallback-2, text: "Please update my email to the address below."}
+    fallback_kind: retrieval_error
+    expected_action: HOLD
