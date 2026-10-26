@@ -4603,9 +4603,9 @@ replay. Retrieval and generation are never promised reproducible.
 
 ## DR-35: Reference reasoner patterns ship as workspace members
 
-**Status:** Accepted (the stream pattern and the mock plumbing implemented
-in Phase 4a, the batch pattern in Phase 4b, the text pattern in Phase 5a;
-the daily pattern lands in Phase 5b)
+**Status:** Accepted (implemented: the stream pattern and the mock plumbing
+in Phase 4a, the batch pattern in Phase 4b, the text pattern in Phase 5a,
+and the daily pattern in Phase 5b)
 **Category:** Pipeline & System Design
 
 > Builds on DR-26 (a reasoner is a workspace member the framework discovers
@@ -4687,9 +4687,9 @@ the daily pattern lands in Phase 5b)
   two corpora, tier 1 "regulatory" and tier 2 "practice notes", whose
   documents disagree on one case, so the conflict → HOLD path is exercised;
   it ships `injection.yaml` and `novel.yaml`.
-- **Daily: the deterministic computation with exceptions (Phase 5).** Pure
-  arithmetic over a target and an actual that records most results and
-  routes the exceptions through `rules` bound mandatory, with
+- **Daily: the deterministic computation with exceptions (implemented in
+  Phase 5b).** Pure arithmetic over a target and an actual that records most
+  results and routes the exceptions through `rules` bound mandatory, with
   replay-determinism tests.
 - **Mocks never enter `make eval`.** The root Makefile has
   `MOCK_EVAL_TARGETS` and `eval-mocks: $(MOCK_EVAL_TARGETS)` (and still
@@ -5174,3 +5174,165 @@ the policy gate's harness, unchanged.
   `docs/design/gates/policy/index.md` still says "Both shipped reasoners
   bind it" (stale since Phase 4a, when the stream mock bound the gate) and
   is left for Phase 6, which owns the gate pages.
+
+**Implementation (Phase 5b).**
+
+- **The member.** `reasoners/mock_daily` (`mock-daily-reasoner`, package
+  `mock_daily_reasoner`): `settlements.py` (`AccountSettlement`, naming the
+  account as its native subject `(mock-daily-account, account_id)`),
+  `compute.py` (`compute_drift`, the arithmetic, and its output,
+  `SettlementDrift`; `COMPUTE_VERSION`), `registry.py`
+  (`MOCK_DAILY_REGISTRATION`: `rules` mandatory with no configuration; one
+  bypass rule, `within-tolerance`, below `TOLERANCE_PCT` of
+  `abs_drift_pct`; ALLOW the only recordable action; `RULESET_ID`;
+  `registration_yaml`), `assembler.py` (`build_submission`), `daily.py`
+  (`compute_day`, `run_day`, `registration_problem`, and the run's report,
+  `DayRun`), `synthetic.py` (`synthetic_day`, a deterministic day for a
+  seed), `plugin.py` (empty `prompts/` and `corpus/`; `RULESETS_DIR`),
+  `settings.py` (`MockDailySettings`), `__main__.py`
+  (`run | registration-yaml`), `eval/` (the adapter, the driver over
+  `RulesGatePlugin`, `scenarios/settlement_days.yaml`, and
+  `robustness/{malformed,fallback}.yaml`), `rulesets/mock-daily-v1.yaml`,
+  `registration.yaml` (version `4b58a24f15c700fe`), `reasoner.mk`, and its
+  tests.
+- **Root.** `pyproject.toml`: `mock-daily-reasoner` in the `reasoners`
+  group and `[tool.uv.sources]` (no `[project]` change), and `uv.lock`.
+- **Make targets.** The member's `reasoner.mk` appends its `rulesets/` to
+  `RULESET_DIRS` and `eval-mock_daily` to `MOCK_EVAL_TARGETS`, and adds
+  `run-mock_daily` and `registration-mock_daily` with their help lines; it
+  has no prepare target. The root Makefile is unchanged; `make
+  prepare-rulesets` now stages two files.
+- **Configuration.** `.env.example`: the `MOCK_DAILY_` block
+  (`MOCK_DAILY_LEDGER_URL`, `MOCK_DAILY_LEDGER_KEY`), the mock's key among
+  the example key pairs, `MOCK_DAILY_` in the list of reasoner prefixes, and
+  the daily mock's rule set in the `RULES_GATE_RULESETS_DIR` guidance.
+- **Docs.** The member's README, its reference page and nav entry,
+  [Reference reasoner patterns](reasoners/patterns.md) (the daily section,
+  the table of what each pattern exercises, and the introduction),
+  `CLAUDE.md` (the four mocks in the reasoners boundary paragraph, and
+  `make eval-mocks` and `make prepare-rulesets` among the common commands),
+  the code reference's member list, the contributing guide's project and
+  test trees, the architecture page's directory layout and component table,
+  the local runbook (the two staged rule sets, the keys, the installed
+  plugins, a paragraph on running the daily mock in the default composition,
+  and the mock among the API rows to delete), the README's sentence on a
+  default composition, and this record.
+
+**Judgment calls and deviations (Phase 5b).**
+
+- **A settlement reconciliation.** The plan names pure arithmetic over a
+  target and an actual per account; the mock reconciles a day's
+  settlements: the target is what the books expect to settle to the
+  account, the actual what the settlement file reports, and `drift_pct`
+  (negative for a shortfall) is the numerical label. The bypass rule and
+  the rule set read `abs_drift_pct`, so a shortfall and an overage of one
+  size are decided alike.
+- **One bypass rule, and a rule set that starts where it ends.**
+  `within-tolerance` records ALLOW below 1% (`TOLERANCE_PCT`), ALLOW is the
+  only recordable action, and the rule set's mildest rule (`drift-minor`,
+  CHALLENGE) fires from the same number, then `drift-major` (HOLD) from 5%
+  and `drift-severe` (BLOCK, with the control `settlement_investigation`)
+  from 20%. A recorded account matches no rule, so the gate permits the
+  default (ALLOW) and the record keeps its action; an exception matches at
+  least one rule. One test holds the bypass tolerance equal to the mildest
+  rule's threshold, and another holds the two complementary over a grid
+  that includes each threshold, short and over.
+- **The run reads every decision back.** One `POST /api/v1/decisions` per
+  row, as the plan says, then one `GET` of the decision's bundle per row,
+  records included, so the report shows the mandatory gate on the recorded
+  rows (its status, the default applied, and `raised`: a record whose
+  decided action is not its own) as well as each exception's matched
+  rules; it also counts `cited_rule_not_held`.
+- **A run checks the registration the ledger serves.** As the batch mock's
+  `run` does (the plan's command line does not say so): the mock cites its
+  bypass rule under its own registration, and a ledger serving another
+  version of it could find the rule does not hold and record the row under
+  a HOLD floor, so `run` sends nothing (exit 1) unless the ledger serves the
+  same `registration_version`.
+- **What stops a run.** A row the ledger refuses for itself (a 4xx problem
+  about the submission) is reported and the run goes on. A refusal of the
+  key (401 or 403) stops it: the registration check reads a resource any
+  authenticated key may read, so another reasoner's key or the operator's
+  passes it and is refused at the first row, and every other row would be
+  refused too. A server error (5xx), a ledger that cannot be reached, or a
+  failed read of a decided row's bundle stops it as well (`DayRunStopped`,
+  which carries what the ledger answered), as for the batch mock's
+  exceptions. Unlike the batch mock, the run accounts for every row it may
+  have decided, since the ledger does not deduplicate: a row decided before
+  its bundle read failed is kept among the decisions, from its receipt
+  (`bundle_read` false: the gate's status and any failure the receipt names,
+  but no matched rules or default), and a row whose request was sent but
+  not answered (a 5xx, or a transport error after sending) is named
+  `in_doubt` in the report and on stderr, to be looked up before it is sent
+  again.
+- **A run whose gate gave no verdict exits 1.** `run` exits 1, and says so
+  on stderr with the count and the first reason, when the rules gate gave no
+  verdict on any decision (the ledger held it), as well as when the run
+  stopped or left a row undecided: a ledger without the mock's rule set
+  holds every decision, recorded ones too, and a run that wrote a day of
+  holds does not report success. It does not stop at the first such
+  decision: the held day is the fail-closed behavior the pattern shows.
+- **The command line checks its inputs first.** A `--results-out` that
+  cannot be written, and a `MOCK_DAILY_LEDGER_URL` httpx cannot parse, are
+  refused (exit 2) before anything is sent, as the text mock refuses an
+  unparseable URL; the results file is written when the run ends, so a bad
+  path found then would lose the per-row outcomes of a day already
+  decided.
+- **The forced schema failure keeps the row's mode.** The batch driver
+  forces gate mode, because its advisory gate never sees a record; the daily
+  driver enforces a mandatory rules-gate record with no verdict in the row's
+  own mode (a record, with the rule it cites evaluated, or an exception),
+  and Tier 1 holds both.
+- **The fallback holds a record.** The fallback dataset's first trigger is
+  an account within tolerance: the mandatory gate runs on the record, fails
+  closed, and holds it. The batch mock's fallback triggers had to be
+  exceptions to reach its advisory gate.
+- **The driver reports the gate on every trigger.** The rules gate runs on
+  every decision, so a recorded trigger's result carries its verdict too
+  (confidence 1.0, rationale "rules gate: the default action").
+- **The shadow dimension has nothing to re-decide.** It re-decides a sample
+  of recorded decisions with their advisory gates; the mock's only gate is
+  mandatory and already ran on every record, so it re-decides none
+  (`num_samples` 0; report-only, so the eval still passes).
+- **A synthetic day that rounding cannot reclassify.** Four profiles of
+  drift, each well inside one band (within 0.9%, 1.5% to 4.5%, 6% to 18%,
+  and 25% to 60%, a shortfall or an overage), so rounding an amount
+  to the cent never moves a row across a threshold; the first four rows are
+  one of each. The default day (1,000 accounts, seed 11) records 939
+  accounts and has 61 exceptions (CHALLENGE 37, HOLD 18, BLOCK 6).
+- **What a mandatory binding asks of a deployment.** The ledger refuses a
+  registration that binds a gate mandatory unless it composes that gate, so
+  a ledger composed without the rules gate does not start with the daily
+  plugin installed, and refuses a `PUT` of the daily registration. A ledger
+  that composes the gate without the mock's rule set (a blank or unstaged
+  `RULES_GATE_RULESETS_DIR`) holds every one of the mock's decisions,
+  recorded ones too (`unknown_ruleset`, Tier 1).
+- **The walk-through uses the default composition.** The stream and batch
+  walk-throughs leave their plugin out and register by `PUT` or by file;
+  the daily one keeps the plugin, as the text one does and as the plan's
+  Verify does, so it needs no API row and none is left to delete.
+- **A mock without a corpus has no prepare target,** as the batch mock's
+  (Phase 4b).
+- **The tests need no Postgres.** As the batch mock's (Phase 4b): they run
+  over the in-memory ledger with the real rules gate, the 1,000-row day
+  included; only the eval needs Postgres.
+- **No smoke test.** The suite has eight, and `docs/development/style.md`
+  asks for three to five.
+- **More make targets than the plan's.** `run-mock_daily` and
+  `registration-mock_daily`, as the other mocks have.
+- **Sentences outside the listed docs.** The README's sentence on a default
+  composition names the daily mock, which binds only the rules gate,
+  mandatory; the runbook's list of installed plugins and step 4's expected
+  output gain it, and so does its command that deletes the mocks' API rows
+  (the one-source cleanup before `make eval-mocks` covers the daily mock
+  too); and the runbook gains a paragraph in its end-to-end walk-through on
+  running the daily mock in the default composition (the plan lists only
+  the runbook's staged rule sets and keys line). In the patterns page, the batch walk-through's step 2 no
+  longer says the staged rule set is the batch mock's alone, and its
+  expected output and its `rules_gate.built` line name both rule sets; the
+  text walk-through's step 2 says the staged rule sets are the batch and
+  daily mocks'. The rules gate's README, which says the batch mock binds
+  the gate, is a gate file outside this phase; it stays true and is left.
+  The batch mock's README still shows `make prepare-rulesets` staging only
+  `mock-batch-v1.yaml`; it is another mock's file, outside this phase, and
+  is left for Phase 6.

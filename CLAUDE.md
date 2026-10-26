@@ -28,7 +28,7 @@ Each reasoner is a **uv workspace member** under `reasoners/<domain>/` (src layo
 
 For ATO today: `reasoners/account_takeover/` is distribution `ato-reasoner`, import package `ato_reasoner`, `reasoner_id` `ato-reasoner`. It has `pyproject.toml` (deps + entry points `decisionledger.reasoners` → `ato_reasoner.plugin:PLUGIN` and `decisionledger.eval_adapters` → `ato_reasoner.eval.adapter:ADAPTER`), `ruff.toml`, `reasoner.mk` (suffixed make targets), `compose.yaml` (Redis), `tests/` (no `__init__.py`), and `src/ato_reasoner/` with `events.py`, `features.py`, `scorer/` (+ `models/ato-v1.ubj`), `feature_service.py`, `ingestion/`, `assembler.py`, `pipeline.py`, `api.py` and `app.py` (ATO's own FastAPI service), `settings.py` (`ATO_` prefix), `registry.py`, `policy.py`, `retrieval_query.py`, `plugin.py`, `prompts/`, `corpus/`, `generator/`, and `eval/`.
 
-Reasoners import from `core/` and `app/`; `core/`, `app/`, and `eval/` never import from a reasoner. Adding a second reasoner (e.g., content moderation) means creating `reasoners/content_moderation/` with the same shape and adding it to the root `reasoners` dependency group — no framework changes required. `reasoners/example/` (`example-reasoner`, widgets) is a minimal documented reasoner; `tests/_stub_reasoner/` is a test-only reasoner that proves the framework needs neither.
+Reasoners import from `core/` and `app/`; `core/`, `app/`, and `eval/` never import from a reasoner. Adding a second reasoner (e.g., content moderation) means creating `reasoners/content_moderation/` with the same shape and adding it to the root `reasoners` dependency group — no framework changes required. `reasoners/example/` (`example-reasoner`, widgets) is a minimal documented reasoner; `tests/_stub_reasoner/` is a test-only reasoner that proves the framework needs neither. The four reference-pattern mocks of DR-35, `reasoners/mock_stream/`, `reasoners/mock_batch/`, `reasoners/mock_text/`, and `reasoners/mock_daily/` (`mock-<pattern>-reasoner`), are members of the same shape that the `reasoners` group installs by default and that never enter `make eval` (`make eval-mocks` runs their evals).
 
 ### The `gates/` Boundary
 
@@ -85,6 +85,7 @@ uv sync --all-groups           # Also install the docs group (mkdocs)
 docker compose up -d           # Start infra (Postgres + the included ATO Redis and RAG gate Elasticsearch)
 docker compose down            # Stop infra
 make prepare-reasoners         # Load every reasoner's corpus (the ledger won't start until each bound corpus is loaded); train ATO's scorer if missing
+make prepare-rulesets          # Stage every member's rulesets/ in outputs/stage/rulesets; export RULES_GATE_RULESETS_DIR to it before make serve
 make serve                     # Run the ledger API (uvicorn --factory app.main:create_app, port 8000)
 make serve-account_takeover    # Run ATO's own service (port 8001); ATO_LEDGER_URL + ATO_LEDGER_KEY submit over HTTP, else the ledger runs in process
 make schemas                   # Regenerate schemas/*.json from the models (tests fail on drift)
@@ -97,6 +98,7 @@ make test-integration          # Integration tests (requires Docker)
 make test-smoke                # Smoke tests
 make scenario-account_takeover # Publish 10 baseline_normal events
 make eval-account_takeover     # Framework eval harness for ATO (slow); `make eval` = every reasoner, then every gate
+make eval-mocks                # Every reference-pattern mock's eval (Postgres only, no model calls); never part of `make eval`
 just diagrams                  # Render D2 diagrams (requires: brew install d2)
 uv run python -m ato_reasoner.generator run --scenario baseline_normal --count 50
 uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner

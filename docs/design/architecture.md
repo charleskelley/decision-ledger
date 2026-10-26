@@ -154,7 +154,11 @@ decision-ledger/
 │
 ├── reasoners/                Reasoner plugins, one workspace member per domain (DR-26)
 │   ├── account_takeover/         ato-reasoner (ato_reasoner): the reference reasoner, its own service, Redis, XGBoost scorer
-│   └── example/                  example-reasoner (example_reasoner): a minimal documented reasoner (widgets)
+│   ├── example/                  example-reasoner (example_reasoner): a minimal documented reasoner (widgets)
+│   ├── mock_stream/              mock-stream-reasoner (mock_stream_reasoner): the real-time event scorer pattern (DR-35)
+│   ├── mock_batch/               mock-batch-reasoner (mock_batch_reasoner): the daily batch scorer pattern (DR-35)
+│   ├── mock_text/                mock-text-reasoner (mock_text_reasoner): the LLM-native classifier pattern (DR-35)
+│   └── mock_daily/               mock-daily-reasoner (mock_daily_reasoner): the deterministic computation with exceptions pattern (DR-35)
 │
 ├── integrations/
 │   └── mcp/                      decisionledger-mcp (decisionledger_mcp): the ledger as seven MCP tools over HttpClient
@@ -272,6 +276,7 @@ Members (plugins and clients the framework never imports):
 | RAG policy gate | `gates/policy_rag/` | Retrieval through providers from the corpora a binding names, prompt rendering, LLM verdict; its own eval |
 | Account Takeover | `reasoners/account_takeover/` | Reference reasoner: ingestion, features, scorer, assembler, its own service |
 | Example reasoner | `reasoners/example/` | Minimal documented reasoner for the conformance suite and new teams |
+| Reference-pattern mocks | `reasoners/mock_{stream,batch,text,daily}/` | One mock reasoner per reasoner pattern (DR-35): the real-time event scorer, the daily batch scorer, the LLM-native classifier, and the deterministic computation with exceptions |
 | MCP server | `integrations/mcp/` | Seven tools for agent reasoners over `HttpClient` |
 
 ---

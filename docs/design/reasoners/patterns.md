@@ -27,12 +27,22 @@ imaginary. Each mock:
 | Stream: a real-time event scorer | `reasoners/mock_stream` (`mock-stream-reasoner`) | [Stream](#stream-the-real-time-event-scorer) |
 | Batch: a daily batch scorer | `reasoners/mock_batch` (`mock-batch-reasoner`) | [Batch](#batch-the-daily-batch-scorer) |
 | Text: an LLM-native classifier | `reasoners/mock_text` (`mock-text-reasoner`) | [Text](#text-the-llm-native-classifier) |
-| Daily: a deterministic computation with exceptions | `mock-daily-reasoner` | Recorded in DR-35 |
+| Daily: a deterministic computation with exceptions | `reasoners/mock_daily` (`mock-daily-reasoner`) | [Daily](#daily-the-deterministic-computation-with-exceptions) |
 
-The patterns are recorded in DR-35; each section is added with its member.
+Every pattern DR-35 records has a running member, each described below with
+what it proves, a walk-through, its eval, and its tests.
 The contracts the mocks exercise are the
 [Submission contract](reasoner-handoff.md) and
 [Registration](../registration.md).
+
+What each pattern exercises:
+
+| Pattern | Modes | Batch endpoint | Native subject | Gate | Corpora and tiers | Verify reads back |
+|---|---|---|---|---|---|---|
+| Stream | Record (two bands: ALLOW, BLOCK) and gate (the middle band; Tier 3 on fresh accounts) | No | `(mock-stream-account, account_id)` | `policy`, advisory | `mock-stream-practices`, tier 2 | The policy gate's escrowed documents, on a gated decision |
+| Batch | Record (four bands, all four actions) and gate (the flagged exceptions) | Yes: chunks of at most 10,000 lines, one `BATCH_RECORD_ONLY` provoked | `(mock-batch-account, account_id)` | `rules`, advisory (empty binding configuration) | None | The rules gate's escrowed rule set, on an exception |
+| Text | Gate only (no bypass rules; the label's action as a floor) | No | `(mock-text-customer, customer_id)` | `policy`, advisory | `mock-text-regulatory`, tier 1; `mock-text-practice`, tier 2 | The policy gate's escrowed documents, from both corpora, on every decision |
+| Daily | Record (within tolerance: ALLOW) and gate (the exceptions) | No: one decision per request | `(mock-daily-account, account_id)` | `rules`, mandatory (it runs on records too) | None | The rules gate's escrowed rule set, on every decision |
 
 ---
 
@@ -348,12 +358,13 @@ and that gate's model client needs `OPENAI_API_KEY` (in the environment or
 #    models.
 make prepare-reasoners
 
-# 2. Stage the members' rule sets (today the batch mock's alone) and point
-#    the ledger at them: the rules gate reads the directory when the ledger
-#    starts.
+# 2. Stage the members' rule sets (the batch mock's and the daily mock's)
+#    and point the ledger at them: the rules gate reads the directory when
+#    the ledger starts.
 make prepare-rulesets
 # Expected: prepare-rulesets: staged in outputs/stage/rulesets:
 #   mock-batch-v1.yaml
+#   mock-daily-v1.yaml
 export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
 
 # 3. Leave the batch plugin out; keep ATO's, the example's, and the stream
@@ -364,8 +375,8 @@ export DECISIONLEDGER_REASONERS=ato-reasoner,example-reasoner,mock-stream-reason
 export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key"
 export DECISIONLEDGER_OPERATOR_KEY=op-key
 make serve
-# Its rules_gate.built log line names the rule set:
-#   ruleset_ids ['mock-batch-v1']
+# Its rules_gate.built log line names the rule sets:
+#   ruleset_ids ['mock-batch-v1', 'mock-daily-v1']
 ```
 
 In a second shell:
@@ -645,7 +656,7 @@ make prepare-reasoners
 #   chunks=6) and corpus_id=mock-text-practice (documents=2, chunks=7)
 
 # 2. Start the ledger with the mock's key and the operator key (the staged
-#    rule set is the batch mock's: this composition serves it too).
+#    rule sets are the batch and daily mocks': this composition serves both).
 make prepare-rulesets
 export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
 export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key"
@@ -751,3 +762,251 @@ needs Postgres.
 The member's README (`reasoners/mock_text/README.md`) lists its modules,
 the categories, the corpora, the CLI's flags, report, and exit status, make
 targets, and settings.
+
+---
+
+## Daily: the deterministic computation with exceptions
+
+`reasoners/mock_daily` (distribution and `reasoner_id`
+`mock-daily-reasoner`, package `mock_daily_reasoner`; API reference:
+[`mock_daily_reasoner`](../../reference/reasoners/mock-daily.md)). Once a
+day the mock reconciles each imaginary account's settlement: pure
+arithmetic over a target, what the books expect to settle to the account,
+and an actual, what the settlement file reports, gives the drift between
+them. It records every account within tolerance, submits the rest, its
+exceptions, in gate mode, one decision per request, and binds the
+[rules gate](../gates/index.md#the-reference-gates) mandatory, so the gate
+runs on every decision, recorded ones too.
+
+### What it proves
+
+- **A pure computation with a complete feature set (DR-30).**
+  `compute_drift` reads one row's `target_amount` (positive) and
+  `actual_amount` (never negative) and gives `drift_amount` (the actual less
+  the target, to the cent), `drift_pct` (`100 * (actual - target) /
+  target`, to four places; negative for a shortfall), and `abs_drift_pct`.
+  `drift_pct` is the numerical label (`LabelType.NUMERICAL`, `label_name`
+  `drift_pct`), the computation's version is the `ReasonerContext`'s
+  `model_version` (`settlement-drift-v1`), and the attribution is a
+  narrative of the arithmetic with the row's own numbers. The feature set
+  holds every value the computation read and gave, so the bypass rule, the
+  rules gate, and replay need nothing else; nothing carries from one row or
+  one day to the next, so the order of a day's rows never changes a
+  decision.
+- **One bypass rule, and a rule set that starts where it ends (DR-30).**
+  `within-tolerance` records ALLOW when `abs_drift_pct` is below 1.0, and
+  ALLOW is the only recordable action, so every other account is an
+  exception, gated with no proposal. The rule set's mildest rule fires from
+  the same 1.0, so a recorded account matches no rule and every exception
+  matches at least one; a test holds the two thresholds together over a grid
+  that includes each threshold, short and over.
+- **A mandatory gate on every decision, recorded ones too (DR-29).** A
+  record runs only its mandatory gates, and the mock's one gate is
+  mandatory, so the ledger runs it on every record: it matches no rule and
+  permits the rule set's default (ALLOW), so the record keeps its action.
+  The gate's verdict joins the combinator with the record's own action: a
+  rule that fires on a recorded row raises it (a test's rule set with one
+  more rule raises a recorded ALLOW to HOLD while the cited rule still
+  holds), and a rules gate that fails holds the record by Tier 1, as it
+  holds an exception.
+- **Exceptions decided by the size of the drift (DR-28).** `drift-severe`
+  (from 20%, BLOCK, with the required control `settlement_investigation`),
+  `drift-major` (from 5%, HOLD), and `drift-minor` (from 1%, CHALLENGE).
+  Every rule is evaluated, and enforcement takes the most restrictive action
+  of the rules that match. The rules read only `abs_drift_pct`, which every
+  row carries, so a shortfall and an overage of one size are decided alike.
+- **One decision per request.** Every row, recorded or gated, goes to
+  `POST /api/v1/decisions` on its own (the batch endpoint is the batch
+  mock's pattern), and the mock reads each decision's bundle back, so its
+  report shows the gate on the recorded rows (its status, the default
+  applied, and `raised`, a record decided other than its own action) as
+  well as each exception's matched rules. A row the ledger refuses for
+  itself is reported and the run goes on; a refused key (401 or 403), a
+  server error, an unreachable ledger, or a failed read stops it. The ledger
+  does not deduplicate, so a stopped run keeps a row decided before its read
+  failed (from its receipt) and names a row sent but not answered
+  (`in_doubt`), and `run` exits 1 when the rules gate gave no verdict on any
+  decision.
+- **A cited rule that does not hold is a recorded HOLD, not a refusal.** The
+  ledger stores the row with `bypass_rule_holds: false` under a HOLD floor
+  (`bypass_rule_not_satisfied`). The mock cites its rule only when it holds
+  under its own registration; `run` first checks that the ledger serves the
+  same `registration_version` (and sends nothing otherwise), and its report
+  counts any row recorded under the floor (`recorded.cited_rule_not_held`).
+- **Replay determinism.** Replay re-enforces the rules gate's stored output,
+  and a record's bypass-rule checks, under the registration snapshot the
+  bundle names (`registration_version`), and asks the gate nothing: every
+  decision of a 1,000-row day replays matched. Every verdict cites the rule
+  set, and the gate escrows a copy of it (DR-34), so verify reads it back
+  for every decision, recorded ones included.
+- **A rule set as deployment configuration (DR-28).**
+  `rulesets/mock-daily-v1.yaml` names `reasoner_id: mock-daily-reasoner`
+  (required: the gate fails closed on a submission from any other reasoner
+  that names the rule set). `make prepare-rulesets` stages it with the batch
+  mock's, two files in `outputs/stage/rulesets`, and the ledger is pointed
+  there before it starts. The gate is mandatory, so a ledger without the
+  rule set (a blank or unstaged `RULES_GATE_RULESETS_DIR`) holds every one
+  of the mock's decisions, recorded ones too (`unknown_ruleset`, Tier 1).
+- **A mandatory binding asks the deployment for its gate.** A ledger that
+  does not compose the rules gate refuses the registration
+  (`check_gate_set`): it does not start when it composes the plugin or reads
+  the registration file, and it answers a `PUT` with
+  `422 GATE_BINDING_REFUSED`.
+- **A native subject (DR-32).** The account is `(mock-daily-account,
+  account_id)` in the namespace the registration declares, so an account is
+  the same ledger subject every day.
+- **No service, and no asset root.** A CLI reconciles a synthetic day and
+  submits it over HTTP (`MOCK_DAILY_LEDGER_URL`, `MOCK_DAILY_LEDGER_KEY`; a
+  blank URL refuses to run), prints a JSON report, and prints the
+  registration file. The plugin's `prompts_dir` and `corpus_dir` are empty:
+  the rules gate reads neither.
+- **Three registration sources (DR-33).** By its plugin (the default), by
+  a registration file (`reasoners/mock_daily/registration.yaml`, generated
+  from `registry.py`), or by `PUT /api/v1/reasoners/mock-daily-reasoner`
+  with the operator key, the last two with its plugin excluded; all three
+  serve one `registration_version`.
+
+### Walk-through: the default composition
+
+The default composition serves the daily mock through its plugin, so the
+walk-through needs no exclusion. Prerequisites: the stack is up (`docker
+compose up -d`); no API row is left for any mock from the walk-throughs
+above, since this composition includes every plugin; and neither
+`DECISIONLEDGER_REASONERS` nor `DECISIONLEDGER_REGISTRATIONS` is set. The
+daily mock's decisions call no model, but the ledger still builds the RAG
+policy gate for the other reasoners, and that gate's model client needs
+`OPENAI_API_KEY` (in the environment or `.env`) when it is built.
+
+```bash
+# 1. Load every corpus the default composition binds (ATO's, the example's,
+#    the stream mock's, and the text mock's two; the daily mock binds none)
+#    and train missing models.
+make prepare-reasoners
+
+# 2. Stage the members' rule sets, the daily mock's among them, and point the
+#    ledger at them: the rules gate reads the directory when the ledger
+#    starts.
+make prepare-rulesets
+# Expected: prepare-rulesets: staged in outputs/stage/rulesets:
+#   mock-batch-v1.yaml
+#   mock-daily-v1.yaml
+export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
+
+# 3. Start the ledger with every reasoner's key and the operator key.
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key,mock-daily-reasoner:md-key"
+export DECISIONLEDGER_OPERATOR_KEY=op-key
+make serve
+# Its rules_gate.built log line names both rule sets:
+#   ruleset_ids ['mock-batch-v1', 'mock-daily-v1']
+```
+
+In a second shell:
+
+```bash
+H='X-DecisionLedger-Key: md-key'
+
+# 4. The registration the ledger serves: the rules gate bound mandatory.
+curl -s localhost:8000/api/v1/reasoners/mock-daily-reasoner -H "$H"
+# Expected: "source": "plugin:mock_daily_reasoner.plugin",
+#   "registration_version": "4b58a24f15c700fe", and the registration's
+#   "gates": [{"gate_id": "rules", "mandatory": true}]
+
+# 5. Reconcile a synthetic day of 1,000 accounts and submit it, one decision
+#    per request.
+MOCK_DAILY_LEDGER_URL=http://localhost:8000 MOCK_DAILY_LEDGER_KEY=md-key \
+  make run-mock_daily
+# Expected report: rows 1000, decided 1000, undecided 0, stopped null,
+#   in_doubt null; recorded: decided 939, actions {"ALLOW": 939},
+#   gate_status {"ran": 939}, matched_rules {}, default_applied 939,
+#   failures 0, raised 0, cited_rule_not_held 0; exceptions: decided 61,
+#   actions {"BLOCK": 6, "CHALLENGE": 37, "HOLD": 18}, gate_status
+#   {"ran": 61}, matched_rules {"drift-major": 24, "drift-minor": 61,
+#   "drift-severe": 6}, default_applied 0, failures 0; refused 0; and under
+#   each kind a "sample" of five decisions with their decision_ids.
+
+# 6. A recorded decision (a decision_id from recorded.sample): the rules gate
+#    ran on it and permitted its default.
+curl -s localhost:8000/api/v1/decisions/<decision_id> -H "$H" | python3 -c '
+import json, sys
+bundle = json.load(sys.stdin)
+gate = bundle["gates"][0]
+print(bundle["decision_action"], gate["gate_id"], gate["status"],
+      gate["mandatory"], gate["output"]["evidence_snapshot"]["default_applied"])
+print(bundle["override_log"][-1])'
+# Expected: ALLOW rules ran True True, then
+#   combinator: most_restrictive(proposed=ALLOW, mandatory:rules=ALLOW) → ALLOW
+
+# 7. Replay and verify an exception (a decision_id from exceptions.sample).
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/replay -H "$H"
+# Expected: "matched": true, under registration_version 4b58a24f15c700fe
+curl -s -X POST localhost:8000/api/v1/decisions/<decision_id>/verify -H "$H"
+# Expected: one rules-gate reference per matched rule ("source_id":
+#   "mock-daily-v1@1", "locator": the rule id), each with "escrow":
+#   "present" and "status": "intact"
+```
+
+Every decision of the day replays matched, a recorded one under its bypass
+rule and the rules gate's stored output; a recorded decision's verify
+answers one reference too, the rule set's default (`"locator":
+"default_action"`), since the gate ran on it. The ledger does not
+deduplicate: a second run of the target decides the day again. A ledger
+started without `RULES_GATE_RULESETS_DIR` serves no rule set, so the rules
+gate fails every one of the mock's decisions closed (`unknown_ruleset`),
+recorded ones too, and each one is held; the report counts them under
+`recorded.failures` and `exceptions.failures`, and every held record under
+`recorded.raised`, and `run` exits 1.
+
+By file and by `PUT`, the mock is registered as the batch mock is
+([above](#batch-the-daily-batch-scorer)): its plugin left out of
+`DECISIONLEDGER_REASONERS`, the same key and staged rule sets, no asset
+root, and the same `registration_version`. Delete its API row before
+`make eval-mocks` or a return to the default composition (DR-33 refuses one
+reasoner from two sources; the snapshots stay, so the bundles that cite
+them still replay).
+
+### Eval
+
+`make eval-mocks` runs `make eval-mock_daily` beside the other mocks'
+evals: the framework eval harness with the daily mock's adapter. Its
+datasets are consistency scenarios (an account within tolerance, recorded
+ALLOW with the rules gate's default, and an account 8% short of its target,
+which the rules gate holds by `drift-major` and `drift-minor`, each in two
+orderings of one day) and robustness cases (a mandatory rules-gate record
+with no verdict, enforced in the row's own mode, and the rules gate swapped
+for one that raises, each on a recorded row and an exception; all four
+hold). The driver composes the ledger over Postgres with the mock's plugin
+and the real rules gate over the member's own `rulesets/`
+(`RulesGatePlugin(RulesGateSettings(rulesets_dir=...))`), resets its state
+at each ordering under a lock, and runs each ordering as the CLI runs a
+day, so it needs Postgres but no rule-set staging, Elasticsearch, or model
+call. It reports the gate's verdict for every trigger, recorded or gated
+(confidence 1.0, rationale `rules gate: <the matched rules, or the default
+action>`). The harness's shadow dimension re-decides recorded decisions with
+their advisory gates; the mock's only gate is mandatory and already ran on
+every record, so it re-decides none (`num_samples` 0; report-only, so the
+eval passes). The driver composes the plugin, so run it with no API row for
+the mock and without `DECISIONLEDGER_REGISTRATIONS` naming its file.
+
+### Tests
+
+The member's tests run without Docker over the in-memory ledger
+(`tests._memory_ledger`) and the real rules gate, built over the member's
+rule set: the row, the computation, the synthetic day, the assembler, the
+rule set (its `reasoner_id`, read with `read_ruleset`, against the
+plugin's; the one field it reads; its thresholds against the bypass rule's
+over a grid that includes each threshold; and the gate's verdict on each
+band of drift), the run (one request per row, each bundle read back; a
+refused row; a refused key and a server error, which stop it; a stopped run
+that keeps the row it decided; a row sent and not answered, named in doubt;
+a cited rule that does not hold), the mandatory gate (a 1,000-row day whose every bundle
+shows the gate ran and whose every decision replays matched; a temporary
+rule set that raises a recorded ALLOW to HOLD; a gate that raises, and a
+ledger without the rule set, each holding every decision, recorded ones
+too), the CLI, the plugin and its make include, the eval driver over its
+datasets, and the generated registration file against `registry.py` (one
+`registration_version`; a ledger without the rules gate refuses it at
+startup and at the `PUT`). There is no smoke test.
+
+The member's README (`reasoners/mock_daily/README.md`) lists its modules,
+the rule set, the CLI's flags, report, and exit status, the default run's
+counts, make targets, and settings.

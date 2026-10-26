@@ -1,0 +1,45 @@
+# The daily mock's registration, for a DecisionLedger deployment that does
+# not install (or leaves out) its plugin. Generated from
+# mock_daily_reasoner/registry.py by
+#
+#   uv run python -m mock_daily_reasoner registration-yaml
+#
+# (make registration-mock_daily); do not edit it by hand: a test holds it to
+# the module's registration_version. Point a ledger at it with
+#
+#   DECISIONLEDGER_REGISTRATIONS=reasoners/mock_daily/registration.yaml
+#
+# with the plugin excluded (DECISIONLEDGER_REASONERS naming the plugins to
+# keep), or PUT the same entry as JSON to /api/v1/reasoners/mock-daily-reasoner
+# with the operator key. The rules gate is bound mandatory: the ledger refuses
+# to start, or the PUT, unless it composes the gate, and the gate decides
+# every decision of the mock, recorded ones too, under the rule set the
+# decision names (mock-daily-v1), which the ledger reads from
+# RULES_GATE_RULESETS_DIR when it starts: run `make prepare-rulesets` and
+# export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets first.
+registrations:
+- reasoner_id: mock-daily-reasoner
+  reasoner_name: Mock Daily Reasoner
+  gates:
+  - gate_id: rules
+    mandatory: true
+  bypass_rules:
+  - rule_id: within-tolerance
+    version: '1'
+    description: 'abs_drift_pct below 1.0: the account settled within tolerance of
+      its target; record ALLOW (release the settlement), and the mandatory rules gate
+      still runs'
+    predicate:
+      kind: compare
+      field: feature_set.abs_drift_pct
+      op: lt
+      value: 1.0
+    action: ALLOW
+  recordable_actions:
+  - ALLOW
+  native_namespaces:
+  - native_namespace: mock-daily-account
+    namespace_uuid: 935d6f19-46e0-4146-860a-ab1022ecd4e5
+    entity_type: account
+  novel_entity_feature: null
+  jurisdiction_conflict_groups: []

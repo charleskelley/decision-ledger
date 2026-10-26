@@ -90,6 +90,7 @@ nav:
       - ato_reasoner: reference/reasoners/account-takeover.md
       - example_reasoner: reference/reasoners/example.md
       - mock_batch_reasoner: reference/reasoners/mock-batch.md
+      - mock_daily_reasoner: reference/reasoners/mock-daily.md
       - mock_stream_reasoner: reference/reasoners/mock-stream.md
       - mock_text_reasoner: reference/reasoners/mock-text.md
     - Gates:

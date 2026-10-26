@@ -19,6 +19,7 @@ members = [
     "decisionledger-mcp",
     "example-reasoner",
     "mock-batch-reasoner",
+    "mock-daily-reasoner",
     "mock-stream-reasoner",
     "mock-text-reasoner",
 ]
@@ -654,6 +655,7 @@ reasoners = [
     { name = "ato-reasoner" },
     { name = "example-reasoner" },
     { name = "mock-batch-reasoner" },
+    { name = "mock-daily-reasoner" },
     { name = "mock-stream-reasoner" },
     { name = "mock-text-reasoner" },
 ]
@@ -702,6 +704,7 @@ reasoners = [
     { name = "ato-reasoner", editable = "reasoners/account_takeover" },
     { name = "example-reasoner", editable = "reasoners/example" },
     { name = "mock-batch-reasoner", editable = "reasoners/mock_batch" },
+    { name = "mock-daily-reasoner", editable = "reasoners/mock_daily" },
     { name = "mock-stream-reasoner", editable = "reasoners/mock_stream" },
     { name = "mock-text-reasoner", editable = "reasoners/mock_text" },
 ]
@@ -1900,6 +1903,29 @@ wheels = [
 name = "mock-batch-reasoner"
 version = "0.1.0"
 source = { editable = "reasoners/mock_batch" }
+dependencies = [
+    { name = "decision-ledger" },
+    { name = "decisionledger-gate-rules" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "decision-ledger", editable = "." },
+    { name = "decisionledger-gate-rules", editable = "gates/rules" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+]
+
+[[package]]
+name = "mock-daily-reasoner"
+version = "0.1.0"
+source = { editable = "reasoners/mock_daily" }
 dependencies = [
     { name = "decision-ledger" },
     { name = "decisionledger-gate-rules" },

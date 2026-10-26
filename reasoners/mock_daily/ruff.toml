@@ -1,0 +1,21 @@
+# Member-local Ruff config: inherits everything from the root pyproject and
+# only adds the daily mock's first-party names and per-file ignores.
+extend = "../../pyproject.toml"
+src = ["src", "tests", "../.."]
+
+[lint.isort]
+known-first-party = ["core", "app", "eval", "mock_daily_reasoner", "rules_gate"]
+
+[lint.extend-per-file-ignores]
+"tests/**/*.py" = [
+    "D",      # no docstring requirements in tests
+    "S101",   # assert is expected in tests
+    "S105",   # hardcoded keys in test fixtures are fine
+    "S106",   # hardcoded keys in test fixtures are fine
+]
+"src/mock_daily_reasoner/__main__.py" = [
+    "T201",   # the CLI prints to stdout
+]
+"src/mock_daily_reasoner/synthetic.py" = [
+    "S311",   # pseudo-random generators are fine for a synthetic day
+]
