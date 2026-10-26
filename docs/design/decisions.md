@@ -3819,10 +3819,10 @@ thread busy while its decision proceeds unresolved.
 
 ## DR-33: Registration is a writable, versioned resource; bindings carry gate-validated config
 
-**Status:** Accepted (amended by DR-34: the RAG policy gate's binding
-configuration is `PolicyBindingConfig`, the corpora it reads; the corpus
-loader loads a corpus by corpus id, before the registration that binds it,
-and no longer refuses an unregistered reasoner)
+**Status:** Accepted (implemented in Phase 1; amended by DR-34: the RAG
+policy gate's binding configuration is `PolicyBindingConfig`, the corpora it
+reads; the corpus loader loads a corpus by corpus id, before the
+registration that binds it, and no longer refuses an unregistered reasoner)
 **Category:** Pipeline & System Design
 
 > Amends DR-28 (a binding carries the gate's configuration for the

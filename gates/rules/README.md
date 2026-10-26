@@ -65,9 +65,12 @@ rules:
     action: BLOCK
 ```
 
-The example is illustrative: ATO and the example reasoner do not bind the
-rules gate; the batch mock (`reasoners/mock_batch`, DR-35) does, under its
-rule set `rulesets/mock-batch-v1.yaml`. A reasoner that does binds it in its
+The example is illustrative: ATO, the example reasoner, and the stream and
+text mocks do not bind the rules gate. Two mocks (DR-35) do: the batch mock
+(`reasoners/mock_batch`) binds it advisory, under its rule set
+`rulesets/mock-batch-v1.yaml`, and the daily mock (`reasoners/mock_daily`)
+mandatory, under `rulesets/mock-daily-v1.yaml`, so the gate runs on that
+mock's recorded decisions too. A reasoner that does binds it in its
 registration (`GateBinding(gate_id="rules")`) and addresses it with a gate
 context naming a registered rule set:
 

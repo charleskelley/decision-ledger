@@ -28,7 +28,9 @@ regressed.
 > * **The control layers are constant -** versioned artifacts, evaluation-gated
 > releases, and immutable state capture.
 > * **The decisions recorded are auditable by design -** deterministic
-> enforcement, context and evidence bundling, and full audit replay.
+> enforcement, context and evidence bundling, full audit replay, and
+> verification of each decision's evidence against an escrowed copy of what
+> its gates relied on.
 >
 > DecisionLedger demonstrates the engineering required when AI outputs affect
 > real customers: not just model decision quality, but release control,
@@ -183,10 +185,12 @@ login events with XGBoost and records the clear cases under its two score-band
 rules (`allow-band`, `block-band`); it asks the ledger to gate the rest.
 
 **Gates** — The RAG policy gate, a workspace member and not part of the
-framework, runs hybrid retrieval (dense embeddings and BM25, fused and
-reranked by a cross-encoder) over the reasoner's own versioned policy corpus,
-then asks the LLM for a schema-valid verdict with citations and confidence.
-Any gate can be swapped for another implementation of the same gate contract.
+framework, retrieves from the versioned policy corpora the reasoner's
+binding names, through the retrieval provider that holds each (the reference
+provider runs hybrid retrieval: dense embeddings and BM25, fused and
+reranked by a cross-encoder), then asks the LLM for a schema-valid verdict
+with citations and confidence. Any gate can be swapped for another
+implementation of the same gate contract.
 
 **Ledger** — The ledger validates the submission, resolves its subject, runs
 the mandatory gates and then (on a gated decision) the advisory gates, and
@@ -207,7 +211,7 @@ effect when the decision was made, without calling any gate or model again.
 | No uncontrolled AI actions     | Reasoners and gates propose; deterministic enforcement decides; a failing gate holds |
 | No ungrounded decisions        | A record cites a registered rule that replay re-checks; a gated decision carries the gate's cited evidence |
 | No silent artifact regressions | Every versioned artifact passes behavioral eval before production |
-| No silent index drift          | Each decision bound to the RAG gate records its corpus version; the gate's retrieval eval gates a new corpus |
+| No silent index drift          | Each decision bound to the RAG gate records the state of every corpus it read; the gate's retrieval eval gates a new corpus |
 | Full reproducibility           | Every decision replayable from its Decision Bundle                |
 
  
@@ -308,7 +312,7 @@ design rationale:
 | [Evaluation](https://charleskelley.github.io/decision-ledger/design/evaluation/)         | Framework and gate harnesses, metrics, thresholds            |
 | [Submission contract](https://charleskelley.github.io/decision-ledger/design/reasoners/reasoner-handoff/) | The wire submission, record and gate, and the new-reasoner checklist |
 | [ATO Data](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/data/) | ATO login-event schema, scorer output, Decision Bundle structure |
-| [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-32 — the significant choices and why         |
+| [Design Decisions](https://charleskelley.github.io/decision-ledger/design/decisions/)    | DR-1 through DR-35 — the significant choices and why         |
 | [Infrastructure](https://charleskelley.github.io/decision-ledger/design/infrastructure/) | Docker Compose stack, `decisionledger` schema, environment   |
 | [Scenarios](https://charleskelley.github.io/decision-ledger/design/reasoners/account-takeover/scenarios/) | Eight named event patterns and what each exercises           |
 
@@ -322,8 +326,10 @@ reference domain. The corpus, feature set, action space, and reasoning layer all
 change across domains. The underlying decision-system architecture stays the
 same even as the domain changes: a new domain is a new reasoner, a workspace
 package or its own service, with no framework edits. Account Takeover is the
-only domain reasoner that exists today (`reasoners/example` is a minimal
-example); the rows below are illustrations.
+one domain reasoner today: the example reasoner (`reasoners/example`) is a
+minimal documented reasoner, and the four
+[reference-pattern mocks](docs/design/reasoners/patterns.md) demonstrate the
+framework's contracts, not a domain. The rows below are illustrations.
 
 | Domain                    | Corpus                                  | Action Space                               |
 |---------------------------|-----------------------------------------|--------------------------------------------|
