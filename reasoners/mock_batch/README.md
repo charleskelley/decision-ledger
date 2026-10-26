@@ -144,6 +144,7 @@ ledger process builds it, so `make prepare-rulesets` stages every member's
 make prepare-rulesets
 # prepare-rulesets: staged in outputs/stage/rulesets:
 # mock-batch-v1.yaml
+# mock-daily-v1.yaml
 # export RULES_GATE_RULESETS_DIR=<repo>/outputs/stage/rulesets
 export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets   # before make serve
 ```

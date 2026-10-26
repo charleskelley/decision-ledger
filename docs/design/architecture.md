@@ -37,7 +37,11 @@ entry points) and reasoner plugins (`decisionledger.reasoners`, filtered by
 (`app/bootstrap.py`), including the identity resolver the deployment names
 (`DECISIONLEDGER_IDENTITY_RESOLVER`, loaded from the
 `decisionledger.identity_resolvers` group; the built-in passthrough when
-none). It mounts no reasoner router and runs no reasoner code (DR-31).
+none). The lifespan also builds the live registry: the plugins'
+registrations, the registration file's (`DECISIONLEDGER_REGISTRATIONS`),
+and those written over the API, one source per reasoner, each admitted by
+the gates it binds (DR-33; see [Registration](registration.md)). It mounts
+no reasoner router and runs no reasoner code (DR-31).
 
 The framework's only infrastructure is PostgreSQL. Its `decisionledger`
 schema holds the decision bundles, the replay logs, the resolution attempts,
@@ -69,21 +73,25 @@ The offline tools (each reasoner's scorer trainer, scenario generator, and
 eval adapter; the RAG gate's corpus loader; the two eval harnesses) run on
 demand and are not drawn. The RAG gate's retrieval depends on one of them:
 its reference provider reads the corpora its corpus loader writes, under
-the corpus ids reasoners' bindings name
-(`make build-policy-index-<reasoner_id>`).
+the corpus ids reasoners' bindings name (`make build-policy-index` loads
+every corpus the members ship).
 
 ## Component Diagram - Level 3 (Ledger API)
 
-![C4 components of the Ledger API: the routes and the key ring call the operations (create_decision, record_batch, lookup, replay, resolve, the entity timeline), which call decide and submit: intake validation, the identity step (resolver or passthrough), the gate set, gate invocation (mandatory gates concurrently, then advisory), gate-level enforcement, the decision-level rules and the combinator, and the bundle store write to PostgreSQL; side paths are replay (re-enforcing stored gate outputs under the registration snapshot), registrations and their snapshots, and the entity journal and timelines; LocalClient enters at the operations](../assets/diagrams/components.svg)
+![C4 components of the Ledger API: the routes and the key ring call the operations (create_decision, record_batch, lookup, replay, verify, resolve, the entity timeline, register_reasoner), which call decide and submit: intake validation, the identity step (resolver or passthrough), the gate set, gate invocation (mandatory gates concurrently, then advisory), gate-level enforcement, the decision-level rules and the combinator, and the bundle store write to PostgreSQL; gate invocation calls the gate plugins, among them the RAG policy gate, which retrieves through a retrieval provider from each corpus a binding names, and the plugins put what they relied on in the evidence escrow; side paths are the live registry (registrations from three sources: plugins, the registration file, and the operator's PUT over the API; every version snapshotted), replay (re-enforcing stored gate outputs under the registration snapshot), verify (asking each gate that ran how its evidence stands, and checking which artifacts the escrow holds), and the entity journal and timelines; LocalClient enters at the operations](../assets/diagrams/components.svg)
 
 Level 3 zooms into the Ledger API. A route authenticates its caller by the
 `X-DecisionLedger-Key` header (`app/auth.py`) and calls an *operation*
 (`app/api/`): `create_decision`, `record_batch`, `lookup_decision`,
 `replay_decision`, `verify_decision`, `resolve_decision`, `entity_decisions`,
-and the read-only resources. `LocalClient` (`app/client.py`) calls the same operations in
-process as the trusted principal, so an HTTP request and an in-process call
-run identical code. A decision goes through `app/submit.py`: intake
-validation, the identity step (`app/identity/`), the gate set, gate
+`register_reasoner` (the operator's `PUT` of a registration), and the
+read-only resources. `LocalClient` (`app/client.py`) calls the same
+operations in process as the trusted principal, so an HTTP request and an
+in-process call run identical code. Intake reads the live registry
+(`app/reasoner_registry.py`): `register_reasoner` admits a registration as
+startup admits one, and the next decision reads the new version
+([Registration](registration.md)). A decision goes through `app/submit.py`:
+intake validation, the identity step (`app/identity/`), the gate set, gate
 invocation (`app.gates.invoke_gate`; mandatory gates concurrently, then
 advisory ones), gate-level enforcement, the decision-level rules and the
 combinator (`app/enforcement/resolver.py`), and the bundle write
@@ -152,7 +160,7 @@ decision-ledger/
 │   ├── rules/                    decisionledger-gate-rules (rules_gate, gate_id rules): declarative rule sets, no infrastructure
 │   └── policy_rag/               decisionledger-gate-policy-rag (policy_rag_gate, gate_id policy): corpus references (corpus.py), retrieval providers (providers/), prompts, LLM adapters, its own sql/, es/, compose.yaml, eval/
 │
-├── reasoners/                Reasoner plugins, one workspace member per domain (DR-26)
+├── reasoners/                Reasoner plugins, one workspace member each (DR-26)
 │   ├── account_takeover/         ato-reasoner (ato_reasoner): the reference reasoner, its own service, Redis, XGBoost scorer
 │   ├── example/                  example-reasoner (example_reasoner): a minimal documented reasoner (widgets)
 │   ├── mock_stream/              mock-stream-reasoner (mock_stream_reasoner): the real-time event scorer pattern (DR-35)
@@ -261,7 +269,7 @@ Framework components (the ledger):
 | Clients | `app/client.py` | `LocalClient` and `HttpClient`, one `LedgerClient` protocol |
 | Intake and orchestration | `app/submit.py`, `core/submission.py` | Validation, gate set, mandatory then advisory gates |
 | Identity step | `app/identity/`, `core/identity.py` | Resolver plugin or passthrough; the subject on every bundle |
-| Gate seam | `app/gates.py` | Discovery, build, fail-closed invocation, fail-safe verify |
+| Gate seam | `app/gates.py` | Discovery, build, binding admission, fail-closed invocation, fail-safe verify |
 | Deterministic enforcement | `app/enforcement/`, `core/gate/combinator.py` | Gate-level tiers, decision-level rules, most restrictive action |
 | Bundle store and replay | `app/audit/` | Version-2 bundles, replay, registration snapshots, journals, evidence escrow |
 | Contract artifacts | `app/schemas.py`, `schemas/`, `conformance/` | JSON schemas and the black-box HTTP suite |

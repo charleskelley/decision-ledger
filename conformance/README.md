@@ -62,8 +62,8 @@ The instance must register the example reasoner and give it an API key:
   reasoners only) registers it from `registrations.yaml`
   (`DECISIONLEDGER_REGISTRATIONS=conformance/registrations.yaml`), or over
   HTTP: `PUT /api/v1/reasoners/example-reasoner` with the operator key and
-  the same registration as JSON. One source per reasoner: a reasoner
-  registered twice refuses startup.
+  the same registration as JSON, served from the next decision on. One
+  source per reasoner: a reasoner registered twice refuses startup.
 
 The example binds the RAG policy gate. An instance that composes that gate
 serves a reasoner registered without a plugin from the gate's asset root
@@ -95,10 +95,14 @@ or use a throwaway database volume for the over-HTTP setup.
 The example binds the RAG policy gate (advisory) to the `example-policy`
 corpus, and an instance refuses to start until every corpus a registration
 it serves binds is loaded. So load the corpora first: `make prepare-example`
-for the example's, or `make prepare-reasoners` for every installed reasoner's
-(with `DECISIONLEDGER_REASONERS` blank the instance also serves ATO, whose
-binding names `ato-policy`). The suite checks the gated example's contract —
-201, the gate's record — not its verdict. An instance may mandate further gates for every reasoner
+for the example's, or `make prepare-reasoners` for every installed
+reasoner's. With `DECISIONLEDGER_REASONERS` blank, the instance also serves
+ATO, whose binding names `ato-policy`, and the four reference-pattern mocks:
+the stream and text mocks bind `mock-stream-practices`,
+`mock-text-regulatory`, and `mock-text-practice`, which must be loaded too,
+and the batch and daily mocks bind only the rules gate and need no corpus.
+The suite checks the gated example's contract — 201, the gate's record —
+not its verdict. An instance may mandate further gates for every reasoner
 (`DECISIONLEDGER_MANDATORY_GATES`); the suite tolerates them, but a
 mandated gate must accept the example's decisions for the write tests to
 pass.

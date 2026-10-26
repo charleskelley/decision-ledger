@@ -8,7 +8,7 @@ DecisionLedger is a decision system of record for AI systems, with a gating serv
 
 ### Git
 
-Git commits are blocked by `.claude/hooks/block-git-commit.sh` and `.claude/settings.json` permissions. Stage changes and let the user commit. No `Co-authored-by`, `Signed-off-by`, or AI-attribution trailers in commit messages — ever. Use Conventional Commits format with scopes: `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`, `gates`, `api`, `client`, `mcp`, `identity`.
+Git commits are blocked by `.claude/hooks/block-git-commit.sh` and `.claude/settings.json` permissions. Stage changes and let the user commit. No `Co-authored-by`, `Signed-off-by`, or AI-attribution trailers in commit messages — ever. Use Conventional Commits format with scopes: `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`, `gates`, `api`, `client`, `mcp`, `identity`, `registration`, `evidence`, `mocks`.
 
 ### Code Style
 
@@ -123,7 +123,7 @@ Behavior-driven testing — see `docs/development/style.md` for the full philoso
 
 - **`core/` contracts and enforcement routing:** test exhaustively. These are the governance guarantees.
 - **LLM-touching code:** do NOT write unit tests with mocked LLM responses. The RAG policy gate's eval harness (`policy_rag_gate.eval`, `make eval-gate-policy_rag`) is the test suite for that gate; mark any test that calls a live model `@pytest.mark.evaluation`.
-- **Smoke tests:** tag 3–5 end-to-end tests with `@pytest.mark.smoke` (one happy path, one error path, one replay).
+- **Smoke tests:** keep the `@pytest.mark.smoke` set small (eight tests today, ATO's runs once per scenario; together they cover a happy path, an error path, and a replay); a member's smoke test needs Docker only when its pipeline does.
 - **Integration tests** (event in → bundle out): mark with `@pytest.mark.integration`; highest value tests in the suite.
 - Test names describe behavior: `test_enforcement_routes_schema_failure_to_HOLD`, not `test_resolve_action`.
 

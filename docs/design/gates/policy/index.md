@@ -15,8 +15,10 @@ the universal `GateOutput`. It is shared by every reasoner that binds it and
 contains no domain wording: the prompt is the reasoner's, and the corpora are
 references its binding names
 ([DR-34](../../decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)).
-Both shipped reasoners bind it as an advisory gate, so it runs only on the
-decisions they ask the ledger to gate.
+ATO, the example reasoner, and the stream and text mocks
+([Reference reasoner patterns](../../reasoners/patterns.md)) bind it, each as
+an advisory gate, so it runs only on the decisions they ask the ledger to
+gate.
 
 ## Configuration
 
@@ -233,9 +235,12 @@ calling the LLM or retrieving. See
 
 ## Prompts belong to the reasoner
 
-Each reasoner ships its prompt templates in its plugin's `prompts_dir`, and
-the gate's `YamlPromptRegistry` loads one directory per composed reasoner
-when it is built. A template YAML carries `template_id` (the file name's stem
+Each reasoner ships its prompt templates in its plugin's `prompts_dir` or,
+when it is registered without a plugin, under the gate's asset root
+(`<root>/<reasoner_id>/prompts/`). The gate's `YamlPromptRegistry` loads
+each composed plugin's directory when the gate is built, and adds the
+directory of a reasoner without a plugin when it admits that reasoner's
+binding. A template YAML carries `template_id` (the file name's stem
 when absent), `version`, `description`, `template`, an optional top-level
 `system:` key with the system message sent alongside the rendered template,
 and an optional `evidence_layout:` (`numbered_list`, the default, or
@@ -245,7 +250,8 @@ and an optional `evidence_layout:` (`numbered_list`, the default, or
 `{policy_snippets}` (which the gate fills) are its required variables.
 
 Template ids are global: the same `template_id` in two reasoners'
-directories fails the gate's build, because the id is the audit key in every
+directories fails the gate's build (or, for a reasoner admitted from the
+asset root, refuses its binding), because the id is the audit key in every
 decision the gate makes. Template files are immutable: a change is a new
 file with a new version, and the reasoner selects it by sending the new
 `template_id`. For example, the ATO reasoner ships `ato-v1` to `ato-v4`

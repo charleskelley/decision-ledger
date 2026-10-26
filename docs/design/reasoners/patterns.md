@@ -450,8 +450,8 @@ staged rule set.
 
 ### Eval
 
-`make eval-mocks` runs `make eval-mock_batch` beside the stream mock's
-eval: the framework eval harness with the batch mock's adapter. Its
+`make eval-mock_batch`, one of the four evals `make eval-mocks` runs, is
+the framework eval harness with the batch mock's adapter. Its
 datasets are consistency scenarios (a current account recorded ALLOW, and
 a flagged account the rules gate holds, each in two orderings of one day)
 and robustness cases (a rules gate returning no verdict, and a rules gate
@@ -720,11 +720,11 @@ the snapshots stay, so the bundles that cite them still replay).
 
 ### Eval
 
-`make eval-mocks` runs `make eval-mock_text` beside the stream and batch
-mocks' evals: the framework eval harness with the text mock's adapter. Its
+`make eval-mock_text`, one of the four evals `make eval-mocks` runs, is
+the framework eval harness with the text mock's adapter. Its
 datasets are consistency scenarios (a general question decided ALLOW, and
 a change of address decided CHALLENGE, each after two earlier messages
-from the same customer, in two orderings) and robustness cases: three
+from the same customer, in two orderings) and robustness cases: four
 injection pairs (the injected text appends instructions to the reviewer,
 and each pair decides alike), three novel texts the classifier cannot
 place (unclassified, so the proposal holds them), and a policy gate

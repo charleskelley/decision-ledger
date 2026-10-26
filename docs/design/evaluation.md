@@ -55,8 +55,12 @@ entry-point group with the reasoner's `reasoner_id` as its name:
 | `datasets_dir` | Root of the reasoner's golden datasets: `scenarios/` and `robustness/` for this harness, plus whatever a gate's harness reads. |
 | `build_driver(settings)` | An `EvalDriver` into the reasoner's live pipeline, whose `framework` services (the bundle store, the composed gates, the registry) back the shadow dimension. |
 
-Both shipped reasoners publish one: ATO's (`ato_reasoner.eval.adapter:ADAPTER`)
-and the example reasoner's (`example_reasoner.eval.adapter:ADAPTER`).
+Every workspace reasoner publishes one, the four reference-pattern mocks
+included: ATO's (`ato_reasoner.eval.adapter:ADAPTER`), the example
+reasoner's (`example_reasoner.eval.adapter:ADAPTER`), and each mock's
+(`mock_<pattern>_reasoner.eval.adapter:ADAPTER`). `make eval` runs ATO's and
+the example's; `make eval-mocks` runs the mocks'
+([Reference reasoner patterns](reasoners/patterns.md)).
 
 ```bash
 make eval-account_takeover     # the ATO reasoner
@@ -175,8 +179,9 @@ uv run python -m policy_rag_gate.eval [--reasoner-id <id>] [--output-dir <dir>]
 ```
 
 Without a reasoner id (or `DECISIONLEDGER_EVAL_REASONER`), it evaluates every
-installed adapter that ships at least one of the three datasets; today that
-is ATO only. It writes one report per reasoner, to
+installed adapter that ships at least one of the four datasets above; today
+that is ATO only (the example and the mocks ship none). It writes one report
+per reasoner, to
 `outputs/stage/eval/gate/policy/<reasoner_id>/eval-report.json` by default.
 A missing dataset is a skipped dimension, which fails that report. It needs
 `OPENAI_API_KEY` (RAGAS) and `ANTHROPIC_API_KEY` (the judges), and exits `2`
@@ -225,9 +230,11 @@ Version resolution checks the top three rather than the top result
 These thresholds were calibrated on a binding that names one corpus, at
 k = 5. The overall metrics score the passages in the order the gate renders
 them, at k = `k_per_corpus` × the corpora the binding names, so a binding
-that adds a corpus needs thresholds of its own (the report-only per-corpus
-metrics are there to calibrate them); every binding today names one corpus
+that adds a corpus needs thresholds of its own, which the report-only
+per-corpus metrics are there to calibrate
 ([DR-34](decisions.md#dr-34-retrieval-providers-corpus-references-the-evidence-contract-and-evidence-escrow)).
+Every binding this harness evaluates today names one corpus: the text
+mock's binding names two, but the mock ships no dataset for this harness.
 
 ### Faithfulness
 
@@ -273,7 +280,8 @@ for, or is the citation present but irrelevant?
 | `make eval-account_takeover` | ATO's pipeline asks the policy gate for every event its bypass rules do not cover, so live cases call the gate's model (its driver requires `OPENAI_API_KEY`), and shadow evaluation calls it once per sampled record. |
 | `make eval-example` | The example's scenarios are recorded (no gate) and its robustness cases are forced failures, but shadow evaluation re-decides its recorded decisions through the RAG policy gate's model. |
 | `make eval-gate-policy_rag` | RAGAS (OpenAI) and the judges (Anthropic) on every faithfulness and citation case. Retrieval calls no model. |
-| `make eval` | Every reasoner's harness, then every gate's. |
+| `make eval` | ATO's and the example's harnesses, then every gate's: the three runs above. The reference-pattern mocks' evals are not part of it. |
+| `make eval-mocks` | None. Each of the four reference-pattern mocks' evals is the framework harness over Postgres with the mock's own gates: a scripted policy double for the stream and text mocks, the rules gate over the mock's rule set for the batch and daily mocks. No run calls a model or needs Elasticsearch. |
 
 There is no sampling flag beyond the shadow dimension's sample size: a local
 run costs the same as a CI run. Mark any test that calls a model (as a judge
@@ -311,7 +319,7 @@ metrics block per dimension (`retrieval`, `faithfulness`, `consistency`,
 | Workflow | Trigger | What it runs |
 |---|---|---|
 | `.github/workflows/ci.yaml` | Push to `main`, PR to `main` | Ruff format and lint, SQLFluff, Pyright, unit tests (no integration, evaluation, slow, or smoke tests), and the DR-23 SDK-import check |
-| `.github/workflows/integration.yaml` | Push to `main`, PR to `main` | Per (reasoner, gate) pair: the framework DDL, `make prepare-gate-<gate>`, `make prepare-<reasoner>`, then `make test-integration` and `make test-smoke` against service containers (pgvector Postgres, Elasticsearch, Redis) |
+| `.github/workflows/integration.yaml` | Push to `main`, PR to `main` | Per (reasoner, gate) pair: the framework DDL, `make prepare-gate-<gate>`, `make prepare-reasoners` (every installed reasoner's corpora and missing models, the mocks' included), then `make test-integration` and `make test-smoke` against service containers (pgvector Postgres, Elasticsearch, Redis) |
 | `.github/workflows/eval.yaml` | `workflow_dispatch` only | Per (reasoner, gate) pair, below |
 
 The eval workflow runs in the `eval` GitHub Actions environment (its own

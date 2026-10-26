@@ -265,7 +265,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Types:** `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`.
 
-**Scopes** (project-specific): `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`, `gates`, `api`, `client`, `mcp`, `identity`. Use `app` for framework runtime changes that span several of its packages (plugin seam, bootstrap, composition), `reasoners` for changes to a reasoner workspace member that span several of its layers, and `gates` for changes to a gate workspace member or the gate seam that span several of its parts. `api` is the ledger's HTTP surface (`app/api/`), `client` the ledger clients (`app/client.py`), `mcp` the MCP server (`integrations/mcp`), and `identity` the identity contract and step (`core/identity.py`, `app/identity/`).
+**Scopes** (project-specific): `core`, `app`, `reasoners`, `ingestion`, `features`, `scorer`, `retrieval`, `policy-gate`, `enforcement`, `audit`, `eval`, `scenarios`, `infra`, `ci`, `gates`, `api`, `client`, `mcp`, `identity`, `registration`, `evidence`, `mocks`. Use `app` for framework runtime changes that span several of its packages (plugin seam, bootstrap, composition), `reasoners` for changes to a reasoner workspace member that span several of its layers, and `gates` for changes to a gate workspace member or the gate seam that span several of its parts. `api` is the ledger's HTTP surface (`app/api/`), `client` the ledger clients (`app/client.py`), `mcp` the MCP server (`integrations/mcp`), `identity` the identity contract and step (`core/identity.py`, `app/identity/`), `registration` the registration resource and the live registry (DR-33), `evidence` the evidence escrow and verify (DR-34), and `mocks` the reference-pattern mocks (`reasoners/mock_*`, DR-35).
 
 **Examples:**
 
@@ -303,7 +303,7 @@ Not all code needs the same testing rigor. Testing effort concentrates where fai
 
 **Integration tests across the decision path — highest value per test.** An event goes in, a Decision Bundle comes out. Does the right scenario produce the right action? Does replay produce identical output? These tests prove the system works end-to-end. They're slower (Docker required), but they test the thing that matters. Mark with `@pytest.mark.integration`.
 
-**Smoke tests — fast confidence during development.** A minimal subset of integration tests: one happy path, one error path, one replay. Tag 3–5 tests with `@pytest.mark.smoke`. When you want faster feedback than the full integration suite but more confidence than unit tests alone, run `make test-smoke`. These require Docker but finish quickly.
+**Smoke tests — fast confidence during development.** A small set of end-to-end tests that covers a happy path, an error path, and a replay. Eight tests carry `@pytest.mark.smoke` today (ATO's runs once per scenario); keep the set small. When you want faster feedback than the full integration suite but more confidence than unit tests alone, run `make test-smoke`. A member's smoke test needs Docker only when its pipeline does; the framework's own smoke tests need Postgres, except the core bundle test, which needs nothing. The whole set finishes quickly.
 
 **The eval harness IS the test suite for LLM-touching code.** The 5-dimension evaluation framework with CI gates is more rigorous than any unit test for the policy gate. Do not unit-test LLM output with mocked responses — that creates brittle tests that prove nothing about real behavior. The eval harness, running against actual or recorded LLM responses, is the right testing strategy for everything downstream of the policy gate. Mark with `@pytest.mark.evaluation`. Note: evaluation tests make LLM API calls and cost money — don't run them in a tight loop during development.
 
@@ -416,7 +416,7 @@ Each entry should be written as it's built, not retroactively. The goal is inter
 
 - Opens with the problem statement, not the solution.
 - An architecture diagram appears above the fold (D2 or a rendered image; DR-15 superseded DR-9's Mermaid).
-- Quickstart (`uv sync && docker compose up -d && make prepare-account_takeover`) within the first screenful.
+- Quickstart (`uv sync && docker compose up -d && make prepare-reasoners`) within the first screenful.
 - No badges wall. One or two meaningful badges (CI status, Python version) maximum.
 
 ### Inline Documentation

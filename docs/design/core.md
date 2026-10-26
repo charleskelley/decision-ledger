@@ -132,14 +132,20 @@ its predicate read, `holds`, and any evaluation error).
 ## The Registration
 
 `core.observation.ReasonerRegistration` is what the ledger knows about a
-reasoner. It comes from an installed reasoner plugin or from the deployment's
-registration file (`DECISIONLEDGER_REGISTRATIONS`), and is served read-only by
-`GET /api/v1/reasoners`.
+reasoner. It comes from one of three sources (DR-33): an installed reasoner
+plugin, the deployment's registration file (`DECISIONLEDGER_REGISTRATIONS`),
+or `PUT /api/v1/reasoners/{reasoner_id}` with the operator key; a reasoner
+has one source. The registry is live: the framework's
+`LiveReasonerRegistry` (`app/reasoner_registry.py`) implements
+`ReasonerRegistry.register`, so a registration written over the API,
+admitted with the checks startup runs, is snapshotted and served from the
+next decision on. `GET /api/v1/reasoners` serves every registration with its
+version and source; see [Registration](registration.md).
 
 | Field | Meaning |
 |-------|---------|
 | `reasoner_id`, `reasoner_name` | Identity; `reasoner_id` is the tenant column |
-| `gates` | `tuple[GateBinding, ...]`: `GateBinding(gate_id, mandatory=False)`, each gate once |
+| `gates` | `tuple[GateBinding, ...]`: `GateBinding(gate_id, mandatory=False, config={})`, each gate once; `config` is the gate's configuration for this reasoner, JSON the framework never interprets, validated by the gate when it admits the binding (DR-33) |
 | `bypass_rules` | `tuple[BypassRule, ...]`: `BypassRule(rule_id, version, description, predicate, action)`, unique ids |
 | `recordable_actions` | Actions the reasoner may record (default: all); every rule's action must be one |
 | `native_namespaces` | `tuple[NativeNamespace, ...]`: per namespace, the `entity_type` it names and the UUID5 `namespace_uuid` its ids derive under |
@@ -226,11 +232,11 @@ as its identity. `GateStatus` is `ran`, `skipped`, or `failed`.
 | Type | Role |
 |------|------|
 | `GateKind` | `llm`, `lookup`, or `rules` |
-| `GatePlugin` | What the `decisionledger.gates` entry point publishes: `gate_id` (equal to the entry-point name), `kind`, `deterministic`, `config_model` (a Pydantic model for `gate_config`, or `None`), `build(framework) -> Gate` |
+| `GatePlugin` | What the `decisionledger.gates` entry point publishes: `gate_id` (equal to the entry-point name), `kind`, `deterministic`, `config_model` (a Pydantic model for `gate_config`, or `None`), optionally `binding_config_model` (a Pydantic model for a registration's `GateBinding.config`, DR-33), `build(framework) -> Gate` |
 | `Gate` | `async evaluate(request: GateRequest) -> GateOutput` (must not block the event loop) and `close()` |
 | `ConfigAuthorizer` | Optional capability of a built gate: `authorize_config(config, *, reasoner_id)` raises `ValueError` to refuse a configuration for that reasoner (422 `GATE_CONFIG_UNAUTHORIZED`) |
 | `BindingValidator` | Optional capability (DR-33): `validate_binding(reasoner_id, config)` raises `GateConfigError` to refuse a registration's binding (startup fails, or the write is 422 `GATE_BINDING_REFUSED`) |
-| `ReasonerScope` | Optional capability: `serves(reasoner_id)`; startup refuses a registration that binds a gate that cannot serve it |
+| `ReasonerScope` | Optional capability: `serves(reasoner_id)`, asked once the gate admits a binding; a registration that binds a gate that cannot serve it is refused (startup fails, or the write is 422 `GATE_BINDING_REFUSED`) |
 | `EvidenceVerifier` | Optional capability (DR-34): `async verify(output, *, live) -> tuple[EvidenceStatus, ...]`, one status per reference of an output the gate returned, against its own record or, live, its source |
 | `ComposedGate` | A built gate with its plugin and whether the deployment mandates it |
 | `invoke_gate(composed, request)` | Runs one gate under its budget and returns a `GateInvocation`; a gate that is not composed, raises, times out, or returns an unusable output fails closed with the reason |
@@ -320,12 +326,13 @@ The ledger serves only its own routes (`app/main.py`, `app/api/`); it mounts
 no reasoner router (DR-31). Every `/api/v1` route authenticates the caller by
 the `X-DecisionLedger-Key` header (`app/auth.py`): a **reasoner** key writes
 and reads its own reasoner's decisions (another tenant's decision reads as
-404), the **operator** key reads every decision and resolves held ones but
-writes none, and `LocalClient` acts as the **trusted** in-process principal.
-Keys come from `DECISIONLEDGER_API_KEYS` (`reasoner_id:key` pairs),
-`DECISIONLEDGER_API_KEYS_FILE`, and `DECISIONLEDGER_OPERATOR_KEY`; with none
-configured, every `/api/v1` route answers 401. The OpenAPI document is served
-at `/openapi.json`.
+404); the **operator** key reads every decision, resolves held ones, and
+registers reasoners (`PUT /api/v1/reasoners/{reasoner_id}`, DR-33), but
+submits no decision; and `LocalClient` acts as the **trusted** in-process
+principal. Keys come from `DECISIONLEDGER_API_KEYS` (`reasoner_id:key`
+pairs), `DECISIONLEDGER_API_KEYS_FILE`, and `DECISIONLEDGER_OPERATOR_KEY`;
+with none configured, every `/api/v1` route answers 401. The OpenAPI
+document is served at `/openapi.json`.
 
 | Route | Caller | Returns |
 |-------|--------|---------|
@@ -340,6 +347,7 @@ at `/openapi.json`.
 | `GET /api/v1/identity/resolve` | any key | `ResolvedIdentity`; query `namespace`, `native_id` |
 | `GET /api/v1/reasoners` | any key | `ReasonerList`: every served registration, its version and source |
 | `GET /api/v1/reasoners/{reasoner_id}` | any key | One registration as served now |
+| `PUT /api/v1/reasoners/{reasoner_id}` | operator | 201 `RegisteredReasonerView` and `Location` when the reasoner was not registered, 200 when its API registration is replaced or unchanged; body: one `ReasonerRegistration` in the registration file's JSON shape (at most 1 MiB), admitted as at startup (DR-33) |
 | `GET /api/v1/reasoners/{reasoner_id}/registrations/{version}` | any key | One stored registration version |
 | `GET /api/v1/gates` | any key | `GateList`: each composed gate's id, kind, determinism, mandate, and `gate_config` JSON schema |
 
@@ -377,6 +385,7 @@ same way. Clients switch on `code`:
 | `GET /entities/{id}/decisions` | 422 `ENTITY_ID_INVALID`, `REQUEST_INVALID`; 403 `REASONER_MISMATCH` (a reasoner key asking for another reasoner's decisions) |
 | `GET /identity/resolve` | 422 `REQUEST_INVALID`; 404 `IDENTITY_UNRESOLVED` (no resolver match and no registration declares the namespace) |
 | `GET /reasoners/{id}`, `.../registrations/{version}` | 404 `REASONER_NOT_FOUND`, `REGISTRATION_VERSION_NOT_FOUND` |
+| `PUT /reasoners/{id}` | 403 `OPERATOR_REQUIRED`; 413 `BODY_TOO_LARGE`; 409 `REGISTRATION_SOURCE_IMMUTABLE` (a plugin's or the file's reasoner); 422 `REGISTRATION_INVALID`, `NATIVE_NAMESPACE_CONFLICT`, `GATE_BINDING_REFUSED` (`gate_id` names the gate). A refusal stores nothing |
 
 ### Exception classes
 
@@ -394,9 +403,10 @@ transport error propagate.
 | `PredicateError` | A predicate cannot be evaluated (missing field, non-numeric ordering operand) | The caller fails closed: the bypass rule does not hold, or the rules gate holds |
 | `LedgerError` | Any API operation refusal: `status`, `code`, `detail` | The problem document; `HttpClient` raises it again from the document |
 | `ReasonerPluginError` | A reasoner plugin or eval adapter cannot be discovered or validated | Startup (or eval harness) failure |
-| `GatePluginError` | A gate plugin cannot be discovered, built, or trusted, or a mandated gate is not composed | Startup failure (a gate that misbehaves at decision time fails closed instead) |
+| `GatePluginError` | A gate plugin cannot be discovered, built, or trusted, a mandated gate is not composed, or the composed gates cannot serve a registration's gate set | Startup failure; on a registration write, 422 `GATE_BINDING_REFUSED` (a gate that misbehaves at decision time fails closed instead) |
+| `GateConfigError` | A gate refuses a reasoner's binding: its plugin's `binding_config_model` rejects the binding's `config`, the gate takes no configuration, or its `validate_binding` refuses (DR-33) | Raised again as `GatePluginError` naming the gate: a startup failure, or 422 `GATE_BINDING_REFUSED` on a registration write |
 | `ResolverPluginError` | The configured identity resolver cannot be composed | Startup failure (a resolver that misbehaves at decision time gives an unresolved subject instead) |
-| `RegistrationError` | The registration file cannot be read or validated, a reasoner is registered twice, or two registrations declare one native namespace differently | Startup failure |
+| `RegistrationError` | The registration file cannot be read or validated, two sources register one reasoner (a plugin, the file, or the API), two registrations declare one native namespace differently, or a declared registration is replaced at runtime (DR-33) | Startup failure; on a registration write, a namespace conflict is 422 `NATIVE_NAMESPACE_CONFLICT` (a write for a plugin's or the file's reasoner is refused before the registry is asked: 409 `REGISTRATION_SOURCE_IMMUTABLE`) |
 
 All errors are logged as structured JSON with `component` and, where known,
 `event_id` and `decision_id`.

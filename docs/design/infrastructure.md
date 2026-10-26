@@ -4,12 +4,13 @@ The local development stack, the database schema, the stores that gates and
 reasoners own, the production deployment model, and the environment
 variables.
 
-The framework's only infrastructure is PostgreSQL. The ledger keeps every
-Decision Bundle, replay log, resolution attempt, registration snapshot, and
-the identity journal in one schema, `decisionledger`, and needs nothing else
-to run. A gate or a reasoner that needs more (a search index, a feature store,
-a queue) brings it in its own compose file and configures it under its own
-prefix: the framework never connects to it.
+The framework's only infrastructure is PostgreSQL. The ledger keeps the
+Decision Bundles, replay logs, resolution attempts, registration snapshots,
+registrations written over the API, evidence escrow, and identity journal
+in one schema, `decisionledger`, and needs nothing else to run. A gate or a
+reasoner that needs more (a search index, a feature store, a queue) brings
+it in its own compose file and configures it under its own prefix: the
+framework never connects to it.
 
 ---
 
@@ -53,8 +54,10 @@ the extension there (see [Gate-owned storage](#gate-owned-storage)).
 
 Nothing in the framework (`core/`, `app/`, `eval/`) uses Redis or
 Elasticsearch. ATO opens its own Redis client from `ATO_REDIS_URL`
-(`ato_reasoner/plugin.py`); the RAG policy gate opens its own Elasticsearch
-client from `POLICY_RAG_GATE_ELASTICSEARCH_URL` when it is built.
+(`ato_reasoner/plugin.py`); the RAG policy gate's reference retrieval
+provider opens its own Elasticsearch client from
+`POLICY_RAG_GATE_ELASTICSEARCH_URL` the first time a binding names it (when
+the gate admits the binding, at startup or on a registration write).
 
 The services that run Python are not containerized yet. They run directly with
 uv during development:
@@ -63,12 +66,14 @@ uv during development:
 |---------|---------|------|
 | The ledger API | `make serve` (`uv run uvicorn --factory app.main:create_app`) | 8000 |
 | ATO's own service | `make serve-account_takeover` (`ato_reasoner.app:create_app`) | 8001 |
+| The stream mock's own service | `make serve-mock_stream` (`mock_stream_reasoner.app:create_app`) | 8002 |
 | The MCP server | `uv run decisionledger-mcp` (stdio) | none |
 
 ATO's service submits to the ledger in its own process through `LocalClient`
 (writing to the same Postgres) unless `ATO_LEDGER_URL` points it at a ledger
-over HTTP. The [local runbook](../development/runbook-local.md) walks through
-a first run.
+over HTTP. The stream mock's service always submits over HTTP, to
+`MOCK_STREAM_LEDGER_URL`. The [local runbook](../development/runbook-local.md)
+walks through a first run.
 
 ### Resource Expectations (M1 Max, 64GB RAM)
 
@@ -404,7 +409,7 @@ uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner
 # Delete the corpus's Elasticsearch documents first, then load
 uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --reasoner-id ato-reasoner --wipe
 
-# Explicit corpus root instead of the plugin's corpus_dir
+# Explicit corpus root instead of the plugin's corpus_dir or the asset root's
 uv run python -m policy_rag_gate.corpus_loader --corpus-id ato-policy --corpus-dir path/to/corpus
 ```
 
@@ -462,7 +467,7 @@ Compose services map to AWS managed services:
 | PostgreSQL | Framework (and the RAG policy gate's own schema) | RDS PostgreSQL or Aurora PostgreSQL | The pgvector extension is needed only where the RAG policy gate runs |
 | Elasticsearch | RAG policy gate | Amazon OpenSearch Service | Same BM25 functionality |
 | Redis Streams | ATO reasoner | ElastiCache for Redis | Cluster mode for partitioned streams; provisioned per reasoner that needs it |
-| Ledger API (FastAPI) | Framework | ECS Fargate (or EKS) | Stateless; horizontally scalable |
+| Ledger API (FastAPI) | Framework | ECS Fargate (or EKS) | Decides statelessly and scales horizontally; its live registry is per process (see below) |
 | ATO service (FastAPI) | ATO reasoner | ECS Fargate (or EKS) | A separate service that submits to the ledger over HTTP |
 
 ### Terraform Modules (planned)
@@ -483,9 +488,12 @@ infra/
 
 ### Horizontal Scaling Considerations
 
-The ledger API is stateless: every decision's state is in Postgres, and the
-gates it composes run inside its process. It scales horizontally without
-coordination.
+The ledger API keeps every decision's state in Postgres, and the gates it
+composes run inside its process, so deciding scales horizontally without
+coordination. Registering over the API does not yet (DR-33): each process
+holds its live registry in memory and reads the registrations written over
+the API only when it starts, so a `PUT` is served by the process that took
+it, and by the others once they restart.
 
 ATO's feature service is **not** trivially scalable: it keeps sliding-window
 state in Redis sorted sets keyed by `account_id`. A naive scale-out produces
@@ -511,9 +519,10 @@ framework and are read by `FrameworkSettings` (`app/settings.py`). A gate or a
 reasoner reads its own variables under its own prefix, in its own settings
 class: `RULES_GATE_` (`rules_gate/settings.py`), `POLICY_RAG_GATE_`
 (`policy_rag_gate/settings.py`), `ATO_` (`AtoSettings` in
-`ato_reasoner/settings.py`). The LLM providers' keys keep their providers'
-names. Port variables marked "Compose" only change a host port mapping in a
-compose file.
+`ato_reasoner/settings.py`), and `MOCK_STREAM_`, `MOCK_BATCH_`, `MOCK_TEXT_`,
+and `MOCK_DAILY_` (each mock's `settings.py`). The LLM providers' keys keep
+their providers' names. Port variables marked "Compose" only change a host
+port mapping in a compose file.
 
 ### Framework
 
@@ -528,7 +537,7 @@ compose file.
 | `LOG_LEVEL` | Framework | Log level | `INFO` |
 | `DECISIONLEDGER_REASONERS` | Framework | Comma-separated allowlist of `reasoner_id`s to compose from the installed plugins (plugins only: the file's and the API's registrations are always served) | blank (every installed plugin) |
 | `DECISIONLEDGER_MANDATORY_GATES` | Framework | Comma-separated `gate_id`s run on every decision of every reasoner (DR-29); each must be composed, or startup fails | blank (none) |
-| `DECISIONLEDGER_REGISTRATIONS` | Framework | Path to a YAML file of reasoner registrations, composed with the plugins' (DR-31) | blank (no file) |
+| `DECISIONLEDGER_REGISTRATIONS` | Framework | Path to a YAML file of reasoner registrations (source `file:<path>`), composed with the plugins' and those written over the API (DR-31, DR-33; see [Registration](registration.md)); a reasoner it registers has no other source and cannot be replaced over the API | blank (no file) |
 | `DECISIONLEDGER_IDENTITY_RESOLVER` | Framework | The one active identity resolver: an entry-point name in `decisionledger.identity_resolvers` (DR-32); a name that is not installed refuses startup | blank (the passthrough; `passthrough` is the same) |
 | `DECISIONLEDGER_API_KEYS` | Framework | Reasoner API keys as comma-separated `reasoner_id:key` pairs | blank (no reasoner keys; with no key at all, every route but `/health` answers 401) |
 | `DECISIONLEDGER_API_KEYS_FILE` | Framework | Path to a YAML file mapping `reasoner_id` to a key or a list of keys, read in addition | blank (no file) |
@@ -544,7 +553,7 @@ compose file.
 | `POLICY_RAG_GATE_ELASTICSEARCH_URL` | RAG policy gate | The gate's Elasticsearch | `http://localhost:9200` |
 | `POLICY_RAG_GATE_ASSETS_ROOT` | RAG policy gate, corpus loader | Asset root of reasoners registered without a plugin: `<root>/<reasoner_id>/prompts/*.yaml` and `corpus/**/*.md` (DR-33; see [Registration](registration.md)) | blank (plugin reasoners only) |
 | `POLICY_RAG_GATE_ELASTICSEARCH_PORT` | Compose (`gates/policy_rag/compose.yaml`) | Elasticsearch host port | `9200` |
-| `OPENAI_API_KEY` | RAG policy gate (and the OpenAI SDK) | The gate's LLM client and its eval's faithfulness scorer | none (required for gated decisions that reach the RAG gate) |
+| `OPENAI_API_KEY` | RAG policy gate (and the OpenAI SDK) | The gate's LLM client and its eval's faithfulness scorer | none (required to start any ledger that composes the RAG policy gate, including one run in process through `LocalClient`, even if no decision reaches the model) |
 | `ANTHROPIC_API_KEY` | RAG policy gate (and the Anthropic SDK) | The gate eval's LLM judges | none (required for `make eval-gate-policy_rag`) |
 
 The RAG policy gate's Postgres tables live in the framework's database, so the
@@ -560,6 +569,22 @@ gate connects with the `POSTGRES_*` settings above.
 | `ATO_TEMPLATE_ID` | ATO reasoner | The RAG policy gate template ATO names in its gate context: `ato-v4` (tiered evidence with the conflict/gap protocol), `ato-v3` (the behavior before DR-34), or `ato-v2`; any other value refuses startup (`ato-v1` cannot be rendered again) | `ato-v4` |
 | `ATO_LEDGER_URL` | ATO reasoner | The ledger ATO's service submits to over HTTP | blank (the ledger runs in ATO's process, through `LocalClient`) |
 | `ATO_LEDGER_KEY` | ATO reasoner | ATO's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
+
+### Reference-pattern mocks
+
+| Variable | Read by | Description | Default |
+|----------|---------|-------------|---------|
+| `MOCK_STREAM_LEDGER_URL` | Stream mock | The ledger the stream mock's own service (`make serve-mock_stream`) submits to over HTTP | blank (the service refuses to start; it never falls back to a ledger in its own process) |
+| `MOCK_STREAM_LEDGER_KEY` | Stream mock | The stream mock's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
+| `MOCK_STREAM_WINDOW_SECONDS` | Stream mock | How far back, in event time, a transfer's per-account window reaches | `600` |
+| `MOCK_STREAM_ALLOWED_LATENESS_SECONDS` | Stream mock | How far behind the stream's watermark an event may arrive and still be decided | `300` |
+| `MOCK_STREAM_HISTORY` | Stream mock | How many recent decisions the service lists (`GET /api/v1/stream/decisions`, 1 to 100,000); the ledger keeps every bundle | `1000` |
+| `MOCK_BATCH_LEDGER_URL` | Batch mock | The ledger the batch mock's `run` (`make run-mock_batch`) submits to over HTTP | blank (`run` refuses to start) |
+| `MOCK_BATCH_LEDGER_KEY` | Batch mock | The batch mock's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
+| `MOCK_TEXT_LEDGER_URL` | Text mock | The ledger the text mock's `decide` submits to over HTTP | blank (`decide` refuses to start) |
+| `MOCK_TEXT_LEDGER_KEY` | Text mock | The text mock's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
+| `MOCK_DAILY_LEDGER_URL` | Daily mock | The ledger the daily mock's `run` (`make run-mock_daily`) submits to over HTTP | blank (`run` refuses to start) |
+| `MOCK_DAILY_LEDGER_KEY` | Daily mock | The daily mock's API key on that ledger (one of its `DECISIONLEDGER_API_KEYS`) | blank |
 
 ### Clients
 

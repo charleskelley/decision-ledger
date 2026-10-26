@@ -10,7 +10,8 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 - Docker Desktop running (or Docker Engine on Linux) with Compose 2.20 or later (the root compose file uses `include:`)
 - `uv` installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- `.env` file created from `.env.example` (optional — defaults work for local dev; `OPENAI_API_KEY` is needed for decisions the RAG policy gate runs on, `ANTHROPIC_API_KEY` for that gate's eval, `make eval-gate-policy_rag`)
+- `.env` file created from `.env.example` (optional — its defaults work for local dev)
+- `OPENAI_API_KEY` set, in `.env` or the environment: a ledger that composes the RAG policy gate (the default composition does) reads it when it starts, even if no decision reaches the model, and the decisions the gate runs on need a working key. `ANTHROPIC_API_KEY` is needed only for that gate's eval (`make eval-gate-policy_rag`).
 
 ---
 
@@ -163,7 +164,7 @@ make eval-account_takeover
 make eval-gate-policy_rag REASONER=ato-reasoner
 ```
 
-To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example) or over the API with the operator key (`PUT /api/v1/reasoners/{reasoner_id}`; see [Registration](../design/registration.md)). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
+To compose only some installed reasoners, set `DECISIONLEDGER_REASONERS` (comma-separated ids). A reasoner with no plugin installed registers through `DECISIONLEDGER_REGISTRATIONS` (a YAML file; `conformance/registrations.yaml` is an example) or over the API with the operator key (`PUT /api/v1/reasoners/{reasoner_id}`, served from the next decision on; see [Registration](../design/registration.md)). With none registered, the API still starts and logs `api.no_reasoners`; with no API key configured it logs `api.no_keys` and answers 401 to every `/api/v1` route.
 
 ### A reasoner without a plugin
 
@@ -259,18 +260,18 @@ docker compose exec postgres psql -U decisionledger -d decisionledger \
 #   entity_membership, evidence_artifacts, reasoner_registrations,
 #   reasoner_registry, replay_logs
 
-# RAG policy gate: the vector extension and its chunk table
+# RAG policy gate: the vector extension and its tables
 make prepare-gate-policy_rag   # idempotent; the API and the corpus loader run it too
 docker compose exec postgres psql -U decisionledger -d decisionledger -c '\dx'
 # Expected: vector listed in extensions
 docker compose exec postgres psql -U decisionledger -d decisionledger \
   -c '\dt policy_rag.*'
-# Expected: policy_chunks
+# Expected: corpora, documents, policy_chunks
 ```
 
-The framework's schema comes from `app/audit/sql/01_init.sql` and `02_tables.sql`, mounted into the Postgres init directory on first start; it creates no extension. The RAG policy gate's schema (`policy_rag`, the vector extension, the chunk table) comes from its own DDL in `gates/policy_rag/src/policy_rag_gate/sql/`, applied idempotently when the API builds the gate, before every corpus load, and by `make prepare-gate-policy_rag`. The API also re-applies the framework's DDL on every start, so an older volume picks up new columns without a reset.
+The framework's schema comes from `app/audit/sql/01_init.sql` and `02_tables.sql`, mounted into the Postgres init directory on first start; it creates no extension. The RAG policy gate's schema (`policy_rag`, the vector extension, and its corpora, documents, and chunk tables) comes from its own DDL in `gates/policy_rag/src/policy_rag_gate/sql/`, applied idempotently when the reference provider is built (the first time a binding names it, at startup or on a registration write), before every corpus load, and by `make prepare-gate-policy_rag`. The API also re-applies the framework's DDL on every start, so an older volume picks up new columns without a reset.
 
-**Upgrading a stack created before the RAG gate moved into `gates/policy_rag` (Phase 1b).** Chunks now live in `policy_rag.policy_chunks`, which starts empty: re-index every corpus (`make prepare-reasoners`), or the gate's dense leg finds nothing and decisions run on BM25 evidence alone. The old `decisionledger.policy_chunks` table is no longer read (`docker compose down -v` removes it). `ELASTICSEARCH_URL` and `ELASTICSEARCH_PORT` are now `POLICY_RAG_GATE_ELASTICSEARCH_URL` and `POLICY_RAG_GATE_ELASTICSEARCH_PORT`; the old names are ignored.
+**Upgrading a stack created before the RAG gate moved into `gates/policy_rag` (Phase 1b).** Chunks now live in `policy_rag.policy_chunks`, which starts empty, so re-index every corpus (`make prepare-reasoners`): the ledger does not start until every corpus a served registration binds is loaded. The old `decisionledger.policy_chunks` table is no longer read (`docker compose down -v` removes it). `ELASTICSEARCH_URL` and `ELASTICSEARCH_PORT` are now `POLICY_RAG_GATE_ELASTICSEARCH_URL` and `POLICY_RAG_GATE_ELASTICSEARCH_PORT`; the old names are ignored.
 
 ### Stop services
 
@@ -716,7 +717,7 @@ make prepare-reasoners     # reload every reasoner's corpus (+ train missing mod
 make train-account_takeover        # retrain the XGBoost scorer (artifact + model card + CSVs)
 make eval-model-account_takeover   # re-evaluate the scorer on a fresh-seed test set
 make capture-baselines-account_takeover   # re-capture faithfulness fixtures from live gate runs
-make eval                          # every reasoner's eval, then every gate's (slow, paid)
+make eval                          # ATO's and the example's evals, then every gate's (slow, paid)
 ```
 
 The latest committed eval report (`outputs/eval/eval-report-v2.json`, 2026-10-11) measures the `ato-v3` prompt and predates the split into the framework's and the RAG policy gate's harnesses; `eval-report-v1.json` is kept as history. New runs are staged under `outputs/stage/eval/reasoner/<reasoner_id>/` and `outputs/stage/eval/gate/policy/<reasoner_id>/`; see [Evaluation](../design/evaluation.md).

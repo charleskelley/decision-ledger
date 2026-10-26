@@ -10,17 +10,28 @@
 # intake validation → the identity step → the gate set → gate invocation
 # (mandatory gates concurrently, then advisory ones) → gate-level enforcement
 # → the decision-level rules and the combinator → the bundle store write.
-# Side paths: replay re-enforces a bundle's stored gate outputs under its
-# registration snapshot and logs the outcome to replay_logs; the registry
-# snapshots every registration version; the entity journal and the timeline
-# query serve a subject's decisions.
+# Side paths: the live registry serves the registrations of three sources
+# (the reasoner plugins, the registration file, and the operator's PUT,
+# which the register_reasoner operation admits and writes) and snapshots
+# every version; replay re-enforces a bundle's stored gate outputs under its
+# registration snapshot and logs the outcome to replay_logs; verify asks
+# each gate that ran how its evidence references stand, beside a check of
+# which artifacts the evidence escrow holds, and decides nothing again; the
+# escrow keeps the content the gates relied on, which they put through the
+# framework's store while they decide (each gate plugin receives the store
+# when it is built); the entity journal and the timeline query serve a
+# subject's decisions.
 # Teal components are framework code; dashed ones are plugins the framework
-# loads but does not implement (gate plugins, the identity resolver).
+# loads but does not implement (gate plugins, the identity resolver). The
+# gate plugins box also names the RAG policy gate's provider seam, the
+# gate's own code, which the framework never sees: the gate retrieves
+# through a RetrievalProvider from each corpus a reasoner's binding names.
 #
 # Render:  d2 --theme 0 components.d2 ../../assets/diagrams/components.svg
 #          (uses dagre — see justfile for the special-case)
 # Ref:     docs/design/architecture.md, docs/design/pipeline.md,
-#          docs/design/identity.md
+#          docs/design/identity.md, docs/design/registration.md,
+#          docs/design/gates/policy/providers.md
 ###############################################################################
 
 title: Components — Ledger API {
@@ -37,15 +48,17 @@ direction: down
 #   Framework        fill #e8f5f3 / stroke #0d9488  (teal)
 #   Decision steps   fill #ffffff / stroke #0d9488  (teal outline, in the
 #                    decide/submit container)
-#   Gate plugin      fill #ffffff / stroke #0d9488, dashed
+#   Gate plugin      fill #ffffff / stroke #0d9488, dashed  (its label also
+#                    names the RAG policy gate's provider seam, gate code)
 #   Identity         fill #fef3e8 / stroke #c9622e, dashed  (burnt orange:
 #                    the enterprise's resolver plugin or the passthrough)
 #   Datastore        fill #fbf3e6 / stroke #8c6d3f  (ochre)
 #   Caller           fill #f0f0f0 / stroke #1c2024  (neutral)
 ###############################################################################
 
-# Node text 22px and edge text 20px keep the labels legible at the docs
-# column width
+# Node text 22px and edge text 20px. The canvas (about 2,200px since the
+# registry's sources, verify, and the escrow joined it) is wider than the
+# docs column, which scales it down: open the SVG to read it at full size
 classes: {
   caller: {style: {fill: "#f0f0f0"; stroke: "#1c2024"; stroke-width: 2; font-size: 22}}
   framework: {style: {fill: "#e8f5f3"; stroke: "#0d9488"; stroke-width: 2; font-size: 22}}
@@ -57,6 +70,7 @@ classes: {
   flow: {style: {stroke: "#0d9488"; stroke-width: 2; font-size: 20}}
   side: {style: {stroke: "#0d9488"; stroke-dash: 4; font-size: 20}}
   to-plugin: {style: {stroke: "#0d9488"; stroke-dash: 4; font-size: 20}}
+  from-plugin: {style: {stroke: "#0d9488"; stroke-dash: 4; font-size: 20}}
   to-identity: {style: {stroke: "#c9622e"; stroke-dash: 4; font-size: 20}}
   to-store: {style: {stroke: "#8c6d3f"; font-size: 20}}
   from-caller: {style: {stroke: "#1c2024"; font-size: 20}}
@@ -80,9 +94,9 @@ routes: "Routes + KeyRing\napp/api/ · app/auth.py" {
   tooltip: "GET /health and the /api/v1 routes. KeyRing maps X-DecisionLedger-Key to a principal: a reasoner (bound to its reasoner_id) or the operator. Errors are RFC 9457 problem documents with a stable code (app/api/errors.py)."
 }
 
-ops: "Operations\ncreate_decision · record_batch\nlookup_decision · replay_decision\nresolve_decision · entity_decisions" {
+ops: "Operations\ncreate_decision · record_batch\nlookup_decision · replay_decision\nverify_decision · resolve_decision\nentity_decisions · register_reasoner" {
   class: framework
-  tooltip: "app/api/decisions.py and app/api/entities.py: the functions the routes and LocalClient both call."
+  tooltip: "app/api/decisions.py, entities.py, and registrations.py, with the read-only gates.py and identity.py: the functions the routes and LocalClient both call. resolve_decision and register_reasoner are operator acts."
 }
 
 ###############################################################################
@@ -139,23 +153,33 @@ resolver: "Identity resolver plugin\nor the passthrough" {
   tooltip: "decisionledger.identity_resolvers entry point named by DECISIONLEDGER_IDENTITY_RESOLVER (app/identity/resolvers.py); the passthrough (app/identity/passthrough.py) when none is configured."
 }
 
-gates: "Gate plugins\ndecisionledger.gates" {
+gates: "Gate plugins\ndecisionledger.gates\nRAG policy gate retrieves\nthrough RetrievalProviders\nfrom bound corpora" {
   class: plugin
-  tooltip: "Composed by app/gates.py. Each gate's evaluate(GateRequest) returns a GateOutput; the ledger enforces it."
+  tooltip: "Composed by app/gates.py: each plugin's build gets the framework services, the bundle store's evidence escrow among them. A gate admits each binding to it (binding_config_model, BindingValidator) at startup and when a registration is written; its evaluate(GateRequest) returns a GateOutput, which the ledger enforces; a gate that is an EvidenceVerifier answers verify. The reference gates are the rules gate and the RAG policy gate. The RAG policy gate's provider seam is its own code, which the framework never sees (policy_rag_gate/providers/, DR-34): a reasoner's binding names the corpora the gate reads for it (PolicyBindingConfig: corpus id, provider, authority tier), and the gate queries each through the RetrievalProvider that holds it (the gate's own policy_rag_gate.providers entry-point group), ranks within a corpus only, never fuses scores across corpora, and holds every answer to the evidence contract. The reference provider is pgvector + Elasticsearch + the cross-encoder reranker over the corpora the corpus loader loads."
 }
 
 ###############################################################################
 # Side paths
 ###############################################################################
 
-registry: "Registry + registration snapshots\napp/plugins.py · app/audit/registrations.py" {
+registry: "Live registry + registration snapshots\nLiveReasonerRegistry\nsources: plugin · file · API (PUT)" {
   class: framework
-  tooltip: "The plugins' registrations plus the registration file's (DECISIONLEDGER_REGISTRATIONS). Each version is snapshotted to reasoner_registrations before the first decision; intake validates against the current version, replay against the bundle's registration_version."
+  tooltip: "app/reasoner_registry.py (LiveReasonerRegistry), composed at startup by app/plugins.py:build_registry from three sources: the reasoner plugins (decisionledger.reasoners), the registration file (DECISIONLEDGER_REGISTRATIONS), and PUT /api/v1/reasoners/{reasoner_id} with the operator key (register_reasoner), kept in reasoner_registry and composed again at every start. One source per reasoner: a reasoner_id two sources register refuses startup, and a PUT for a plugin's or the file's reasoner answers 409 REGISTRATION_SOURCE_IMMUTABLE. A PUT is admitted with the startup check and takes effect with the next decision. Each version is snapshotted to reasoner_registrations before it is served (app/audit/registrations.py); intake validates against the current version, replay against the bundle's registration_version."
 }
 
 replay: "Replay · BundleStore.replay\nre-enforces stored gate outputs\nunder the registration snapshot" {
   class: framework
   tooltip: "app/audit/store.py — replay_bundle re-runs gate-level enforcement on each stored GateOutput, re-evaluates the bypass rules, and re-applies the decision-level rules and the combinator; no gate is invoked. BundleStore.replay appends the outcome to replay_logs."
+}
+
+verify: "Verify · verify_evidence\nasks each gate that ran\nhow its evidence stands" {
+  class: framework
+  tooltip: "app/api/decisions.py:verify_decision with app.gates.verify_evidence (DR-34). For each evidence reference of each gate that ran, two independent answers: escrow (present, missing, or none: whether the escrow holds the artifact the reference names) and status (what the gate's EvidenceVerifier answers, checking its own record and, with ?live=true, its source as it is now). A gate that is not composed, does not verify, fails, or answers late or out of contract leaves its references not_verifiable. Nothing is decided again and the bundle is unchanged; replay never asks a gate anything."
+}
+
+escrow: "Evidence escrow\nArtifactStore\nevidence_artifacts, by digest" {
+  class: framework
+  tooltip: "app/audit/artifacts.py (DR-34), the bundle store's (BundleStore.artifacts): the content a gate relied on while deciding, kept once in evidence_artifacts under its SHA-256, which the gate records on its evidence reference (artifact_hash). Each gate plugin's build takes it from the framework services; a gate puts from a worker thread while it evaluates, and a failed put fails the gate closed. Verify reads which artifacts it holds. DECISIONLEDGER_EVIDENCE_ESCROW=off stops writing; nothing deletes a row."
 }
 
 timeline: "Entity journal + timelines\nEntityJournal · entity_decisions" {
@@ -165,7 +189,7 @@ timeline: "Entity journal + timelines\nEntityJournal · entity_decisions" {
 
 pg: "PostgreSQL · schema decisionledger" {
   class: datastore
-  tooltip: "decision_bundles, replay_logs, decision_resolution_attempts, reasoner_registrations, entity_events, entity_membership (app/audit/sql/02_tables.sql)."
+  tooltip: "decision_bundles, replay_logs, decision_resolution_attempts, reasoner_registrations, reasoner_registry, evidence_artifacts, entity_events, entity_membership (app/audit/sql/02_tables.sql)."
 }
 
 ###############################################################################
@@ -182,6 +206,10 @@ store -> pg: "INSERT bundle\n(append-only)" {class: to-store}
 
 submit.identity -> resolver: "native subject" {class: to-identity}
 submit.invoke -> gates: "GateRequest" {class: to-plugin}
+gates -> escrow: "put while\ndeciding" {class: from-plugin}
+# The escrow's own table is in PostgreSQL (its label names it). An edge to
+# pg would rank the escrow beside the bundle store write, where dagre routes
+# the registry's edge to pg through it, so none is drawn.
 
 registry -> submit.validate: "registration" {class: side}
 registry -> pg: {class: to-store}
@@ -189,6 +217,9 @@ registry -> pg: {class: to-store}
 ops -> replay: "replay_decision" {class: side}
 registry -> replay: {class: side}
 replay -> pg: "stored bundle,\nreplay log" {class: to-store}
+
+ops -> verify: "verify_decision" {class: side}
+verify -> pg: "stored bundle,\nheld artifacts" {class: to-store}
 
 ops -> timeline: "entity_decisions" {class: side}
 timeline -> pg: "journal, projection,\nbundles" {class: to-store}
