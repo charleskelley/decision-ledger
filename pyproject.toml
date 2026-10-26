@@ -92,6 +92,7 @@ reasoners = [
     "ato-reasoner",
     "example-reasoner",
     "mock-batch-reasoner",
+    "mock-daily-reasoner",
     "mock-stream-reasoner",
     "mock-text-reasoner",
 ]
@@ -143,6 +144,7 @@ members = ["reasoners/*", "gates/*", "integrations/*"]
 ato-reasoner = { workspace = true }
 example-reasoner = { workspace = true }
 mock-batch-reasoner = { workspace = true }
+mock-daily-reasoner = { workspace = true }
 mock-stream-reasoner = { workspace = true }
 mock-text-reasoner = { workspace = true }
 decisionledger-gate-rules = { workspace = true }

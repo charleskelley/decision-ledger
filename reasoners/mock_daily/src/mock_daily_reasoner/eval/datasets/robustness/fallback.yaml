@@ -1,0 +1,20 @@
+# Robustness sub-check — fallback. When the rules gate fails (any
+# fallback_kind: the driver swaps in a gate that raises), the ledger fails it
+# closed and the decision holds (DR-29). The gate is bound mandatory, so it
+# is invoked on every decision: the first trigger is an account within
+# tolerance, recorded, and held all the same; the second is an exception the
+# rule set would block, primed with the same account's previous day, recorded
+# on its own (the computation reads each day's row alone). No model is
+# called. Threshold: zero tolerance.
+
+cases:
+  - case_id: md-fallback-within-tolerance
+    event: {event_id: set-md-fallback-1, as_of: "2026-09-02T23:59:59Z", account_id: acct-md-fallback-1, target_amount: 1800.0, actual_amount: 1795.5}
+    fallback_kind: ruleset_unreadable
+    expected_action: HOLD
+  - case_id: md-fallback-severe-drift
+    priming_events:
+      - {event_id: set-md-fallback-2a, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-fallback-2, target_amount: 9000.0, actual_amount: 9045.0}
+    event: {event_id: set-md-fallback-2, as_of: "2026-09-02T23:59:59Z", account_id: acct-md-fallback-2, target_amount: 9000.0, actual_amount: 4500.0}
+    fallback_kind: gate_error
+    expected_action: HOLD

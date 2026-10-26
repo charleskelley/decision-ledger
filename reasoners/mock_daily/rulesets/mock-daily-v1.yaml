@@ -1,0 +1,48 @@
+# The daily mock's rule set for the rules gate (DR-28, DR-35).
+#
+# Every submission of mock-daily-reasoner names it (gate_config.ruleset_id:
+# mock-daily-v1), and the mock binds the rules gate mandatory, so the gate
+# evaluates it on every decision, recorded ones too. Every rule is evaluated:
+# the actions of the rules that match are the gate's permitted actions, and
+# enforcement takes the most restrictive; when none matches, the gate permits
+# default_action.
+#
+# The rules fire only outside the recorded band. The mock records an account
+# whose settlement drifted less than 1% from its target (its bypass rule
+# within-tolerance, mock_daily_reasoner/registry.py TOLERANCE_PCT), and the
+# mildest rule fires from 1%, so a recorded account matches no rule, the gate
+# permits the default (ALLOW), and the record keeps its action; an exception
+# matches at least one rule and is decided by the size of its drift. The
+# rules read only abs_drift_pct, which every row carries
+# (mock_daily_reasoner/compute.py): one predicate that cannot evaluate would
+# fail the whole evaluation and hold the decision.
+#
+# Deployment configuration, not a plugin asset: the rules gate reads it from
+# RULES_GATE_RULESETS_DIR when the ledger starts. `make prepare-rulesets`
+# stages it in outputs/stage/rulesets with every other member's rule sets.
+# reasoner_id is required: the gate refuses (fails closed) a submission from
+# any other reasoner that names this rule set.
+
+ruleset_id: mock-daily-v1
+version: "1"
+reasoner_id: mock-daily-reasoner
+description: >
+  The daily mock's settlement reconciliation: a settlement that drifted 20%
+  or more from its target is blocked for investigation, one that drifted 5%
+  or more is held for review, one that drifted 1% or more is released after
+  the account's contact confirms it, and one within 1% is released.
+default_action: ALLOW
+rules:
+  - rule_id: drift-severe
+    description: Drifted 20% or more from the target; block the settlement and investigate.
+    when: {kind: compare, field: feature_set.abs_drift_pct, op: ge, value: 20.0}
+    action: BLOCK
+    required_controls: [settlement_investigation]
+  - rule_id: drift-major
+    description: Drifted 5% or more from the target; hold the settlement for review.
+    when: {kind: compare, field: feature_set.abs_drift_pct, op: ge, value: 5.0}
+    action: HOLD
+  - rule_id: drift-minor
+    description: Drifted 1% or more from the target; release it once the account's contact confirms.
+    when: {kind: compare, field: feature_set.abs_drift_pct, op: ge, value: 1.0}
+    action: CHALLENGE

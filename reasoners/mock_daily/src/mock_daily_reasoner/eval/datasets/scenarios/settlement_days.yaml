@@ -1,0 +1,47 @@
+# Consistency scenarios for the daily mock.
+#
+# The computation reads each row on its own (mock_daily_reasoner/compute.py),
+# so the order of a day's rows never changes a decision. These scenarios pin
+# that property through the whole pipeline: the computation, the assembler,
+# one submission per row (records within tolerance, exceptions gated), the
+# rules gate bound mandatory over the member's rule set (mock-daily-v1) on
+# every decision, and the ledger. Each ordering is one day the driver runs
+# from fresh state; its last row is the trigger. No model is called.
+#
+# Expected stable results: ALLOW (an account within tolerance, recorded under
+# within-tolerance; the rules gate ran on it and permitted the default) and
+# HOLD (an account 8% short of its target, an exception the rules gate holds:
+# drift-major and drift-minor match).
+
+scenarios:
+  - scenario_id: md-within-tolerance
+    description: >
+      An account that settled 0.4% short of its target, reconciled in a day
+      with a 3% overage, a 25% shortfall, and another account within
+      tolerance: recorded ALLOW under within-tolerance in every ordering, the
+      rules gate permitting its default.
+    orderings:
+      - ordering_id: extract-order
+        events:
+          - &tolerance_1 {event_id: set-md-tolerance-1, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-tolerance-1, target_amount: 5000.0, actual_amount: 5150.0}
+          - &tolerance_2 {event_id: set-md-tolerance-2, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-tolerance-2, target_amount: 12000.0, actual_amount: 9000.0}
+          - &tolerance_3 {event_id: set-md-tolerance-3, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-tolerance-3, target_amount: 800.0, actual_amount: 803.2}
+          - &tolerance_t {event_id: set-md-tolerance-trigger, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-tolerance-t, target_amount: 2500.0, actual_amount: 2490.0}
+      - ordering_id: reversed-precursors
+        events: [*tolerance_3, *tolerance_2, *tolerance_1, *tolerance_t]
+
+  - scenario_id: md-major-drift
+    description: >
+      An account that settled 8% short of its target, reconciled in a day
+      with an exact settlement, a 15% overage, and a 2% overage: no bypass
+      rule covers it, so the rules gate decides it, and holds it in every
+      ordering.
+    orderings:
+      - ordering_id: extract-order
+        events:
+          - &major_1 {event_id: set-md-major-1, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-major-1, target_amount: 1500.0, actual_amount: 1500.0}
+          - &major_2 {event_id: set-md-major-2, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-major-2, target_amount: 40000.0, actual_amount: 46000.0}
+          - &major_3 {event_id: set-md-major-3, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-major-3, target_amount: 7000.0, actual_amount: 7140.0}
+          - &major_t {event_id: set-md-major-trigger, as_of: "2026-09-01T23:59:59Z", account_id: acct-md-major-t, target_amount: 10000.0, actual_amount: 9200.0}
+      - ordering_id: reversed-precursors
+        events: [*major_3, *major_2, *major_1, *major_t]

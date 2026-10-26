@@ -1,0 +1,15 @@
+# Robustness sub-check — schema failure. When the rules gate returns no
+# usable verdict, enforcement Tier 1 must hold the decision. The driver
+# computes and assembles each row as the mock does (recorded within
+# tolerance, gated otherwise) and enforces a mandatory rules-gate record with
+# verdict=None; no gate runs and nothing is written. The gate is mandatory,
+# so the account within tolerance is held too: a record's own ALLOW does not
+# outrank a mandatory gate that failed. Threshold: zero tolerance.
+
+cases:
+  - case_id: md-malformed-within-tolerance
+    event: {event_id: set-md-malformed-1, as_of: "2026-09-02T23:59:59Z", account_id: acct-md-malformed-1, target_amount: 2000.0, actual_amount: 2004.0}
+    expected_action: HOLD
+  - case_id: md-malformed-exception
+    event: {event_id: set-md-malformed-2, as_of: "2026-09-02T23:59:59Z", account_id: acct-md-malformed-2, target_amount: 3000.0, actual_amount: 3300.0}
+    expected_action: HOLD

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# mock-daily-reasoner — the deterministic computation with exceptions (DR-35)
+# =============================================================================
+#
+# A uv workspace member and one of the reference reasoner patterns: a mock
+# that demonstrates the framework's contracts in place, not a product. Once a
+# day it reconciles each account's settlement: pure arithmetic over a target
+# (the amount the books expect to settle) and an actual (the amount the
+# settlement file reports) gives the drift between them. It records every
+# account within tolerance under its one bypass rule and submits the rest,
+# its exceptions, in gate mode, one decision per request. The rules gate is
+# bound mandatory, so it runs on every decision, recorded ones too: it
+# decides the exceptions by the severity of their drift, and a rule that
+# fires on a recorded account raises its action. It has no service and no
+# infrastructure of its own: its CLI reaches the ledger over HTTP, and the
+# ledger registers it by its plugin, by a registration file, or by a PUT with
+# the plugin excluded. The framework never depends on it; deployment
+# composition lives in the root `reasoners` dependency group. Discovery
+# happens through the two entry points below, whose name must equal the
+# registration's `reasoner_id`. The rules gate is a dependency because the
+# eval driver composes it over the member's own rule set.
+
+[project]
+name = "mock-daily-reasoner"
+version = "0.1.0"
+description = "Reference reasoner pattern for DecisionLedger: a deterministic computation with exceptions (mock)."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Charles Kelley" },
+]
+dependencies = [
+    "decision-ledger",
+    "decisionledger-gate-rules",
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.13.1",
+    "pyyaml>=6.0,<7",
+]
+
+[project.entry-points."decisionledger.reasoners"]
+mock-daily-reasoner = "mock_daily_reasoner.plugin:PLUGIN"
+
+[project.entry-points."decisionledger.eval_adapters"]
+mock-daily-reasoner = "mock_daily_reasoner.eval.adapter:ADAPTER"
+
+[project.scripts]
+mock-daily-reasoner = "mock_daily_reasoner.__main__:main"
+
+[tool.uv.sources]
+decision-ledger = { workspace = true }
+decisionledger-gate-rules = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mock_daily_reasoner"]
