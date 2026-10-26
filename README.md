@@ -273,10 +273,11 @@ make eval-gate-policy_rag REASONER=ato-reasoner
 
 The ledger refuses to start until every corpus a served registration binds
 is loaded: with `DECISIONLEDGER_REASONERS` blank it serves every installed
-reasoner — ATO, the example reasoner, the batch mock, which binds only the
-rules gate, and the stream and text mocks — whose policy bindings name
-`ato-policy`, `example-policy`, `mock-stream-practices`, and the text mock's
-two corpora, `mock-text-regulatory` and `mock-text-practice`, and `make
+reasoner — ATO, the example reasoner, the batch and daily mocks, which bind
+only the rules gate (the daily mock binds it mandatory), and the stream and
+text mocks — whose policy bindings name `ato-policy`, `example-policy`,
+`mock-stream-practices`, and the text mock's two corpora,
+`mock-text-regulatory` and `mock-text-practice`, and `make
 prepare-reasoners` loads them all.
 
 All infrastructure runs locally via `docker compose up`; no cloud account is

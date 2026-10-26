@@ -176,7 +176,11 @@ decision-ledger/
 │   └── policy_rag/          # RAG policy gate (policy_rag_gate): retrieval, prompts, LLM adapters, own schema, eval, gate.mk, compose.yaml
 ├── reasoners/               # One uv workspace member per reasoner
 │   ├── account_takeover/    # pyproject.toml, reasoner.mk, compose.yaml, src/ato_reasoner/, tests/
-│   └── example/             # The minimal example reasoner (widgets), src/example_reasoner/
+│   ├── example/             # The minimal example reasoner (widgets), src/example_reasoner/
+│   ├── mock_stream/         # mock-stream-reasoner: the real-time event scorer pattern (DR-35)
+│   ├── mock_batch/          # mock-batch-reasoner: the daily batch scorer pattern (DR-35)
+│   ├── mock_text/           # mock-text-reasoner: the LLM-native classifier pattern (DR-35)
+│   └── mock_daily/          # mock-daily-reasoner: the deterministic computation with exceptions pattern (DR-35)
 ├── integrations/mcp/        # The MCP server (decisionledger-mcp), a client of the ledger
 ├── schemas/                 # submission-v2.json, bundle-v2.json (exported by make schemas)
 ├── conformance/             # Black-box HTTP contract suite (make conformance)
@@ -226,6 +230,7 @@ tests/
 ├── test_framework_boundary.py
 └── test_schemas.py                 # fails when schemas/*.json drift from the models
 reasoners/account_takeover/tests/   # ATO unit, integration, generator, and eval-driver tests
+reasoners/mock_*/tests/             # the mocks' tests: Docker-free, over the in-memory ledger, except the stream mock's one integration acceptance test
 gates/policy_rag/tests/             # RAG gate unit and integration tests (eval/: its harness's unit tests)
 conformance/                        # the HTTP contract suite (marker `conformance`; make conformance)
 ```

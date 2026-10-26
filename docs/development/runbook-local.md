@@ -18,10 +18,10 @@ This document tracks what can actually be run today. Section 0 is the end-to-end
 
 ```bash
 # 1. Install the framework and every workspace member: the reasoners
-#    (ato-reasoner, example-reasoner, and the stream, batch, and text mocks,
-#    mock-stream-reasoner, mock-batch-reasoner, and mock-text-reasoner), the
-#    gates (rules, RAG policy), and the MCP integration, with their entry
-#    points
+#    (ato-reasoner, example-reasoner, and the stream, batch, text, and daily
+#    mocks, mock-stream-reasoner, mock-batch-reasoner, mock-text-reasoner,
+#    and mock-daily-reasoner), the gates (rules, RAG policy), and the MCP
+#    integration, with their entry points
 uv sync
 
 # 2. Start Postgres (framework), Elasticsearch (included from
@@ -39,15 +39,16 @@ make prepare-reasoners   # = make prepare-account_takeover prepare-example prepa
 
 # 4. Confirm the plugins are discoverable
 uv run python -c "from app.plugins import discover_plugins; print([p.registration.reasoner_id for p in discover_plugins()])"
-# Expected: ['ato-reasoner', 'example-reasoner', 'mock-batch-reasoner', 'mock-stream-reasoner', 'mock-text-reasoner']
+# Expected: ['ato-reasoner', 'example-reasoner', 'mock-batch-reasoner', 'mock-daily-reasoner', 'mock-stream-reasoner', 'mock-text-reasoner']
 
 # 5. Give the ledger API keys (in .env, or the environment): one per reasoner
 #    and the operator's. Every /api/v1 route needs one in X-DecisionLedger-Key.
-export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key"
+export DECISIONLEDGER_API_KEYS="example-reasoner:ex-key,ato-reasoner:ato-key,mock-stream-reasoner:ms-key,mock-batch-reasoner:mb-key,mock-text-reasoner:mt-key,mock-daily-reasoner:md-key"
 export DECISIONLEDGER_OPERATOR_KEY=op-key
 
-# 6. Stage the members' rule sets for the rules gate (today the batch mock's
-#    mock-batch-v1.yaml) and point the ledger at them before it starts
+# 6. Stage the members' rule sets for the rules gate (the batch mock's
+#    mock-batch-v1.yaml and the daily mock's mock-daily-v1.yaml) and point
+#    the ledger at them before it starts
 make prepare-rulesets
 export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
 
@@ -56,7 +57,9 @@ export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets
 uv run uvicorn --factory app.main:create_app --reload     # or: make serve
 ```
 
-Rule sets for the rules gate are deployment config, read from one directory when the ledger builds the gate. `make prepare-rulesets` stages every member's `rulesets/` in `outputs/stage/rulesets`, afresh (an empty directory when no member ships one); today it stages the batch mock's `mock-batch-v1.yaml`, the rule set the mock's exceptions are decided under. The ledger reads the directory only when it starts, so `export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets` before `make serve` (step 6). The rules gate refuses a directory that does not exist, and the ledger does not start; left blank, the rules gate has no rule sets and holds every decision routed to it (each of the batch mock's exceptions fails closed with `unknown_ruleset`).
+Rule sets for the rules gate are deployment config, read from one directory when the ledger builds the gate. `make prepare-rulesets` stages every member's `rulesets/` in `outputs/stage/rulesets`, afresh (an empty directory when no member ships one); it stages two files: the batch mock's `mock-batch-v1.yaml`, the rule set its exceptions are decided under, and the daily mock's `mock-daily-v1.yaml`, the rule set every one of its decisions is decided under. The ledger reads the directory only when it starts, so `export RULES_GATE_RULESETS_DIR=$(pwd)/outputs/stage/rulesets` before `make serve` (step 6). The rules gate refuses a directory that does not exist, and the ledger does not start; left blank, the rules gate has no rule sets and holds every decision routed to it: each of the batch mock's exceptions fails closed with `unknown_ruleset`, and so does every one of the daily mock's decisions, recorded ones too, since the daily mock binds the rules gate mandatory.
+
+The daily mock runs in this composition, through its plugin: it needs no asset root and no service, and it binds only the rules gate, mandatory. With the ledger running (step 7), its key given (`mock-daily-reasoner:md-key`, step 5), and the rule sets staged (step 6), run a day from a second shell (`MOCK_DAILY_LEDGER_URL=http://localhost:8000 MOCK_DAILY_LEDGER_KEY=md-key make run-mock_daily`): one decision per account, the accounts within tolerance recorded and the exceptions gated, with the rules gate on every one. [Reference reasoner patterns](../design/reasoners/patterns.md#daily-the-deterministic-computation-with-exceptions) walks through it.
 
 In a second shell:
 
@@ -209,7 +212,7 @@ A reasoner has one source: a ledger that composes a plugin or reads a registrati
 
 ```bash
 docker compose exec postgres psql -U decisionledger -d decisionledger \
-  -c "delete from decisionledger.reasoner_registry where reasoner_id in ('mock-stream-reasoner', 'mock-batch-reasoner', 'mock-text-reasoner')"
+  -c "delete from decisionledger.reasoner_registry where reasoner_id in ('mock-stream-reasoner', 'mock-batch-reasoner', 'mock-text-reasoner', 'mock-daily-reasoner')"
 ```
 
 ---

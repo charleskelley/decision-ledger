@@ -4,7 +4,11 @@ The reference is split across one page per framework package,
 [`core`](core.md), [`app`](app.md), and [`eval`](eval.md), and one page per
 workspace member: the reasoners
 [`ato_reasoner`](reasoners/account-takeover.md) and
-[`example_reasoner`](reasoners/example.md), the gates
+[`example_reasoner`](reasoners/example.md), the reference-pattern mocks
+(DR-35) [`mock_stream_reasoner`](reasoners/mock-stream.md),
+[`mock_batch_reasoner`](reasoners/mock-batch.md),
+[`mock_text_reasoner`](reasoners/mock-text.md), and
+[`mock_daily_reasoner`](reasoners/mock-daily.md), the gates
 [`policy_rag_gate`](gates/policy-rag.md) and [`rules_gate`](gates/rules.md),
 and the MCP integration [`decisionledger_mcp`](integrations/mcp.md).
 [Identity](identity.md) is an index into the identity contract, which
