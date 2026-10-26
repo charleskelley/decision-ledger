@@ -442,8 +442,11 @@ reasoner itself.
 
 ## New-reasoner checklist
 
-A reasoner joins a deployment with no change to the framework. Pick how it
-reaches the ledger.
+A reasoner joins a deployment with no change to the framework.
+[Reference reasoner patterns](patterns.md) shows a running member for each
+of the four reference patterns: a real-time event scorer, a daily batch
+scorer, an LLM-native classifier, and a deterministic computation with
+exceptions. Pick how your reasoner reaches the ledger.
 
 ### Over HTTP
 
@@ -473,7 +476,8 @@ For a reasoner that runs as its own service, in any language.
       with `PUT /api/v1/reasoners/{reasoner_id}` and the operator key
       (`app.client.HttpClient.register` does it). `201` creates it, `200`
       replaces it with a new version (or finds it unchanged); the ledger
-      keeps it in Postgres and serves it after a restart.
+      serves it from the next decision on, keeps it in Postgres, and serves
+      it after a restart too.
     - **By file:** add it to the deployment's registration file
       (`DECISIONLEDGER_REGISTRATIONS`; `conformance/registrations.yaml` is a
       worked example); it changes when the deployment restarts with a new
@@ -565,9 +569,10 @@ reasoners/<domain>/
    pipeline that submits through a `LedgerClient`.
    `LocalClient.from_settings()` composes the ledger in your process
    (plugins filtered by `DECISIONLEDGER_REASONERS`, the gates, the
-   registration file) and writes to the same Postgres; `HttpClient` calls a
-   ledger service. The reference reasoner runs as its own FastAPI service
-   and picks between them at startup (`ATO_LEDGER_URL` set: HTTP).
+   registration file, and the registrations written over the API) and
+   writes to the same Postgres; `HttpClient` calls a ledger service. The
+   reference reasoner runs as its own FastAPI service and picks between
+   them at startup (`ATO_LEDGER_URL` set: HTTP).
 6. **Ship gate assets.** Prompt templates go in `prompts/` (a top-level
    `system:` key carries the system message; template ids are global
    across a deployment; a change is a new file). Name your corpus on your
@@ -678,9 +683,9 @@ A new reasoner is correct when it needs no edit under `core/`, `app/`, or
   services.
 
 The executable proof is the test doubles: `tests/_stub_reasoner` (a
-second, minimal reasoner), `tests/_fake_gate`, and `tests/_stub_resolver`,
-which the framework suite composes without any framework module knowing
-they exist.
+minimal, test-only reasoner), `tests/_fake_gate`, and
+`tests/_stub_resolver`, which the framework suite composes without any
+framework module knowing they exist.
 
 ---
 

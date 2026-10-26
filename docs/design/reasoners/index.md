@@ -10,12 +10,14 @@ never imports a reasoner (DR-26, DR-31).
 
 A reasoner in this repository is a uv workspace member under
 `reasoners/<name>/` that publishes its registration through a
-`decisionledger.reasoners` entry point. Two ship here: the reference
-reasoner `reasoners/account_takeover/` (import package `ato_reasoner`) and
-the documented example `reasoners/example/` (import package
-`example_reasoner`). A reasoner that runs elsewhere, in any language,
-registers through the deployment's registration file instead and submits
-over HTTP.
+`decisionledger.reasoners` entry point. Six ship here: the reference
+reasoner `reasoners/account_takeover/` (import package `ato_reasoner`), the
+one domain reasoner; the documented example `reasoners/example/` (import
+package `example_reasoner`); and four mocks, one per
+[reference reasoner pattern](patterns.md), which demonstrate the contracts
+on imaginary domains. A reasoner that runs elsewhere, in any language,
+registers through the deployment's registration file or over the API
+instead, and submits over HTTP.
 
 This page covers the **abstract** picture: what a reasoner can be, and what
 it must provide or have available to hook in. The contract itself, field by
@@ -193,24 +195,35 @@ is the ledger's. The ATO reference is `build_submission` in
 ### Packaging and registration
 
 The ledger knows a reasoner by its `ReasonerRegistration`: the gate set
-(`GateBinding`s, mandatory or advisory), the bypass rules, the recordable
-actions, any native namespaces, and the enforcement profile (the
-`feature_set` key that marks a novel entity for Tier 3, and the
-jurisdiction groups whose policies conflict for Tier 5). A registration
-reaches the ledger one of two ways:
+(`GateBinding`s, mandatory or advisory, each with the gate's configuration
+for this reasoner), the bypass rules, the recordable actions, any native
+namespaces, and the enforcement profile (the `feature_set` key that marks a
+novel entity for Tier 3, and the jurisdiction groups whose policies
+conflict for Tier 5). A registration reaches the ledger one of three ways
+(DR-33):
 
 - **A plugin.** A workspace member publishes a `ReasonerPlugin`
   (`registration`, `prompts_dir`, `corpus_dir`) under
   `decisionledger.reasoners` and an `EvalAdapter` under
-  `decisionledger.eval_adapters`. A gate that reads per-reasoner assets,
-  such as the RAG policy gate, serves only reasoners registered this way.
+  `decisionledger.eval_adapters`.
 - **The registration file.** The deployment lists the registration in
-  `DECISIONLEDGER_REGISTRATIONS`; the reasoner ships no code or assets to
-  the ledger.
+  `DECISIONLEDGER_REGISTRATIONS`; the reasoner installs no code in the
+  ledger.
+- **The API.** The operator writes the registration with
+  `PUT /api/v1/reasoners/{reasoner_id}` and the operator key; the ledger
+  admits it as it admits a registration at startup, keeps it in Postgres,
+  and serves it from the next decision on. A `PUT` with a changed
+  registration replaces it with a new version.
 
-Either way the ledger serves it read-only at `GET /api/v1/reasoners`, with
-its `registration_version`. See the
-[new-reasoner checklist](reasoner-handoff.md#new-reasoner-checklist).
+A reasoner has one source: the ledger refuses to start when two sources
+register one `reasoner_id`, and refuses a `PUT` for a plugin's or the
+file's reasoner (`409 REGISTRATION_SOURCE_IMMUTABLE`). A gate that reads
+per-reasoner assets reads a plugin reasoner's from its plugin, and those of
+a reasoner registered by file or over the API from wherever the gate
+documents: the RAG policy gate reads them from its asset root. The ledger
+serves every registration live at `GET /api/v1/reasoners`, each with its
+`registration_version` and its source. See [Registration](../registration.md)
+and the [new-reasoner checklist](reasoner-handoff.md#new-reasoner-checklist).
 
 ### A client and a key
 
